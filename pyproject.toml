@@ -35,6 +35,9 @@ firmquant = "firmquant.cli:main"
 where = ["src"]
 include = ["firmquant*"]
 
+[tool.setuptools.package-data]
+"firmquant.resources" = ["*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
