@@ -467,7 +467,8 @@ class PaperBroker:
             return "MARKET_FACT_SESSION_MISMATCH"
         lower = instrument.lower_limit
         upper = instrument.upper_limit
-        assert lower is not None and upper is not None
+        if lower is None or upper is None:
+            return "PRICE_LIMIT_FACT_MISSING"
         if not lower.value <= command.limit_price.value <= upper.value:
             return "LIMIT_PRICE_OUT_OF_BOUNDS"
         if command.limit_price.decimal_places > instrument.price_precision:
@@ -743,7 +744,10 @@ class PaperBroker:
             quote=current_quote,
         )
         if price is None:
-            assert price_reason is not None
+            if price_reason is None:
+                raise DomainValidationError(
+                    "paper fill rejection is missing a deterministic reason"
+                )
             self._reasons[broker_order_id] = price_reason
             return PaperMatchResult(order=order, fill=None, reason_code=price_reason)
         remaining = order.requested_shares.value - order.filled_shares.value
