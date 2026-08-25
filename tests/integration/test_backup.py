@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -98,3 +100,39 @@ def test_backup_manifest_never_contains_source_paths_or_account_contents(tmp_pat
     assert "very-sensitive-account-name" not in manifest
     assert "secret-value" not in manifest
     assert str(tmp_path) not in manifest
+
+
+def test_backup_fsync_uses_windows_compatible_writable_handles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = _database_with_audit(tmp_path / "firmquant.sqlite3")
+    account_state = tmp_path / "account_state.json"
+    account_state.write_text('{"schema_version":1}', encoding="utf-8")
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    real_fsync = os.fsync
+    verified_descriptors = 0
+
+    def require_writable_descriptor(descriptor: int) -> None:
+        nonlocal verified_descriptors
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            try:
+                os.write(descriptor, b"")
+            except OSError as error:
+                raise AssertionError("fsync descriptor is not writable on Windows") from error
+        verified_descriptors += 1
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", require_writable_descriptor)
+    try:
+        backup_state(
+            database,
+            backup_root,
+            account_state_path=account_state,
+            created_at=datetime(2026, 8, 25, 3, tzinfo=UTC),
+        )
+    finally:
+        database.close()
+
+    assert verified_descriptors >= 3

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -46,12 +47,27 @@ def test_module_help_is_import_safe_and_successful() -> None:
         cwd=repository_root,
         check=False,
         capture_output=True,
+        encoding="utf-8",
         text=True,
     )
 
     assert completed.returncode == 0
     assert "实盘默认关闭" in completed.stdout
     assert "Traceback" not in completed.stderr
+
+
+def test_help_reconfigures_redirected_legacy_stream_to_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffer = io.BytesIO()
+    legacy_stdout = io.TextIOWrapper(buffer, encoding="cp1252", write_through=True)
+    monkeypatch.setattr(sys, "stdout", legacy_stdout)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--help"])
+
+    assert exit_info.value.code == 0
+    assert "实盘默认关闭" in buffer.getvalue().decode("utf-8")
 
 
 @pytest.mark.parametrize("mode", ["paper", "shadow", "canary", "live"])

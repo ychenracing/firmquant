@@ -81,7 +81,7 @@ def _copy_fsynced(source: Path, destination: Path) -> None:
         shutil.copyfile(source, destination)
         if os.name != "nt":
             destination.chmod(0o600)
-        with destination.open("rb") as stream:
+        with destination.open("r+b") as stream:
             os.fsync(stream.fileno())
     except OSError as exc:
         raise BackupError("cannot copy account state into backup") from exc

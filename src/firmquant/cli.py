@@ -72,9 +72,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_utf8_output() -> None:
+    """Keep Chinese operator output deterministic when Windows redirects stdio."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse and dispatch one local operator command."""
 
+    _configure_utf8_output()
     arguments = build_parser().parse_args(argv)
     handler = cast(Callable[[argparse.Namespace], int], arguments.handler)
     return handler(arguments)

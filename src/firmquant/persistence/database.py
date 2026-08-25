@@ -183,7 +183,7 @@ class Database:
             target = None
             if os.name != "nt":
                 target_path.chmod(0o600)
-            with target_path.open("rb") as stream:
+            with target_path.open("r+b") as stream:
                 os.fsync(stream.fileno())
         except DatabaseCorrupt:
             if target is not None:
