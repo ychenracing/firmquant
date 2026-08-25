@@ -37,6 +37,8 @@ jobs:
         with:
           version: "0.11.33"
           enable-cache: true
+      - name: Preserve exact uquant source bytes
+        run: git config --global core.autocrlf false
       - name: Sync exact locked environment
         run: uv sync --frozen --extra dev
       - name: Verify locked uquant identity

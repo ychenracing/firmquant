@@ -34,6 +34,16 @@ SQLite 账本在启动时验证以下设置：
 备份通过 SQLite online backup 写入临时 bundle，验证数据库、schema、审计 hash chain 和可选 uquant
 AccountState 后再原子发布。恢复验证在隔离临时目录中完成，不覆盖生产状态，也不删除事故现场。
 
+锁定的 uquant package manifest 按确定性 wheel 的 LF 原始字节计算。Windows 上必须在执行 `uv sync`
+前禁用 Git 的 CRLF checkout 转换，否则安装内容不再等于审查过的 wheel，身份校验会失败关闭：
+
+```powershell
+git config --global core.autocrlf false
+```
+
+该设置只影响文本 checkout，不放宽任何 fingerprint。若组织策略不允许修改用户级 Git 配置，应由受控构建
+流程安装并验证 `SOURCE_BASELINE.md` 记录 SHA-256 的确定性 wheel，而不是跳过 package manifest 校验。
+
 ## MiniQMT/XtQuant 前置条件
 
 实机只读接入前，操作员必须完成以下事项：
@@ -53,6 +63,7 @@ AccountState 后再原子发布。恢复验证在隔离临时目录中完成，�
 在仓库根目录执行：
 
 ```powershell
+git config --global core.autocrlf false
 uv sync --frozen --extra dev
 uv run python scripts/verify_source_baseline.py
 uv run python scripts/windows_smoke.py

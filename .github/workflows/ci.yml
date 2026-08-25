@@ -37,6 +37,9 @@ jobs:
         with:
           version: "0.11.33"
           enable-cache: true
+      - name: Preserve exact uquant source bytes on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - name: Sync locked environment
         run: uv sync --frozen --extra dev
       - name: Verify uquant identity
