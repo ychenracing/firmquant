@@ -18,6 +18,7 @@ from firmquant.domain.broker_facts import (
     BrokerFillFact,
     BrokerOrderFact,
     BrokerOrderStatus,
+    FillStatus,
     Side,
 )
 from firmquant.domain.events import (
@@ -906,6 +907,121 @@ class ExecutionLedgerRepository:
             """,
             (fill.broker_fill_id, *stable),
         )
+
+    def reconcile_broker_fact(
+        self,
+        aggregate: OrderAggregate,
+        fact: BrokerOrderFact,
+        fills: tuple[BrokerFillFact, ...],
+        *,
+        received_at: datetime,
+    ) -> OrderAggregate:
+        """Apply queried broker truth idempotently without creating a write attempt."""
+
+        if aggregate.broker_order_id not in {None, fact.broker_order_id}:
+            raise PersistenceConflict("queried broker order identity changed")
+        if (
+            fact.client_order_id != aggregate.intent.uquant_order_id
+            or fact.symbol != aggregate.intent.symbol
+            or fact.side is not aggregate.intent.side
+            or fact.requested_shares != aggregate.intent.requested_shares
+        ):
+            raise PersistenceConflict("queried broker order contradicts execution intent")
+        ordered_fills = tuple(
+            sorted(fills, key=lambda item: (item.event_sequence, item.broker_fill_id))
+        )
+        if any(
+            fill.broker_order_id != fact.broker_order_id
+            or fill.symbol != fact.symbol
+            or fill.side is not fact.side
+            or fill.status is not FillStatus.CONFIRMED
+            for fill in ordered_fills
+        ):
+            raise PersistenceConflict("queried broker fill contradicts mapped order")
+        if sum(fill.shares.value for fill in ordered_fills) != fact.filled_shares.value:
+            raise PersistenceConflict("queried broker fills do not prove cumulative shares")
+
+        self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
+        current = aggregate
+        if fact.status is BrokerOrderStatus.REJECTED:
+            return self.transition(
+                current,
+                BrokerRejected(
+                    event_id=_stable_event_id(
+                        "recovery-rejected",
+                        fact.broker_order_id,
+                        fact.event_sequence,
+                    ),
+                    reason_code="BROKER_REJECTED",
+                ),
+                occurred_at=received_at,
+            )
+        if fact.status is BrokerOrderStatus.EXPIRED:
+            return self.transition(
+                current,
+                OrderExpired(
+                    event_id=_stable_event_id(
+                        "recovery-expired",
+                        fact.broker_order_id,
+                        fact.event_sequence,
+                    ),
+                    reason_code="BROKER_EXPIRED",
+                ),
+                occurred_at=received_at,
+            )
+        if fact.status is BrokerOrderStatus.UNKNOWN:
+            return self.transition(
+                current,
+                SubmitOutcomeUnknown(
+                    event_id=_stable_event_id(
+                        "recovery-unknown",
+                        fact.broker_order_id,
+                        fact.event_sequence,
+                    ),
+                    diagnostic_code="BROKER_STATUS_UNKNOWN",
+                ),
+                occurred_at=received_at,
+            )
+        if fact.status is not BrokerOrderStatus.CANCELLED:
+            current = self.transition(
+                current,
+                BrokerAcknowledged(
+                    event_id=_stable_event_id(
+                        "ack", fact.broker_order_id, fact.event_sequence
+                    ),
+                    broker_order_id=fact.broker_order_id,
+                ),
+                occurred_at=received_at,
+            )
+        for fill in ordered_fills:
+            self._record_fill(fill, execution_id=current.intent.execution_id)
+            current = self.transition(
+                current,
+                FillReported(
+                    event_id=_stable_event_id("fill", fill.broker_fill_id),
+                    broker_fill_id=fill.broker_fill_id,
+                    broker_order_id=fill.broker_order_id,
+                    shares=fill.shares,
+                    price=fill.price,
+                ),
+                occurred_at=fill.event_time,
+            )
+        if fact.status is BrokerOrderStatus.CANCELLED:
+            current = self.transition(
+                current,
+                CancelConfirmed(
+                    event_id=_stable_event_id(
+                        "recovery-cancelled",
+                        fact.broker_order_id,
+                        fact.event_sequence,
+                    ),
+                    broker_order_id=fact.broker_order_id,
+                ),
+                occurred_at=received_at,
+            )
+        if current.filled_shares != fact.filled_shares:
+            raise PersistenceConflict("recovered aggregate differs from broker cumulative fill")
+        return current
 
     def record_submit_result(
         self,
