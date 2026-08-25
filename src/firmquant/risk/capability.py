@@ -13,6 +13,7 @@ from firmquant.broker.gateway import (
     BrokerGateway,
     BrokerHealth,
     BrokerOrderCommand,
+    _broker_write_authorization_scope,
 )
 from firmquant.config import Mode, Settings
 from firmquant.domain.broker_facts import (
@@ -109,15 +110,9 @@ class WriteAuthorizationContext:
             ("unresolved order count", self.unresolved_order_count),
             ("submitting unresolved count", self.submitting_unresolved_count),
         ):
-            if (
-                isinstance(count_value, bool)
-                or not isinstance(count_value, int)
-                or count_value < 0
-            ):
+            if isinstance(count_value, bool) or not isinstance(count_value, int) or count_value < 0:
                 raise DomainValidationError(f"{count_label} must be a nonnegative integer")
-        if self.gate_decision is not None and not isinstance(
-            self.gate_decision, GateDecision
-        ):
+        if self.gate_decision is not None and not isinstance(self.gate_decision, GateDecision):
             raise DomainTypeError("write context gate decision must be GateDecision or null")
         boolean_values = (
             self.startup_reconciliation_passed,
@@ -354,11 +349,13 @@ class BrokerWriteCapability:
 
     def submit_order(self, command: BrokerOrderCommand) -> BrokerOrderFact:
         self._authorize(WriteOperation.SUBMIT, command)
-        return self._gateway.submit_order(command)
+        with _broker_write_authorization_scope():
+            return self._gateway.submit_order(command)
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrderFact:
         self._authorize(WriteOperation.CANCEL, broker_order_id)
-        return self._gateway.cancel_order(broker_order_id)
+        with _broker_write_authorization_scope():
+            return self._gateway.cancel_order(broker_order_id)
 
     def subscribe(self, callback_sink: BrokerEventSink) -> None:
         self._gateway.subscribe(callback_sink)

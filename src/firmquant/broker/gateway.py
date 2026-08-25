@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol, runtime_checkable
@@ -25,6 +27,7 @@ from firmquant.domain.values import Price, Shares, Symbol
 _EXECUTION_ID = re.compile(r"^exec_[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DIAGNOSTIC = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_WRITE_AUTHORIZED: ContextVar[bool] = ContextVar("firmquant_broker_write_authorized", default=False)
 
 
 class BrokerGatewayError(RuntimeError):
@@ -41,6 +44,23 @@ class BrokerFactUnavailable(BrokerGatewayError):
 
 class BrokerWriteForbidden(BrokerGatewayError):
     """Raised by read-only gateways before any write side effect."""
+
+
+@contextmanager
+def _broker_write_authorization_scope() -> Iterator[None]:
+    """Mark only the dynamically authorized broker call in the current context."""
+
+    token = _WRITE_AUTHORIZED.set(True)
+    try:
+        yield
+    finally:
+        _WRITE_AUTHORIZED.reset(token)
+
+
+def _broker_write_is_authorized() -> bool:
+    """Return whether the current call is inside BrokerWriteCapability authorization."""
+
+    return _WRITE_AUTHORIZED.get()
 
 
 def _canonical_text(value: str, *, label: str, maximum: int = 256) -> None:
@@ -78,9 +98,7 @@ class BrokerHealth:
             if not isinstance(value, bool):
                 raise DomainTypeError(f"broker health {label} must be bool")
         _aware(self.observed_at, label="broker health observed_at")
-        if not isinstance(self.diagnostic_code, str) or _DIAGNOSTIC.fullmatch(
-            self.diagnostic_code
-        ) is None:
+        if not isinstance(self.diagnostic_code, str) or _DIAGNOSTIC.fullmatch(self.diagnostic_code) is None:
             raise DomainValidationError("broker health diagnostic code must be canonical")
         if not self.connected and (self.read_healthy or self.write_healthy):
             raise DomainValidationError("disconnected broker cannot report healthy I/O")
@@ -103,13 +121,9 @@ class BrokerOrderCommand:
     strategy_session: date
 
     def __post_init__(self) -> None:
-        if not isinstance(self.execution_id, str) or _EXECUTION_ID.fullmatch(
-            self.execution_id
-        ) is None:
+        if not isinstance(self.execution_id, str) or _EXECUTION_ID.fullmatch(self.execution_id) is None:
             raise DomainValidationError("broker command execution id is invalid")
-        if not isinstance(self.idempotency_key, str) or _SHA256.fullmatch(
-            self.idempotency_key
-        ) is None:
+        if not isinstance(self.idempotency_key, str) or _SHA256.fullmatch(self.idempotency_key) is None:
             raise DomainValidationError("broker command idempotency key must be SHA-256")
         _canonical_text(self.client_order_id, label="broker command client order id")
         if not isinstance(self.symbol, Symbol):
@@ -124,9 +138,7 @@ class BrokerOrderCommand:
             raise DomainValidationError("broker command requested shares must be positive")
         if not isinstance(self.limit_price, Price):
             raise DomainTypeError("broker command limit price must be Price")
-        if isinstance(self.strategy_session, datetime) or not isinstance(
-            self.strategy_session, date
-        ):
+        if isinstance(self.strategy_session, datetime) or not isinstance(self.strategy_session, date):
             raise DomainTypeError("broker command strategy session must be date")
 
 

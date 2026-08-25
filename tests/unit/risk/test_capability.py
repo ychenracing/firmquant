@@ -11,6 +11,7 @@ import pytest
 from firmquant.broker.fake import BrokerOperation, FakeBroker, ScriptedOutcome
 from firmquant.broker.gateway import BrokerHealth
 from firmquant.broker.normalization import normalize_order
+from firmquant.broker.xtquant import XtQuantBroker
 from firmquant.config import (
     BrokerAdapter,
     BrokerSettings,
@@ -37,6 +38,7 @@ from tests.fixtures.broker_contract import (
     order_command,
     order_payload,
 )
+from tests.fixtures.xtquant_sdk_fake import ContractXtQuantSdkFacade, SdkObject
 
 NOW = datetime(2026, 8, 25, 1, 31, tzinfo=UTC)
 
@@ -169,9 +171,7 @@ def test_healthy_capability_submits_and_cancels_through_same_gate() -> None:
     capability, broker, _ = capability_harness()
     command = order_command()
     accepted = normalize_order(order_payload(), received_at=NOW)
-    cancelled = normalize_order(
-        order_payload(status="CANCELLED", sequence=21), received_at=NOW
-    )
+    cancelled = normalize_order(order_payload(status="CANCELLED", sequence=21), received_at=NOW)
     broker.script(
         (
             ScriptedOutcome(BrokerOperation.SUBMIT, response=accepted),
@@ -183,6 +183,32 @@ def test_healthy_capability_submits_and_cancels_through_same_gate() -> None:
     assert capability.cancel_order(accepted.broker_order_id) == cancelled
     assert broker.submitted_commands == (command,)
     assert broker.cancelled_order_ids == (accepted.broker_order_id,)
+
+
+def test_xtquant_transport_is_reachable_only_inside_dynamic_capability() -> None:
+    facade = ContractXtQuantSdkFacade()
+    facade.orders = [SdkObject()]
+    gateway = XtQuantBroker(
+        facade=facade,
+        account_id="account-001",
+        clock=lambda: NOW,
+    )
+    gateway.connect()
+    service = arm_service()
+    current = context(service=service)
+
+    capability = WriteCapabilityFactory(arm_service=service).create(
+        gateway=gateway,
+        context_provider=lambda operation, subject: current,
+    )
+
+    accepted = capability.submit_order(order_command())
+    observed = capability.cancel_order(accepted.broker_order_id)
+
+    assert accepted.client_order_id == order_command().client_order_id
+    assert observed.broker_order_id == "9001"
+    assert len(facade.order_calls) == 1
+    assert facade.cancel_calls == [9001]
 
 
 @pytest.mark.parametrize(
@@ -210,9 +236,7 @@ def test_healthy_capability_submits_and_cancels_through_same_gate() -> None:
         ({"frequency_within_limits": False}, "FREQUENCY_LIMIT"),
     ],
 )
-def test_each_dynamic_gate_denies_before_submit_side_effect(
-    changes: dict[str, object], reason: str
-) -> None:
+def test_each_dynamic_gate_denies_before_submit_side_effect(changes: dict[str, object], reason: str) -> None:
     capability, broker, state = capability_harness()
     state["context"] = replace(state["context"], **changes)
 
@@ -237,9 +261,7 @@ def test_broker_health_and_compliance_are_rechecked() -> None:
         }
     )
 
-    state["context"] = replace(
-        state["context"], broker_health=unhealthy, settings=settings
-    )
+    state["context"] = replace(state["context"], broker_health=unhealthy, settings=settings)
     with pytest.raises(WriteCapabilityDenied) as captured:
         capability.submit_order(order_command())
 
