@@ -27,6 +27,22 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DIAGNOSTIC = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
+class BrokerGatewayError(RuntimeError):
+    """Base error for broker port failures that require explicit handling."""
+
+
+class BrokerDisconnected(BrokerGatewayError):
+    """Raised when an operation requires a healthy broker connection."""
+
+
+class BrokerFactUnavailable(BrokerGatewayError):
+    """Raised when the broker cannot provide a requested authoritative fact."""
+
+
+class BrokerWriteForbidden(BrokerGatewayError):
+    """Raised by read-only gateways before any write side effect."""
+
+
 def _canonical_text(value: str, *, label: str, maximum: int = 256) -> None:
     if not isinstance(value, str):
         raise DomainTypeError(f"{label} must be text")
@@ -152,4 +168,13 @@ class BrokerGateway(Protocol):
     def subscribe(self, callback_sink: BrokerEventSink) -> None: ...
 
 
-__all__ = ("BrokerEventSink", "BrokerGateway", "BrokerHealth", "BrokerOrderCommand")
+__all__ = (
+    "BrokerDisconnected",
+    "BrokerEventSink",
+    "BrokerFactUnavailable",
+    "BrokerGateway",
+    "BrokerGatewayError",
+    "BrokerHealth",
+    "BrokerOrderCommand",
+    "BrokerWriteForbidden",
+)
