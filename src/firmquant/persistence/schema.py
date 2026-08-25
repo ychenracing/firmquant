@@ -422,6 +422,26 @@ MIGRATIONS: Final = (
         name="operational_ledger",
         statements=(*_CORE_SCHEMA, *_APPEND_ONLY_TRIGGERS),
     ),
+    Migration.create(
+        version=2,
+        name="immutable_reconciliation_receipts",
+        statements=(
+            """
+            CREATE TRIGGER reconciliation_runs_reject_update
+            BEFORE UPDATE ON reconciliation_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'reconciliation_runs is append-only');
+            END
+            """,
+            """
+            CREATE TRIGGER reconciliation_runs_reject_delete
+            BEFORE DELETE ON reconciliation_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'reconciliation_runs is append-only');
+            END
+            """,
+        ),
+    ),
 )
 CURRENT_SCHEMA_VERSION: Final = MIGRATIONS[-1].version
 
