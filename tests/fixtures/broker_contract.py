@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -136,16 +137,24 @@ def gateway_facts() -> GatewayFacts:
     )
 
 
-def order_command() -> BrokerOrderCommand:
+def order_command(
+    *,
+    side: Side = Side.BUY,
+    shares: int = 100,
+    limit_price: str = "10.10",
+    identity: str = "1",
+) -> BrokerOrderCommand:
+    execution_digest = hashlib.sha256(f"execution:{identity}".encode()).hexdigest()
+    idempotency_key = hashlib.sha256(f"idempotency:{identity}".encode()).hexdigest()
     return BrokerOrderCommand(
-        execution_id="exec_" + "1" * 64,
-        idempotency_key="2" * 64,
-        client_order_id="uquant-order-1",
+        execution_id="exec_" + execution_digest,
+        idempotency_key=idempotency_key,
+        client_order_id=f"uquant-order-{identity}",
         symbol=Symbol.parse("600519.SH"),
-        side=Side.BUY,
+        side=side,
         price_type=PriceType.LIMIT,
-        requested_shares=Shares(100),
-        limit_price=Price(Decimal("10.10")),
+        requested_shares=Shares(shares),
+        limit_price=Price(Decimal(limit_price)),
         strategy_session=SESSION,
     )
 
