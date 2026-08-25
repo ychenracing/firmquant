@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -13,6 +14,7 @@ from enum import StrEnum
 from typing import Final
 
 from firmquant.domain.values import Money, Price, Shares, Symbol
+from firmquant.strategy.snapshots import DecisionSnapshot
 
 from .database import Database, PersistenceError
 
@@ -168,16 +170,133 @@ class BrokerEventRepository:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionSnapshotRepository:
+    """Append and restore immutable strategy snapshots from their indexed columns."""
+
+    database: Database
+
+    @staticmethod
+    def _from_row(row: sqlite3.Row) -> DecisionSnapshot:
+        try:
+            payload: object = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                raise ValueError("snapshot payload root is not an object")
+            request_fingerprint = payload["request_fingerprint"]
+            if not isinstance(request_fingerprint, str):
+                raise ValueError("snapshot request fingerprint is not text")
+            return DecisionSnapshot(
+                strategy_session=date.fromisoformat(str(row["strategy_session"])),
+                decision_id=str(row["decision_id"]),
+                request_fingerprint=request_fingerprint,
+                input_fingerprint=str(row["input_fingerprint"]),
+                firmquant_commit=str(row["firmquant_commit"]),
+                uquant_commit=str(row["uquant_commit"]),
+                uquant_code_fingerprint=str(row["uquant_code_fingerprint"]),
+                uquant_config_fingerprint=str(row["uquant_config_fingerprint"]),
+                data_manifest_sha256=str(row["data_manifest_sha256"]),
+                universe_manifest_sha256=str(row["universe_manifest_sha256"]),
+                broker_snapshot_sha256=str(row["broker_snapshot_sha256"]),
+                account_before_sha256=str(row["account_before_sha256"]),
+                account_after_sha256=str(row["account_after_sha256"]),
+                payload_json=str(row["payload_json"]),
+                payload_sha256=str(row["payload_sha256"]),
+                created_at=datetime.fromisoformat(str(row["created_at"])),
+                supersedes_decision_id=(
+                    None
+                    if row["supersedes_decision_id"] is None
+                    else str(row["supersedes_decision_id"])
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PersistenceConflict("stored decision snapshot is malformed") from exc
+
+    def find_by_input(
+        self,
+        *,
+        strategy_session: date,
+        input_fingerprint: str,
+    ) -> DecisionSnapshot | None:
+        row = self.database.query_one(
+            """
+            SELECT * FROM decision_snapshots
+            WHERE strategy_session = ? AND input_fingerprint = ?
+            """,
+            (strategy_session.isoformat(), input_fingerprint),
+        )
+        return None if row is None else self._from_row(row)
+
+    def for_session(self, strategy_session: date) -> tuple[DecisionSnapshot, ...]:
+        rows = self.database.query_all(
+            """
+            SELECT * FROM decision_snapshots
+            WHERE strategy_session = ? ORDER BY created_at, decision_id
+            """,
+            (strategy_session.isoformat(),),
+        )
+        return tuple(self._from_row(row) for row in rows)
+
+    def append(self, snapshot: DecisionSnapshot) -> bool:
+        existing = self.database.query_one(
+            "SELECT payload_sha256 FROM decision_snapshots WHERE decision_id = ?",
+            (snapshot.decision_id,),
+        )
+        if existing is not None:
+            if existing["payload_sha256"] == snapshot.payload_sha256:
+                return False
+            raise PersistenceConflict(
+                f"decision snapshot identity collision: {snapshot.decision_id}"
+            )
+        try:
+            self.database.write(
+                """
+                INSERT INTO decision_snapshots(
+                    decision_id, strategy_session, input_fingerprint, firmquant_commit,
+                    uquant_commit, uquant_code_fingerprint, uquant_config_fingerprint,
+                    data_manifest_sha256, universe_manifest_sha256, broker_snapshot_sha256,
+                    account_before_sha256, account_after_sha256, payload_json, payload_sha256,
+                    created_at, supersedes_decision_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot.decision_id,
+                    snapshot.strategy_session.isoformat(),
+                    snapshot.input_fingerprint,
+                    snapshot.firmquant_commit,
+                    snapshot.uquant_commit,
+                    snapshot.uquant_code_fingerprint,
+                    snapshot.uquant_config_fingerprint,
+                    snapshot.data_manifest_sha256,
+                    snapshot.universe_manifest_sha256,
+                    snapshot.broker_snapshot_sha256,
+                    snapshot.account_before_sha256,
+                    snapshot.account_after_sha256,
+                    snapshot.payload_json,
+                    snapshot.payload_sha256,
+                    snapshot.created_at.isoformat(),
+                    snapshot.supersedes_decision_id,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise PersistenceConflict("decision snapshot violates append-only identity") from exc
+        return True
+
+
+@dataclass(frozen=True, slots=True)
 class Repositories:
     broker_events: BrokerEventRepository
+    decision_snapshots: DecisionSnapshotRepository
 
     @classmethod
     def bind(cls, database: Database) -> Repositories:
-        return cls(broker_events=BrokerEventRepository(database))
+        return cls(
+            broker_events=BrokerEventRepository(database),
+            decision_snapshots=DecisionSnapshotRepository(database),
+        )
 
 
 __all__ = (
     "BrokerEventRepository",
+    "DecisionSnapshotRepository",
     "PersistenceConflict",
     "Repositories",
     "canonical_json",

@@ -262,7 +262,14 @@ def _known_order_ids(account: object) -> frozenset[str]:
     return frozenset(result)
 
 
-def _commit_account(target: object, source: object, *, expected_sha256: str) -> None:
+def commit_prepared_account(
+    target: object,
+    source: object,
+    *,
+    expected_sha256: str,
+) -> None:
+    """Replace a uquant AccountState with a fully prepared and hashed copy."""
+
     try:
         descriptors = fields(cast(Any, source))
         original = {item.name: copy.deepcopy(getattr(target, item.name)) for item in descriptors}
@@ -327,7 +334,7 @@ def sync_account(account: AccountStateContract, snapshot: BrokerSnapshot) -> Acc
         positions_reconciled=_summary_integer(summary, "positions_reconciled"),
         pending_orders=_summary_integer(summary, "pending_orders"),
     )
-    _commit_account(account, working, expected_sha256=after_sha256)
+    commit_prepared_account(account, working, expected_sha256=after_sha256)
     return receipt
 
 
@@ -335,6 +342,7 @@ __all__ = (
     "AccountStateContract",
     "AccountSyncReceipt",
     "StrategySyncError",
+    "commit_prepared_account",
     "sync_account",
     "to_uquant_broker_payload",
 )
