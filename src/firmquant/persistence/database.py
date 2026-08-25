@@ -161,6 +161,39 @@ class Database:
         if len(rows) != 1 or rows[0][0] != "ok":
             raise DatabaseCorrupt("database integrity check failed")
 
+    def backup_to(self, destination: Path) -> None:
+        """Create one consistent SQLite online backup without copying WAL files."""
+
+        target_path = Path(destination)
+        if self._connection.in_transaction:
+            raise TransactionRequired("SQLite online backup cannot start inside a transaction")
+        if target_path.exists() or target_path.is_symlink():
+            raise DatabaseUnavailable("backup destination must not already exist")
+        if not target_path.parent.is_dir():
+            raise DatabaseUnavailable("backup destination parent does not exist")
+        target: sqlite3.Connection | None = None
+        try:
+            target = sqlite3.connect(target_path, isolation_level=None)
+            self._connection.backup(target)
+            target.execute("PRAGMA synchronous = FULL")
+            check = target.execute("PRAGMA integrity_check").fetchone()
+            if check is None or check[0] != "ok":
+                raise DatabaseCorrupt("online backup integrity check failed")
+            target.close()
+            target = None
+            if os.name != "nt":
+                target_path.chmod(0o600)
+            with target_path.open("rb") as stream:
+                os.fsync(stream.fileno())
+        except DatabaseCorrupt:
+            if target is not None:
+                target.close()
+            raise
+        except (OSError, sqlite3.DatabaseError) as exc:
+            if target is not None:
+                target.close()
+            raise DatabaseUnavailable("SQLite online backup failed") from exc
+
 
 __all__ = (
     "Database",
