@@ -12,6 +12,7 @@ from firmquant.persistence.backup import (
     verify_backup,
 )
 from firmquant.persistence.database import Database
+from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
 
 
 def _database_with_audit(path: Path) -> Database:
@@ -47,7 +48,7 @@ def test_backup_uses_online_copy_atomic_bundle_and_restore_verification(tmp_path
     assert verification.database_sha256 == receipt.database_sha256
     assert verification.account_state_sha256 == receipt.account_state_sha256
     assert verification.audit_count == 1
-    assert verification.schema_version == 1
+    assert verification.schema_version == CURRENT_SCHEMA_VERSION
     assert {path.name for path in receipt.bundle_path.iterdir()} == {
         "account_state.json",
         "firmquant.sqlite3",

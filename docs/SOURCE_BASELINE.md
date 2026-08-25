@@ -25,7 +25,7 @@
 | `economic_decision_v1` 源码面 | `2209a539bacbc01d90b29b9f0bb78ace4991016bee0d41f9e86f38ccf5af545e` |
 | `execution_account_v1` 源码面 | `df2675ebe560f5dc9089a51825aed23f499a35d10e2827c3a96f0a1d40189e0c` |
 | 默认生产配置 | `dae4d79fdd813832c6ab152611437c13be1d38227c7280691874d3a9267d93d5` |
-| firmquant `pyproject.toml` | `5f70d9f842e3c61bf935ca9847fb74c65c26cfd95dae0e43de292bcdf6004d3e` |
+| firmquant `pyproject.toml` | `421476ae0a9ae3addd110bb88d04fbb8f8d2f8726f9e3037477073f6ba666c29` |
 | firmquant `uv.lock` | `78cbd90dcfdf2bc031963e5f3273320689d43865c0cf5c9bc952eedf9df7250f` |
 
 firmquant 的 `pyproject.toml` 和 `uv.lock` 均把 uquant 锁到上述 40 位 commit；没有使用浮动 `main`、tag
