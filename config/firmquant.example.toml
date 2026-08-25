@@ -1,0 +1,18 @@
+# 安全示例：只启用 PaperBroker；不包含账户、密码、token 或本机 userdata 路径。
+schema_version = 1
+mode = "PAPER"
+live_trading_enabled = false
+timezone = "Asia/Shanghai"
+
+[broker]
+adapter = "PAPER"
+
+[paths]
+state_directory = "var/state"
+data_directory = "var/data"
+report_directory = "var/reports"
+backup_directory = "var/backups"
+
+[compliance]
+program_trading_report_confirmed = false
+broker_api_authorized = false

@@ -1,5 +1,6 @@
-"""Initial module entry point; the operational CLI is added with configuration."""
+"""Module entry point for the local operator CLI."""
 
-from . import __version__
+from .cli import main
 
-print(f"firmquant {__version__}")
+if __name__ == "__main__":
+    raise SystemExit(main())
