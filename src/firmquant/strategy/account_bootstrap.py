@@ -39,7 +39,9 @@ class BootstrapDataIdentity:
     symbols: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if len(self.data_hash) != 64 or any(character not in "0123456789abcdef" for character in self.data_hash):
+        if len(self.data_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in self.data_hash
+        ):
             raise ValueError("bootstrap data hash must be lowercase SHA-256")
         if not isinstance(self.as_of, str) or not self.as_of:
             raise ValueError("bootstrap data as-of must be non-empty")
