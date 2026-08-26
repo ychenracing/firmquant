@@ -35,10 +35,10 @@ xtquant_userdata_path = "{userdata.as_posix()}"
 session_id = 123456
 safety_manifest_path = "{safety.as_posix()}"
 [paths]
-state_directory = "{(runtime_root / 'state').as_posix()}"
+state_directory = "{(runtime_root / "state").as_posix()}"
 data_directory = "{data.as_posix()}"
-report_directory = "{(runtime_root / 'reports').as_posix()}"
-backup_directory = "{(runtime_root / 'backups').as_posix()}"
+report_directory = "{(runtime_root / "reports").as_posix()}"
+backup_directory = "{(runtime_root / "backups").as_posix()}"
 uquant_source_checkout = "{source.as_posix()}"
 [compliance]
 program_trading_report_confirmed = false
