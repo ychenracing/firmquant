@@ -49,7 +49,10 @@ from firmquant.market_data.calendar_manifest import load_trading_calendar_manife
 from firmquant.market_data.xtquant_daily import DailyDataUpdateReceipt, XtQuantDailyDataUpdater
 from firmquant.market_data.xtquant_history import OfficialXtQuantDailyHistoryProvider
 from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyReportBuilder
-from firmquant.persistence.account_authority import AccountBindingRepository
+from firmquant.persistence.account_authority import (
+    AccountBindingRepository,
+    ReviewedAccountAdjustmentRepository,
+)
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.backup import backup_state
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
@@ -397,6 +400,7 @@ class ProductionServiceHooks:
             account_repository=self._accounts,
             reconciler=self._reconciler,
             cash_tolerance=Decimal("0.01"),
+            reviewed_adjustments=ReviewedAccountAdjustmentRepository(self._database),
         )
 
         def final_facts(account: AccountStateContract) -> ReconciliationFacts:

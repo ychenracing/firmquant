@@ -456,6 +456,68 @@ class ReviewedAccountAdjustmentRepository:
             )
         return True
 
+    def matching_ids(
+        self,
+        *,
+        account_id_hash: str,
+        symbol: Symbol | None,
+        session: date,
+        coverage: AdjustmentCoverage,
+        broker_snapshot_sha256: str,
+        difference_sha256: str,
+    ) -> tuple[str, ...]:
+        """Return exact reviewed evidence identities after re-verifying stored payload hashes."""
+
+        _sha256(account_id_hash, label="adjustment lookup account identity")
+        if symbol is not None and not isinstance(symbol, Symbol):
+            raise TypeError("adjustment lookup symbol must be Symbol or None")
+        if type(session) is not date:
+            raise TypeError("adjustment lookup session must be date")
+        if not isinstance(coverage, AdjustmentCoverage):
+            raise TypeError("adjustment lookup coverage must be typed")
+        _sha256(broker_snapshot_sha256, label="adjustment lookup broker snapshot")
+        _sha256(difference_sha256, label="adjustment lookup difference")
+        parameters: tuple[object, ...] = (
+            account_id_hash,
+            session.isoformat(),
+            coverage.value,
+            broker_snapshot_sha256,
+            difference_sha256,
+        )
+        if symbol is None:
+            rows = self._database.query_all(
+                """
+                SELECT adjustment_id, payload_json, payload_sha256
+                FROM reviewed_account_adjustments
+                WHERE account_id_hash = ? AND session_date = ?
+                  AND coverage_kind = ? AND broker_snapshot_sha256 = ? AND difference_sha256 = ?
+                ORDER BY adjustment_id
+                """,
+                parameters,
+            )
+        else:
+            rows = self._database.query_all(
+                """
+                SELECT adjustment_id, payload_json, payload_sha256
+                FROM reviewed_account_adjustments
+                WHERE account_id_hash = ? AND session_date = ?
+                  AND coverage_kind = ? AND broker_snapshot_sha256 = ? AND difference_sha256 = ?
+                  AND symbol = ?
+                ORDER BY adjustment_id
+                """,
+                (*parameters, symbol.canonical),
+            )
+        identities: list[str] = []
+        for row in rows:
+            payload_json = str(row["payload_json"])
+            payload_sha256 = str(row["payload_sha256"])
+            actual = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+            adjustment_id = str(row["adjustment_id"])
+            if actual != payload_sha256 or adjustment_id != "acctadj_" + payload_sha256:
+                raise PersistenceConflict("reviewed adjustment stored identity is corrupt")
+            identities.append(adjustment_id)
+        return tuple(identities)
+
     def covers(
         self,
         *,
@@ -466,31 +528,15 @@ class ReviewedAccountAdjustmentRepository:
         broker_snapshot_sha256: str,
         difference_sha256: str,
     ) -> bool:
-        _sha256(account_id_hash, label="adjustment lookup account identity")
-        if not isinstance(symbol, Symbol) or type(session) is not date:
-            raise TypeError("adjustment lookup requires Symbol and date")
-        if not isinstance(coverage, AdjustmentCoverage):
-            raise TypeError("adjustment lookup coverage must be typed")
-        _sha256(broker_snapshot_sha256, label="adjustment lookup broker snapshot")
-        _sha256(difference_sha256, label="adjustment lookup difference")
-        return (
-            self._database.query_one(
-                """
-                SELECT 1 FROM reviewed_account_adjustments
-                WHERE account_id_hash = ? AND symbol = ? AND session_date = ?
-                  AND coverage_kind = ? AND broker_snapshot_sha256 = ? AND difference_sha256 = ?
-                LIMIT 1
-                """,
-                (
-                    account_id_hash,
-                    symbol.canonical,
-                    session.isoformat(),
-                    coverage.value,
-                    broker_snapshot_sha256,
-                    difference_sha256,
-                ),
+        return bool(
+            self.matching_ids(
+                account_id_hash=account_id_hash,
+                symbol=symbol,
+                session=session,
+                coverage=coverage,
+                broker_snapshot_sha256=broker_snapshot_sha256,
+                difference_sha256=difference_sha256,
             )
-            is not None
         )
 
 

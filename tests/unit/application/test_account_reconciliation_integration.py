@@ -68,12 +68,20 @@ def test_reconcile_routes_bound_account_through_gated_coordinator(
     calls: list[dict[str, object]] = []
 
     class RecordingCoordinator:
-        def __init__(self, *, account_repository, reconciler, cash_tolerance: Decimal) -> None:
+        def __init__(
+            self,
+            *,
+            account_repository,
+            reconciler,
+            cash_tolerance: Decimal,
+            reviewed_adjustments=None,
+        ) -> None:
             calls.append(
                 {
                     "account_repository": account_repository,
                     "reconciler": reconciler,
                     "cash_tolerance": cash_tolerance,
+                    "reviewed_adjustments": reviewed_adjustments,
                 }
             )
             self._accounts = account_repository
