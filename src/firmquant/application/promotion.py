@@ -24,11 +24,7 @@ def _count(value: int, *, label: str) -> None:
 
 
 def _fraction(value: Decimal, *, label: str) -> None:
-    if (
-        not isinstance(value, Decimal)
-        or not value.is_finite()
-        or not Decimal(0) <= value <= Decimal(1)
-    ):
+    if not isinstance(value, Decimal) or not value.is_finite() or not Decimal(0) <= value <= Decimal(1):
         raise ValueError(f"{label} must be a Decimal between zero and one")
 
 

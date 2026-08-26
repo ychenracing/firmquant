@@ -50,21 +50,12 @@ def resolve_uquant_order_id(
 
     observed = _canonical(client_order_id, label="client order id")
     known = tuple(
-        sorted(
-            {
-                _canonical(item, label="known uquant order id")
-                for item in known_uquant_order_ids
-            }
-        )
+        sorted({_canonical(item, label="known uquant order id") for item in known_uquant_order_ids})
     )
     exact = tuple(item for item in known if hmac.compare_digest(observed, item))
     if len(exact) == 1:
         return exact[0]
-    tagged = tuple(
-        item
-        for item in known
-        if hmac.compare_digest(observed, client_order_tag(item))
-    )
+    tagged = tuple(item for item in known if hmac.compare_digest(observed, client_order_tag(item)))
     if len(tagged) == 1:
         return tagged[0]
     if len(tagged) > 1:

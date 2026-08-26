@@ -13,11 +13,7 @@ def _nonnegative(value: Decimal, *, label: str) -> None:
 
 
 def _fraction(value: Decimal, *, label: str) -> None:
-    if (
-        not isinstance(value, Decimal)
-        or not value.is_finite()
-        or not Decimal(0) <= value <= Decimal(1)
-    ):
+    if not isinstance(value, Decimal) or not value.is_finite() or not Decimal(0) <= value <= Decimal(1):
         raise ValueError(f"{label} must be a Decimal between zero and one")
 
 
@@ -100,8 +96,7 @@ def summarize_execution_replay(
             start=Decimal(0),
         ),
         max_target_tracking_error=max(tracking),
-        mean_target_tracking_error=sum(tracking, start=Decimal(0))
-        / Decimal(len(tracking)),
+        mean_target_tracking_error=sum(tracking, start=Decimal(0)) / Decimal(len(tracking)),
         sessions=len(points),
     )
 

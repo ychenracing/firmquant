@@ -305,13 +305,17 @@ class ProductionXtQuantBroker(XtQuantBroker):
         try:
             raw = self._facade.query_stock_order(order_id)
         except Exception as error:
-            raise BrokerWriteOutcomeUnknown("XtQuant accepted submit but confirmation query failed") from error
+            raise BrokerWriteOutcomeUnknown(
+                "XtQuant accepted submit but confirmation query failed"
+            ) from error
         if raw is None:
             raise BrokerWriteOutcomeUnknown("XtQuant accepted submit but order is not yet queryable")
         try:
             fact = self._order(raw, observed_at=self._now())
         except Exception as error:
-            raise BrokerWriteOutcomeUnknown("XtQuant accepted submit but returned order fact is invalid") from error
+            raise BrokerWriteOutcomeUnknown(
+                "XtQuant accepted submit but returned order fact is invalid"
+            ) from error
         if fact.broker_order_id != str(order_id) or fact.client_order_id != remark:
             raise BrokerWriteOutcomeUnknown("XtQuant accepted submit but returned identity cannot be proven")
         return fact
@@ -335,13 +339,17 @@ class ProductionXtQuantBroker(XtQuantBroker):
         try:
             raw = self._facade.query_stock_order(order_id)
         except Exception as error:
-            raise BrokerWriteOutcomeUnknown("XtQuant accepted cancel but confirmation query failed") from error
+            raise BrokerWriteOutcomeUnknown(
+                "XtQuant accepted cancel but confirmation query failed"
+            ) from error
         if raw is None:
             raise BrokerWriteOutcomeUnknown("XtQuant accepted cancel but order state is not queryable")
         try:
             return self._order(raw, observed_at=self._now())
         except Exception as error:
-            raise BrokerWriteOutcomeUnknown("XtQuant accepted cancel but returned order fact is invalid") from error
+            raise BrokerWriteOutcomeUnknown(
+                "XtQuant accepted cancel but returned order fact is invalid"
+            ) from error
 
     def _error_identity(self, raw: object, *, label: str) -> None:
         account_id = _text(
@@ -405,9 +413,7 @@ class ProductionXtQuantBroker(XtQuantBroker):
             elif canonical_type in {"ORDER_ERROR", "CANCEL_ERROR"}:
                 payload = self._operational_error_payload(canonical_type, raw)
                 identity = {
-                    key: value
-                    for key, value in payload.items()
-                    if key not in {"event_time", "session_date"}
+                    key: value for key, value in payload.items() if key not in {"event_time", "session_date"}
                 }
             else:
                 raise BrokerSchemaMismatch("XtQuant callback type is unsupported")
