@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from types import ModuleType
 from typing import Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
@@ -67,13 +66,17 @@ from firmquant.reconciliation.models import (
 )
 from firmquant.reconciliation.service import ReconciliationService
 from firmquant.risk.arm import ArmBinding, ArmLease, ArmService
-from firmquant.risk.capability import WriteAuthorizationContext, WriteCapabilityFactory, WriteOperation
+from firmquant.risk.capability import (
+    BrokerWriteCapability,
+    WriteAuthorizationContext,
+    WriteCapabilityFactory,
+    WriteOperation,
+)
 from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCommand, RiskLimits
 from firmquant.risk.runtime import risk_limits_from_settings
 from firmquant.scheduling.sessions import WorkflowReceiptStore
 from firmquant.security.secrets import EnvironmentSecretProvider
-from firmquant.strategy.account_sync import AccountStateContract
-from firmquant.strategy.adapter import DecisionRequest, StrategyAdapter
+from firmquant.strategy.adapter import DecisionRequest, ProductionEngineContract, StrategyAdapter
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.runtime_account import RuntimeAccountRepository
 from firmquant.strategy.snapshots import DecisionSnapshot
@@ -141,7 +144,15 @@ def _fraction(value: Decimal, denominator: Decimal) -> Decimal:
     return min(Decimal(1), max(Decimal(0), value / denominator))
 
 
-def _load_engine(source_checkout: Path, data_directory: Path) -> object:
+def _count(value: object, *, label: str) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProductionServicesUnavailable(f"{label}_INVALID")
+    return value
+
+
+def _load_engine(source_checkout: Path, data_directory: Path) -> ProductionEngineContract:
     engine_path = (source_checkout / "uquant" / "engine.py").resolve(strict=True)
     module_name = "firmquant_verified_uquant_engine"
     current = sys.modules.get(module_name)
@@ -149,7 +160,7 @@ def _load_engine(source_checkout: Path, data_directory: Path) -> object:
         current_path = Path(str(vars(current).get("__file__", ""))).resolve()
         if current_path != engine_path:
             raise ProductionServicesUnavailable("UQUANT_ENGINE_MODULE_IDENTITY_COLLISION")
-        module = cast(ModuleType, current)
+        module = current
     else:
         spec = importlib.util.spec_from_file_location(module_name, engine_path)
         if spec is None or spec.loader is None:
@@ -165,7 +176,7 @@ def _load_engine(source_checkout: Path, data_directory: Path) -> object:
     config = vars(module).get("DEFAULT_CONFIG")
     if not callable(engine_type) or config is None:
         raise ProductionServicesUnavailable("UQUANT_ENGINE_CONTRACT_UNAVAILABLE")
-    return engine_type(data_directory, config)
+    return cast(ProductionEngineContract, engine_type(data_directory, config))
 
 
 def _account_payload(account: object) -> dict[str, object]:
@@ -516,7 +527,7 @@ class ProductionServiceHooks:
             )
         )
         persisted = self._accounts.persist_prepared(
-            cast(AccountStateContract, account),
+            account,
             expected_before_sha256=decision.account_before_sha256,
             operation_kind="DECISION_COMMIT",
             evidence_sha256=decision.payload_sha256,
@@ -670,12 +681,12 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable("DECISION_SENTINEL_PAYLOAD_INVALID")
         submitted, filled = self._notionals(planned.execution_session)
         equity_change, intraday_loss, drawdown = self._account_risk_fractions(snapshot)
-        attempts = int(
+        attempts = _count(
             self._database.scalar(
                 "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
                 (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-            )
-            or 0
+            ),
+            label="BROKER_ATTEMPT_COUNT",
         )
         health = self._broker.health()
         account_state = self._accounts.load()
@@ -692,7 +703,7 @@ class ProductionServiceHooks:
             instrument=self._broker.query_instrument(command.symbol),
             quote=self._broker.query_quote(command.symbol),
             market_status=self._broker.query_market_status(),
-            canonical_universe=frozenset(Symbol.parse(item) for item in self._universe.canonical_symbols),
+            canonical_universe=frozenset(Symbol.parse(item) for item in self._universe.deployment_symbols),
             deployment_allowlist=frozenset(Symbol.parse(item) for item in self._universe.deployment_symbols),
             uquant_target_shares=planned.target_shares,
             uquant_target_weight=planned.target_weight,
@@ -703,20 +714,20 @@ class ProductionServiceHooks:
             actual_gross_notional=Money(actual_gross),
             daily_submitted_notional=submitted,
             daily_filled_notional=filled,
-            open_order_count=int(
+            open_order_count=_count(
                 self._database.scalar(
                     "SELECT count(*) FROM execution_intents WHERE state IN "
                     "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED')"
-                )
-                or 0
+                ),
+                label="OPEN_ORDER_COUNT",
             ),
-            consecutive_rejections=int(
+            consecutive_rejections=_count(
                 self._database.scalar(
                     "SELECT count(*) FROM execution_intents WHERE state = 'REJECTED' "
                     "AND strategy_session = ?",
                     (planned.strategy_session.isoformat(),),
-                )
-                or 0
+                ),
+                label="CONSECUTIVE_REJECTION_COUNT",
             ),
             broker_connected=health.connected,
             disconnect_duration=timedelta(0)
@@ -737,19 +748,19 @@ class ProductionServiceHooks:
             clock_drift=timedelta(0),
             data_identity_matches=_data_identity_matches(account_state, self._settings.paths.data_directory),
             config_identity_matches=(configuration_sha256(self._config_path) == self._identity.config_sha256),
-            unresolved_order_count=int(
+            unresolved_order_count=_count(
                 self._database.scalar(
                     "SELECT count(*) FROM execution_intents WHERE state IN "
                     "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                )
-                or 0
+                ),
+                label="UNRESOLVED_ORDER_COUNT",
             ),
             kill_switch_tripped="KILL_SWITCH" in self._status.blockers,
             auction_allowed=False,
             limits=limits,
         )
 
-    def _capability(self, authorities: _ExecutionAuthorities):
+    def _capability(self, authorities: _ExecutionAuthorities) -> BrokerWriteCapability:
         account_hash = self._broker.query_account().account_id_hash
         arm_service, lease, binding = self._load_arm(account_hash)
         limits = risk_limits_from_settings(self._settings)
@@ -806,12 +817,12 @@ class ProductionServiceHooks:
             external = any(
                 item.client_order_id is None or item.client_order_id not in known for item in snapshot.orders
             )
-            attempts = int(
+            attempts = _count(
                 self._database.scalar(
                     "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
                     (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-                )
-                or 0
+                ),
+                label="BROKER_ATTEMPT_COUNT",
             )
             return WriteAuthorizationContext(
                 settings=self._settings,
@@ -832,15 +843,17 @@ class ProductionServiceHooks:
                     and StrategyIdentity.locked().uquant_commit == self._identity.uquant_commit
                 ),
                 kill_switch_tripped="KILL_SWITCH" in self._status.blockers,
-                unresolved_order_count=int(
+                unresolved_order_count=_count(
                     self._database.scalar(
                         "SELECT count(*) FROM execution_intents WHERE state IN ('CANCEL_REQUESTED','UNKNOWN')"
-                    )
-                    or 0
+                    ),
+                    label="UNRESOLVED_ORDER_COUNT",
                 ),
-                submitting_unresolved_count=int(
-                    self._database.scalar("SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'")
-                    or 0
+                submitting_unresolved_count=_count(
+                    self._database.scalar(
+                        "SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'"
+                    ),
+                    label="SUBMITTING_ORDER_COUNT",
                 ),
                 reconciliation_mismatch=False,
                 external_activity_detected=external,
@@ -880,27 +893,27 @@ class ProductionServiceHooks:
                 hypothetical_orders=len(plan.orders)
                 if prior is None
                 else prior.hypothetical_orders + len(plan.orders),
-                unresolved_orders=int(
+                unresolved_orders=_count(
                     self._database.scalar(
                         "SELECT count(*) FROM execution_intents WHERE state IN "
                         "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                    )
-                    or 0
+                    ),
+                    label="UNRESOLVED_ORDER_COUNT",
                 ),
                 external_orders=self._external_order_count(),
-                duplicate_economic_orders=int(
+                duplicate_economic_orders=_count(
                     self._database.scalar(
                         "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
                         "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
-                    )
-                    or 0
+                    ),
+                    label="DUPLICATE_ECONOMIC_ORDER_COUNT",
                 ),
-                duplicate_fills=int(
+                duplicate_fills=_count(
                     self._database.scalar(
                         "SELECT count(*) FROM (SELECT broker_fill_id FROM fills "
                         "GROUP BY broker_fill_id HAVING count(*) > 1)"
-                    )
-                    or 0
+                    ),
+                    label="DUPLICATE_FILL_COUNT",
                 ),
                 max_target_tracking_error=max(
                     Decimal(0) if prior is None else prior.max_target_tracking_error,
@@ -1175,7 +1188,13 @@ def build_production_runtime(
             volume_multipliers=safety.volume_multipliers,
         ),
     )
-    universe = UniversePolicy.from_uquant(configured_symbols=None)
+    observed_now = clock()
+    if observed_now.tzinfo is None or observed_now.utcoffset() is None:
+        raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
+    universe = UniversePolicy.from_uquant(
+        configured_symbols=None,
+        as_of=observed_now.astimezone(_SHANGHAI).date(),
+    )
     account_repository = RuntimeAccountRepository(
         database=writer.database,
         path=settings.paths.state_directory / _ACCOUNT_FILE,

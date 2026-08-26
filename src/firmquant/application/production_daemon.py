@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from firmquant.application.production_runtime import ProductionRuntime, ProductionRuntimeReceipt
+from firmquant.broker.gateway import BrokerEventSink
 from firmquant.config import Mode, Settings
 from firmquant.persistence.writer_lease import WriterLease
 
@@ -73,13 +74,13 @@ class ProductionBrokerSession(Protocol):
 
     def disconnect(self) -> None: ...
 
-    def subscribe(self, callback_sink: object) -> None: ...
+    def subscribe(self, callback_sink: BrokerEventSink) -> None: ...
 
 
 @runtime_checkable
 class ProductionEventPump(Protocol):
     @property
-    def sink(self) -> object: ...
+    def sink(self) -> BrokerEventSink: ...
 
     @property
     def pending_count(self) -> int: ...
