@@ -79,6 +79,7 @@ broker_api_authorized = false
 type RunPort = Callable[[Mode], Mapping[str, object]]
 type ReconciliationPort = Callable[[Database], "OperatorReconciliation"]
 type ReportPort = Callable[[date | None, Database], Mapping[str, object]]
+type AccountBootstrapPort = Callable[[Path | None], Mapping[str, object]]
 type DurableCancellationExecutor = Callable[[BrokerWriteCapability, tuple[str, ...]], tuple[str, ...]]
 type DoctorBrokerProvider = Callable[[], ReadOnlyDoctorBroker | None]
 type FirmquantCommitProvider = Callable[[], str]
@@ -97,6 +98,7 @@ class OperatorCommand(StrEnum):
     HALT = "halt"
     RESUME = "resume"
     RECONCILE = "reconcile"
+    BOOTSTRAP_ACCOUNT = "bootstrap-account"
     DECISIONS = "decisions"
     ORDERS = "orders"
     FILLS = "fills"
@@ -370,6 +372,7 @@ class LocalOperatorService:
         runner: RunPort | None = None,
         reconciler: ReconciliationPort | None = None,
         reporter: ReportPort | None = None,
+        account_bootstrapper: AccountBootstrapPort | None = None,
         doctor_broker_provider: DoctorBrokerProvider | None = None,
         system_order_canceller: SystemOrderCancellationPort | None = None,
     ) -> None:
@@ -377,7 +380,13 @@ class LocalOperatorService:
             raise TypeError("operator configuration path must be pathlib.Path")
         if not callable(clock) or not callable(firmquant_commit_provider):
             raise TypeError("operator clock and commit provider must be callable")
-        for dependency in (runner, reconciler, reporter, doctor_broker_provider):
+        for dependency in (
+            runner,
+            reconciler,
+            reporter,
+            account_bootstrapper,
+            doctor_broker_provider,
+        ):
             if dependency is not None and not callable(dependency):
                 raise TypeError("operator optional ports must be callable")
         if system_order_canceller is not None and not isinstance(
@@ -391,6 +400,7 @@ class LocalOperatorService:
         self._runner = runner
         self._reconciler = reconciler
         self._reporter = reporter
+        self._account_bootstrapper = account_bootstrapper
         self._doctor_broker_provider = doctor_broker_provider
         self._system_order_canceller = system_order_canceller
 
@@ -413,6 +423,7 @@ class LocalOperatorService:
             OperatorCommand.HALT: lambda: self._halt(request),
             OperatorCommand.RESUME: lambda: self._resume(interaction),
             OperatorCommand.RECONCILE: lambda: self._reconcile(),
+            OperatorCommand.BOOTSTRAP_ACCOUNT: lambda: self._bootstrap_account(request),
             OperatorCommand.DECISIONS: lambda: self._decisions(request),
             OperatorCommand.ORDERS: lambda: self._orders(request),
             OperatorCommand.FILLS: lambda: self._fills(request),
@@ -1406,6 +1417,22 @@ class LocalOperatorService:
             },
         )
 
+    def _bootstrap_account(self, request: OperatorRequest) -> OperatorResult:
+        if self._account_bootstrapper is None:
+            raise OperatorCommandDenied("ACCOUNT_BOOTSTRAP_PORT_UNAVAILABLE")
+        try:
+            payload = self._account_bootstrapper(request.account_state_path)
+        except OperatorCommandDenied:
+            raise
+        except Exception as error:
+            raise OperatorCommandDenied("ACCOUNT_BOOTSTRAP_FAILED") from error
+        if not isinstance(payload, Mapping):
+            raise OperatorCommandDenied("ACCOUNT_BOOTSTRAP_RESULT_INVALID")
+        return OperatorResult(
+            message="账户权威基线已建立; 未发送任何券商写请求。",
+            payload=payload,
+        )
+
     def _reconcile(self) -> OperatorResult:
         if self._reconciler is None:
             raise OperatorCommandDenied("RECONCILIATION_PORT_UNAVAILABLE")
@@ -1753,12 +1780,14 @@ def create_local_operator_service(config_path: Path) -> OperatorService:
         runner=ports.run,
         reconciler=ports.reconcile,
         reporter=ports.report,
+        account_bootstrapper=ports.bootstrap_account,
         doctor_broker_provider=ports.doctor_broker,
         system_order_canceller=ports,
     )
 
 
 __all__ = (
+    "AccountBootstrapPort",
     "CapabilityBoundSystemOrderCanceller",
     "LocalOperatorService",
     "OperatorCommand",

@@ -63,6 +63,7 @@ uv run firmquant status
 | `firmquant halt` | 触发 kill switch 并阻止新增订单 |
 | `firmquant resume` | 经显式复核后请求恢复，不清除未解决差异 |
 | `firmquant reconcile` | 对账券商、uquant AccountState 与 operational ledger |
+| `firmquant bootstrap-account` | 一次性建立真实券商账户、uquant AccountState 与持久 binding；非空账户必须提供已复核 seed |
 | `firmquant decisions` | 查询不可变 DecisionSnapshot |
 | `firmquant orders` | 查询经济意图、提交尝试和券商订单生命周期 |
 | `firmquant fills` | 查询已规范化成交与费用事实 |
