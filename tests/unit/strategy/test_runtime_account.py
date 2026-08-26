@@ -25,8 +25,8 @@ def seeded_account():
 def test_broker_sync_is_atomically_persisted_with_account_operation_receipt(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     state_path = tmp_path / "uquant-account.json"
-    store = UquantAccountStateStore(state_path)
-    store.commit_state(seeded_account())
+    store = UquantAccountStateStore()
+    store.save(seeded_account(), state_path)
     repository = RuntimeAccountRepository(
         database=database,
         path=state_path,
@@ -53,12 +53,12 @@ def test_broker_sync_is_atomically_persisted_with_account_operation_receipt(tmp_
 def test_persist_prepared_state_rejects_wrong_before_hash_without_overwrite(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     state_path = tmp_path / "uquant-account.json"
-    store = UquantAccountStateStore(state_path)
+    store = UquantAccountStateStore()
     account = seeded_account()
-    store.commit_state(account)
+    store.save(account, state_path)
     repository = RuntimeAccountRepository(database=database, path=state_path, clock=lambda: NOW)
     try:
-        before = store.read_state_hash()
+        before = store.hash_file(state_path)
         prepared = repository.load()
         prepared.cash -= 1
         try:
@@ -72,6 +72,6 @@ def test_persist_prepared_state_rejects_wrong_before_hash_without_overwrite(tmp_
             pass
         else:
             raise AssertionError("wrong before hash must fail")
-        assert store.read_state_hash() == before
+        assert store.hash_file(state_path) == before
     finally:
         database.close()
