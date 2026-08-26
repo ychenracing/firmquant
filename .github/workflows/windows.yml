@@ -6,7 +6,7 @@ on:
       - "codex/production-live-hardening-20260826"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FIRMQ_CI: "1"
@@ -16,13 +16,10 @@ env:
 
 jobs:
   coverage-diagnostic:
-    if: ${{ !startsWith(github.event.head_commit.message, 'diagnostic: record coverage summary') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ychenracing/uquant
@@ -35,46 +32,30 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.11.33"
-      - run: uv sync --frozen --extra dev
+      - run: uv sync --frozen --extra dev --quiet
       - name: Measure coverage
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
         run: >-
-          uv run pytest
+          uv run pytest -q
           --cov=firmquant
           --cov-branch
           --cov-report=json:coverage.json
           --cov-report=
           --cov-fail-under=0
-      - name: Record concise coverage summary
-        shell: bash
+      - name: Emit concise coverage annotation
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
           data = json.loads(Path('coverage.json').read_text())
+          totals = data['totals']
           rows = []
           for name, item in data['files'].items():
-              summary = item['summary']
-              missing = int(summary.get('missing_lines', 0))
-              missing_branches = int(summary.get('missing_branches', 0))
-              rows.append((missing + missing_branches, missing, missing_branches, float(summary['percent_covered']), name))
+              s = item['summary']
+              score = int(s.get('missing_lines', 0)) + int(s.get('missing_branches', 0))
+              rows.append((score, name, float(s['percent_covered'])))
           rows.sort(reverse=True)
-          totals = data['totals']
-          lines = [
-              f"total_percent={float(totals['percent_covered']):.4f}",
-              f"num_statements={totals['num_statements']}",
-              f"missing_lines={totals['missing_lines']}",
-              f"num_branches={totals.get('num_branches', 0)}",
-              f"missing_branches={totals.get('missing_branches', 0)}",
-              "top_missing:",
-          ]
-          for score, missing, branches, percent, name in rows[:30]:
-              lines.append(f"{score:4d} missing={missing:4d} branches={branches:4d} pct={percent:7.3f} {name}")
-          Path('docs/.coverage-summary').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          top = '; '.join(f'{name}:{score}:{pct:.1f}%' for score, name, pct in rows[:8])
+          print(f"::notice title=Coverage Summary::total={float(totals['percent_covered']):.4f}% missing_lines={totals['missing_lines']} missing_branches={totals.get('missing_branches',0)} top={top}")
           PY
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/.coverage-summary
-          git commit -m "diagnostic: record coverage summary"
-          git push origin HEAD:${GITHUB_REF_NAME}
