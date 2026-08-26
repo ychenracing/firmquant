@@ -300,6 +300,86 @@ class StrategyAdapter:
             raise DecisionConflict("strategy session already has an immutable decision with different inputs")
         return None
 
+    def recover_existing_decision(
+        self,
+        request: DecisionRequest,
+        snapshot: DecisionSnapshot,
+    ) -> DecisionSnapshot:
+        """Recompute a durable decision after-state and apply it only if every identity is exact."""
+
+        if not isinstance(snapshot, DecisionSnapshot):
+            raise StrategyAdapterError("decision recovery requires DecisionSnapshot")
+        identity = self._verified_identity()
+        symbols = _normalized_symbols(
+            request.symbols,
+            session=request.strategy_session,
+            policy=self._universe_policy,
+        )
+        account_before_sha256 = _account_sha256(request.account)
+        if account_before_sha256 != snapshot.account_before_sha256:
+            raise DecisionRecoveryRequired("decision recovery requires the immutable before-state")
+        request_fingerprint, input_fingerprint = self._fingerprints(
+            request,
+            symbols=symbols,
+            identity=identity,
+            account_before_sha256=account_before_sha256,
+        )
+        if (
+            request_fingerprint != snapshot.request_fingerprint
+            or input_fingerprint != snapshot.input_fingerprint
+        ):
+            raise DecisionRecoveryRequired("decision recovery input identity differs from durable snapshot")
+        current_code_hash = self._engine._code_hash
+        if current_code_hash not in {None, identity.economic_code_fingerprint}:
+            raise StrategyAdapterError("ProductionEngine instance has an unexpected code hash")
+        self._engine._code_hash = identity.economic_code_fingerprint
+        working = copy.deepcopy(request.account)
+        try:
+            decision = self._engine.decide(
+                symbols=symbols,
+                as_of=request.strategy_session.isoformat(),
+                account=working,
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise DecisionRecoveryRequired("uquant decision recovery recomputation failed") from exc
+        uquant_payload = decision.canonical_payload(effective_config_sha256=identity.config_fingerprint)
+        if decision.decision_digest != _canonical_sha256(uquant_payload):
+            raise DecisionRecoveryRequired("recomputed uquant decision digest is not canonical")
+        account_after_sha256 = _account_sha256(working)
+        if getattr(working, "code_hash", None) != identity.economic_code_fingerprint:
+            raise DecisionRecoveryRequired("recomputed account code identity differs")
+        if getattr(working, "data_hash", None) != request.data_manifest_sha256:
+            raise DecisionRecoveryRequired("recomputed account data identity differs")
+        if getattr(working, "data_hash_as_of", None) != request.strategy_session.isoformat():
+            raise DecisionRecoveryRequired("recomputed account data session differs")
+        candidate = DecisionSnapshot.create(
+            strategy_session=request.strategy_session,
+            request_fingerprint=request_fingerprint,
+            input_fingerprint=input_fingerprint,
+            firmquant_commit=request.firmquant_commit,
+            identity=identity,
+            data_manifest_sha256=request.data_manifest_sha256,
+            broker_snapshot_sha256=request.broker_snapshot_sha256,
+            account_before_sha256=account_before_sha256,
+            account_after_sha256=account_after_sha256,
+            uquant_payload=uquant_payload,
+            uquant_decision_digest=decision.decision_digest,
+            risk_summary=decision.risk_summary,
+            created_at=snapshot.created_at,
+            supersedes_decision_id=snapshot.supersedes_decision_id,
+        )
+        if candidate != snapshot:
+            raise DecisionRecoveryRequired("recomputed decision differs from immutable durable snapshot")
+        try:
+            commit_prepared_account(
+                request.account,
+                working,
+                expected_sha256=snapshot.account_after_sha256,
+            )
+        except StrategySyncError as exc:
+            raise DecisionRecoveryRequired("recomputed AccountState could not be applied") from exc
+        return snapshot
+
     def decide_once(self, request: DecisionRequest) -> DecisionSnapshot:
         """Call ProductionEngine.decide() once or fail closed before another economic path."""
 

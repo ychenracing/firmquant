@@ -508,7 +508,47 @@ class ProductionServiceHooks:
         return str(row["reconciliation_id"])
 
     def _post_close_decision(self, session: date) -> int:
-        if self._decisions.for_session(session):
+        existing = self._decisions.for_session(session)
+        if existing:
+            if len(existing) != 1:
+                raise ProductionServicesUnavailable("MULTIPLE_FROZEN_DECISIONS")
+            decision = existing[0]
+            account = self._accounts.load()
+            actual = self._accounts.store.hash_state(account)
+            if actual == decision.account_after_sha256:
+                return 0
+            if actual != decision.account_before_sha256:
+                raise ProductionServicesUnavailable("DECISION_ACCOUNT_RECOVERY_CONTRADICTION")
+            recovered = self._strategy.recover_existing_decision(
+                DecisionRequest(
+                    strategy_session=session,
+                    symbols=self._universe.deployment_symbols,
+                    account=account,
+                    firmquant_commit=decision.firmquant_commit,
+                    data_manifest_sha256=decision.data_manifest_sha256,
+                    broker_snapshot_sha256=decision.broker_snapshot_sha256,
+                    created_at=decision.created_at,
+                ),
+                decision,
+            )
+            persisted = self._accounts.persist_prepared(
+                account,
+                expected_before_sha256=decision.account_before_sha256,
+                operation_kind="DECISION_RECOVERY",
+                evidence_sha256=decision.payload_sha256,
+            )
+            if recovered.decision_id != decision.decision_id or persisted != decision.account_after_sha256:
+                raise ProductionServicesUnavailable("DECISION_ACCOUNT_RECOVERY_MISMATCH")
+            self._audit(
+                "production-decision-recovery:" + decision.decision_id,
+                "PRODUCTION_DECISION_RECOVERY",
+                {
+                    "schema": "firmquant.production-decision-recovery.v1",
+                    "decision_id": decision.decision_id,
+                    "strategy_session": session,
+                    "account_after_sha256": decision.account_after_sha256,
+                },
+            )
             return 0
         symbols = tuple(sorted(set(self._universe.deployment_symbols) | set(_REFERENCE_SYMBOLS)))
         update = self._data_updater.update(symbols, through=session)

@@ -135,6 +135,10 @@ class Strategy:
         self.requests.append(request)
         return self.decision
 
+    def recover_existing_decision(self, request, snapshot):
+        self.requests.append(request)
+        return snapshot
+
 
 class Universe:
     deployment_symbols = ("sz300308", "sz300502")
@@ -572,6 +576,11 @@ def test_post_close_decision_updates_data_and_atomically_persists_account(
         assert hooks._audited("production-decision:" + decision.decision_id)
 
         hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))
+        assert hooks._post_close_decision(STRATEGY_SESSION) == 0
+        assert accounts.persisted[-1][1] == "DECISION_RECOVERY"
+        assert hooks._audited("production-decision-recovery:" + decision.decision_id)
+
+        accounts.store.hash_state = lambda _account: decision.account_after_sha256
         assert hooks._post_close_decision(STRATEGY_SESSION) == 0
 
         hooks._decisions = SimpleNamespace(for_session=lambda _session: ())
