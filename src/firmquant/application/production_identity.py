@@ -57,11 +57,7 @@ def promotion_config_sha256(settings: Settings) -> str:
 def current_clean_firmquant_commit(repository_root: Path | None = None) -> str:
     """Require a clean Git checkout whose identity-bearing files match the locked build record."""
 
-    root = (
-        Path(__file__).resolve().parents[3]
-        if repository_root is None
-        else Path(repository_root).resolve()
-    )
+    root = Path(__file__).resolve().parents[3] if repository_root is None else Path(repository_root).resolve()
     executable = shutil.which("git")
     if executable is None:
         raise RuntimeError("git is required to prove firmquant production identity")
