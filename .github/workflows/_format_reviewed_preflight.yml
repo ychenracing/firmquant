@@ -18,41 +18,11 @@ jobs:
         with:
           ref: codex/account-authority-reconciliation
           fetch-depth: 0
-      - name: Apply formatter-equivalent patch
-        shell: python
+      - name: Format exactly one source file
         run: |
-          from pathlib import Path
-
-          path = Path("src/firmquant/reconciliation/account_preflight.py")
-          text = path.read_text(encoding="utf-8")
-          old_one = """    if coverage in {
-              AdjustmentCoverage.POSITION_TOTAL_SHARES,
-              AdjustmentCoverage.POSITION_SELLABLE_SHARES,
-          } and symbol is None:
-          """
-          old_one = old_one.replace("              ", "        ").replace("          }", "    }")
-          new_one = """    if (
-              coverage
-              in {
-                  AdjustmentCoverage.POSITION_TOTAL_SHARES,
-                  AdjustmentCoverage.POSITION_SELLABLE_SHARES,
-              }
-              and symbol is None
-          ):
-          """
-          new_one = new_one.replace("              ", "        ").replace("                  ", "            ").replace("          )", "    )")
-          old_two = "    if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:\n"
-          new_two = """    if (
-              coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS}
-              and symbol is not None
-          ):
-          """
-          new_two = new_two.replace("              ", "        ").replace("          )", "    )")
-          if text.count(old_one) != 1 or text.count(old_two) != 1:
-              raise SystemExit("format target drifted")
-          text = text.replace(old_one, new_one, 1).replace(old_two, new_two, 1)
-          path.write_text(text, encoding="utf-8")
-          Path(".github/workflows/_format_reviewed_preflight.yml").unlink()
+          python -m pip install --disable-pip-version-check ruff==0.16.4
+          ruff format src/firmquant/reconciliation/account_preflight.py
+          rm .github/workflows/_format_reviewed_preflight.yml
       - name: Commit and self-delete
         run: |
           git config user.name firmquant-agent
