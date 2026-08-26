@@ -161,7 +161,7 @@ def test_bootstrap_rejects_non_disarmed_runtime_and_invalid_summary(tmp_path: Pa
         snapshot = _empty_snapshot()
         broken = replace(
             snapshot,
-            account=replace(snapshot.account, total_assets=Money(Decimal("999"))),
+            account=replace(snapshot.account, total_assets=Money(Decimal("1001"))),
         )
         with pytest.raises(AccountBootstrapDenied, match="BROKER_ECONOMIC_SUMMARY_INVALID"):
             service.bootstrap(broken)
