@@ -86,7 +86,7 @@ def test_broker_sync_commit_rejects_expected_before_conflict_without_overwrite(t
         store.save(conflicting, state_path)
         conflict_hash = store.hash_file(state_path)
 
-        with pytest.raises(RecoveryContradiction, match="before|precondition|changed"):
+        with pytest.raises(RecoveryContradiction, match=r"before|precondition|changed"):
             repository.commit_broker_snapshot(prepared)
 
         assert store.hash_file(state_path) == conflict_hash
