@@ -101,7 +101,9 @@ class AccountReconciliationCoordinator:
         if not isinstance(cash_tolerance, Decimal):
             raise DomainTypeError("account reconciliation cash tolerance must be Decimal")
         if not cash_tolerance.is_finite() or cash_tolerance < 0:
-            raise DomainValidationError("account reconciliation cash tolerance must be finite and nonnegative")
+            raise DomainValidationError(
+                "account reconciliation cash tolerance must be finite and nonnegative"
+            )
         self._accounts = account_repository
         self._reconciler = reconciler
         self._cash_tolerance = Money(cash_tolerance)
