@@ -88,11 +88,7 @@ class LiveExecutionController(ExecutionController):
     @staticmethod
     def _failure_evidence(error: BaseException) -> str:
         reason_codes = getattr(error, "reason_codes", ())
-        safe_reasons = (
-            tuple(str(item) for item in reason_codes)
-            if isinstance(reason_codes, tuple)
-            else ()
-        )
+        safe_reasons = tuple(str(item) for item in reason_codes) if isinstance(reason_codes, tuple) else ()
         payload = json.dumps(
             {
                 "schema": "firmquant.write-failure-evidence.v1",
@@ -190,18 +186,14 @@ class LiveExecutionController(ExecutionController):
         if broker_order_id is None:
             return aggregate
         orders = tuple(
-            item
-            for item in self._capability.query_orders()
-            if item.broker_order_id == broker_order_id
+            item for item in self._capability.query_orders() if item.broker_order_id == broker_order_id
         )
         if not orders:
             return aggregate
         if len(orders) != 1:
             raise RuntimeError("multiple broker orders match one execution")
         fills = tuple(
-            item
-            for item in self._capability.query_fills()
-            if item.broker_order_id == broker_order_id
+            item for item in self._capability.query_fills() if item.broker_order_id == broker_order_id
         )
         with self._production_ledger.database.transaction():
             return self._production_ledger.reconcile_broker_fact(
