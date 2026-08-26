@@ -11,7 +11,10 @@ from urllib.parse import urlsplit
 REDACTED: Final = "<redacted>"
 _MAX_DEPTH: Final = 32
 _SENSITIVE_KEY_FRAGMENTS: Final = (
+    "account_hash",
     "account_id",
+    "account_no",
+    "account_number",
     "account_alias",
     "authorization",
     "cookie",

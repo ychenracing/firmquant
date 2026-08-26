@@ -6,7 +6,7 @@ import hashlib
 import importlib
 import math
 from collections.abc import Callable, Collection, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol, cast
@@ -28,6 +28,7 @@ from firmquant.domain.orders import OrderState
 from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.execution.policy import ExecutionPolicy, FeeSchedule, FillModel
+from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyReportBuilder
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
 from firmquant.persistence.writer_lease import WriterLease
@@ -596,6 +597,48 @@ class ConfiguredOperatorPorts:
             settings=self._settings(),
             kind=ReconciliationKind.MANUAL,
         )
+
+    def report(self, session: date | None, database: Database) -> Mapping[str, object]:
+        settings = self._settings()
+        report_session = session
+        if report_session is None:
+            latest = database.scalar(
+                "SELECT session_date FROM broker_snapshots "
+                "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
+            )
+            if not isinstance(latest, str):
+                raise OperatorCommandDenied("REPORT_SESSION_UNAVAILABLE")
+            try:
+                report_session = date.fromisoformat(latest)
+            except ValueError as error:
+                raise OperatorCommandDenied("REPORT_SESSION_INVALID") from error
+        try:
+            report = DatabaseDailyReportBuilder(database, clock=self._clock).build(report_session)
+            receipt = DailyReportRenderer().write(report, settings.paths.report_directory)
+
+            def append_receipt() -> None:
+                AuditLedger(database).append(
+                    audit_event_id="report:" + report.report_id,
+                    category="REPORT",
+                    actor="daily-report-renderer",
+                    payload={
+                        "schema": "firmquant.daily-report-receipt.v1",
+                        "report_id": receipt.report_id,
+                        "session": receipt.session,
+                        "json_sha256": receipt.json_sha256,
+                        "markdown_sha256": receipt.markdown_sha256,
+                    },
+                    created_at=report.generated_at,
+                )
+
+            if database.in_transaction:
+                append_receipt()
+            else:
+                with database.transaction():
+                    append_receipt()
+        except Exception as error:
+            raise OperatorCommandDenied("REPORT_BUILD_FAILED") from error
+        return report.payload()
 
     @staticmethod
     def _transition(

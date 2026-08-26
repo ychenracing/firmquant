@@ -1590,11 +1590,17 @@ class LocalOperatorService:
         )
 
     def _report(self, request: OperatorRequest) -> OperatorResult:
-        settings, database = self._open_read_database()
-        try:
-            if self._reporter is not None:
-                payload = self._reporter(request.session, database)
-            else:
+        if self._reporter is not None:
+            settings = self._settings()
+            with WriterLease.acquire(
+                self._database_path(settings),
+                owner="operator-report",
+                clock=self._clock,
+            ) as writer:
+                payload = self._reporter(request.session, writer.database)
+        else:
+            settings, database = self._open_read_database()
+            try:
                 report_directory = self._resolved(settings.paths.report_directory)
                 if request.session is None:
                     candidates = sorted(report_directory.glob("*.json"), reverse=True)
@@ -1612,8 +1618,8 @@ class LocalOperatorService:
                 if not isinstance(parsed, dict):
                     raise OperatorCommandDenied("REPORT_INVALID")
                 payload = parsed
-        finally:
-            database.close()
+            finally:
+                database.close()
         return OperatorResult(message="session 报告已读取。", payload=payload)
 
     def _replay(self, request: OperatorRequest) -> OperatorResult:
@@ -1746,6 +1752,7 @@ def create_local_operator_service(config_path: Path) -> OperatorService:
         config_path=config_path,
         runner=ports.run,
         reconciler=ports.reconcile,
+        reporter=ports.report,
         doctor_broker_provider=ports.doctor_broker,
         system_order_canceller=ports,
     )

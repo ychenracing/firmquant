@@ -977,3 +977,124 @@ def test_default_composition_cancel_is_a_safe_noop_without_paper_orders(
         "requested_order_ids": [],
         "cancelled_order_ids": [],
     }
+
+
+def test_default_reporter_builds_json_and_markdown_from_durable_evidence(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "firmquant.toml"
+    paper_config(config)
+    operator = create_local_operator_service(config)
+    operator.execute(request(OperatorCommand.INIT), interaction())
+    database = Database.open(database_path(config))
+    try:
+        with database.transaction():
+            DecisionSnapshotRepository(database).append(decision_snapshot())
+            database.write(
+                """
+                INSERT INTO broker_snapshots(
+                    snapshot_id, account_id_hash, account_type, session_date, captured_at,
+                    broker_event_watermark, raw_payload_sha256, complete
+                ) VALUES ('report-snapshot', ?, 'CASH', '2026-08-26', ?, 0, ?, 1)
+                """,
+                ("a" * 64, NOW.isoformat(), "b" * 64),
+            )
+            database.write(
+                """
+                INSERT INTO cash_snapshots(snapshot_id, available_cash, total_assets)
+                VALUES ('report-snapshot', '23000.0000', '100000.0000')
+                """
+            )
+            database.write(
+                """
+                INSERT INTO position_snapshots(
+                    snapshot_id, symbol, total_shares, sellable_shares,
+                    average_cost, market_value
+                ) VALUES ('report-snapshot', '300502.SZ', 7000, 7000, '9.0000', '77000.0000')
+                """
+            )
+            database.write(
+                """
+                INSERT INTO reconciliation_runs(
+                    reconciliation_id, kind, strategy_session, started_at, completed_at,
+                    passed, blockers_json, details_json, details_sha256
+                ) VALUES (?, 'EOD', '2026-08-26', ?, ?, 0,
+                          '["POSITION_MISMATCH"]', '{}', ?)
+                """,
+                ("recon_" + "9" * 64, NOW.isoformat(), NOW.isoformat(), "c" * 64),
+            )
+            database.write(
+                """
+                INSERT INTO risk_events(
+                    risk_event_id, severity, code, execution_id, symbol,
+                    payload_json, payload_sha256, created_at
+                ) VALUES ('report-risk', 'WARNING', 'STALE_QUOTE', NULL, NULL, '{}', ?, ?)
+                """,
+                ("d" * 64, NOW.isoformat()),
+            )
+            database.write(
+                """
+                INSERT INTO runtime_state(
+                    singleton_id, mode, state, revision, reason, blockers_json, updated_at
+                ) VALUES (1, 'PAPER', 'HALTED', 1, 'reconciliation mismatch',
+                          '["RECONCILIATION_MISMATCH"]', ?)
+                """,
+                (NOW.isoformat(),),
+            )
+    finally:
+        database.close()
+
+    result = operator.execute(
+        request(OperatorCommand.REPORT, session=date(2026, 8, 26)),
+        interaction(),
+    )
+    repeated = operator.execute(
+        request(OperatorCommand.REPORT, session=date(2026, 8, 26)),
+        interaction(),
+    )
+
+    assert result.payload["session"] == "2026-08-26"
+    assert repeated.payload == result.payload
+    assert result.payload["target_actual_differences"] == [
+        {
+            "actual_weight": "0.0000",
+            "difference_weight": "0.0000",
+            "symbol": "300308.SZ",
+            "target_weight": "0.0000",
+        },
+        {
+            "actual_weight": "0.7700",
+            "difference_weight": "-0.0300",
+            "symbol": "300502.SZ",
+            "target_weight": "0.8000",
+        },
+    ]
+    assert result.payload["risk_events"] == ["STALE_QUOTE"]
+    assert result.payload["reconciliation"] == {
+        "passed": False,
+        "blockers": ["POSITION_MISMATCH"],
+    }
+    assert (tmp_path / "reports" / "2026-08-26.json").is_file()
+    assert (tmp_path / "reports" / "2026-08-26.md").is_file()
+    audit_database = Database.open_read_only(database_path(config))
+    try:
+        receipt = audit_database.query_one(
+            "SELECT category, actor, payload_json FROM audit_events WHERE audit_event_id = ?",
+            ("report:" + str(result.payload["report_id"]),),
+        )
+        assert receipt is not None
+        assert receipt["category"] == "REPORT"
+        assert receipt["actor"] == "daily-report-renderer"
+        audit_payload = json.loads(str(receipt["payload_json"]))
+        assert audit_payload["report_id"] == result.payload["report_id"]
+        assert len(audit_payload["json_sha256"]) == 64
+        assert len(audit_payload["markdown_sha256"]) == 64
+        assert (
+            audit_database.scalar(
+                "SELECT count(*) FROM audit_events WHERE audit_event_id = ?",
+                ("report:" + str(result.payload["report_id"]),),
+            )
+            == 1
+        )
+    finally:
+        audit_database.close()
