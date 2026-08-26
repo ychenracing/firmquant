@@ -19,7 +19,11 @@ from typing import Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from firmquant.application.event_pump import DomainEventPump
-from firmquant.application.production_daemon import ProductionCycleResult, ProductionDaemon, ProductionHeartbeat
+from firmquant.application.production_daemon import (
+    ProductionCycleResult,
+    ProductionDaemon,
+    ProductionHeartbeat,
+)
 from firmquant.application.production_events import ProductionEventJournal
 from firmquant.application.production_identity import (
     configuration_sha256,
@@ -49,7 +53,6 @@ from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyRe
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.backup import backup_state
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
-from firmquant.persistence.database import Database
 from firmquant.persistence.production_recovery import ProductionRecoveryService
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
 from firmquant.persistence.repositories import DecisionSnapshotRepository, canonical_json, canonical_sha256
@@ -381,9 +384,7 @@ class ProductionServiceHooks:
                 payload.get("code_hash") in {"", identity.economic_code_fingerprint}
             ),
             data_identity_matches=_data_identity_matches(account, self._settings.paths.data_directory),
-            config_identity_matches=(
-                configuration_sha256(self._config_path) == self._identity.config_sha256
-            ),
+            config_identity_matches=(configuration_sha256(self._config_path) == self._identity.config_sha256),
         )
         receipt = self._reconciler.run(kind, facts)
         if not receipt.passed:
@@ -465,10 +466,13 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable(reason)
 
     def _audited(self, event_id: str) -> bool:
-        return self._database.query_one(
-            "SELECT 1 FROM audit_events WHERE audit_event_id = ?",
-            (event_id,),
-        ) is not None
+        return (
+            self._database.query_one(
+                "SELECT 1 FROM audit_events WHERE audit_event_id = ?",
+                (event_id,),
+            )
+            is not None
+        )
 
     def _audit(self, event_id: str, category: str, payload: Mapping[str, object]) -> None:
         if self._audited(event_id):
@@ -544,8 +548,7 @@ class ProductionServiceHooks:
 
     def _load_arm(self, account_hash: str) -> tuple[ArmService, ArmLease, ArmBinding]:
         row = self._database.query_one(
-            "SELECT * FROM arm_leases WHERE revoked_at IS NULL "
-            "ORDER BY issued_at DESC, lease_id DESC LIMIT 1"
+            "SELECT * FROM arm_leases WHERE revoked_at IS NULL ORDER BY issued_at DESC, lease_id DESC LIMIT 1"
         )
         if row is None:
             raise ProductionServicesUnavailable("ACTIVE_ARM_LEASE_REQUIRED")
@@ -575,10 +578,14 @@ class ProductionServiceHooks:
             service.verify(lease, binding=binding, now=self._now())
         except Exception as error:
             raise ProductionServicesUnavailable("ACTIVE_ARM_LEASE_INVALID") from error
-        required = max(
-            self._settings.execution.sell_window_seconds,
-            self._settings.execution.buy_window_seconds,
-        ) + self._settings.execution.poll_interval_seconds + 1
+        required = (
+            max(
+                self._settings.execution.sell_window_seconds,
+                self._settings.execution.buy_window_seconds,
+            )
+            + self._settings.execution.poll_interval_seconds
+            + 1
+        )
         if lease.expires_at - self._now() <= timedelta(seconds=required):
             raise ProductionServicesUnavailable("ARM_LEASE_TOO_CLOSE_TO_EXPIRY")
         return service, lease, binding
@@ -712,7 +719,9 @@ class ProductionServiceHooks:
                 or 0
             ),
             broker_connected=health.connected,
-            disconnect_duration=timedelta(0) if health.connected else limits.max_disconnect_duration + timedelta(seconds=1),
+            disconnect_duration=timedelta(0)
+            if health.connected
+            else limits.max_disconnect_duration + timedelta(seconds=1),
             existing_order_age=None,
             replacement_count=0,
             submit_count_window=attempts,
@@ -775,7 +784,9 @@ class ProductionServiceHooks:
                         risk_context,
                     )
                     quote_time = self._broker.query_quote(subject.symbol).received_at
-                    symbol_allowed = self._universe.allowed(subject.symbol.canonical, planned.execution_session)
+                    symbol_allowed = self._universe.allowed(
+                        subject.symbol.canonical, planned.execution_session
+                    )
                     command_within = subject.requested_shares.value <= planned.uquant_authorized_shares.value
             elif operation is WriteOperation.CANCEL and isinstance(subject, str):
                 cancel_approved = self._system_cancel_allowed(subject)
@@ -793,8 +804,7 @@ class ProductionServiceHooks:
                     quote_time = self._broker.query_quote(broker_order.symbol).received_at
             known = self._known_client_ids()
             external = any(
-                item.client_order_id is None or item.client_order_id not in known
-                for item in snapshot.orders
+                item.client_order_id is None or item.client_order_id not in known for item in snapshot.orders
             )
             attempts = int(
                 self._database.scalar(
@@ -829,9 +839,7 @@ class ProductionServiceHooks:
                     or 0
                 ),
                 submitting_unresolved_count=int(
-                    self._database.scalar(
-                        "SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'"
-                    )
+                    self._database.scalar("SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'")
                     or 0
                 ),
                 reconciliation_mismatch=False,
@@ -869,7 +877,9 @@ class ProductionServiceHooks:
                 config_sha256=self._identity.promotion_config_sha256,
                 account_hash=account_hash,
                 observed_sessions=1 if prior is None else prior.observed_sessions + 1,
-                hypothetical_orders=len(plan.orders) if prior is None else prior.hypothetical_orders + len(plan.orders),
+                hypothetical_orders=len(plan.orders)
+                if prior is None
+                else prior.hypothetical_orders + len(plan.orders),
                 unresolved_orders=int(
                     self._database.scalar(
                         "SELECT count(*) FROM execution_intents WHERE state IN "
@@ -928,7 +938,10 @@ class ProductionServiceHooks:
             return 0
         reconciliation, _, _ = self._reconcile(ReconciliationKind.INTRADAY)
         facts = self._execution_facts(decision)
-        if facts.broker_snapshot.session_date != session or facts.market_status is not MarketSessionStatus.OPEN:
+        if (
+            facts.broker_snapshot.session_date != session
+            or facts.market_status is not MarketSessionStatus.OPEN
+        ):
             raise ProductionServicesUnavailable("EXECUTION_MARKET_FACT_INVALID")
         plan = ExecutionPlanner().plan(decision, facts)
         if self._settings.mode is Mode.SHADOW:
