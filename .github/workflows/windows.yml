@@ -3,21 +3,32 @@ name: Windows deployment safety
 on:
   push:
     branches:
-      - "codex/production-live-hardening-20260826"
+      - main
+      - "codex/**"
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  FIRMQ_CI: "1"
+  FIRMQ_MODE: PAPER
+  FIRMQ_BROKER_ADAPTER: PAPER
+  FIRMQ_LIVE_TRADING_ENABLED: "false"
+  PYTHONDONTWRITEBYTECODE: "1"
+  UV_FROZEN: "1"
 
 jobs:
-  patch-production-types:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  deployment-smoke:
+    name: Python 3.12 / PAPER-only
+    runs-on: windows-latest
+    timeout-minutes: 25
     steps:
-      - name: Checkout
+      - name: Checkout without retained credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          persist-credentials: true
-      - name: Set up Python
+          persist-credentials: false
+      - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -25,264 +36,23 @@ jobs:
         uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.11.33"
-      - name: Patch production typing boundaries
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          services = Path("src/firmquant/application/production_services.py")
-          text = services.read_text(encoding="utf-8")
-
-          replacements = [
-              ("from types import ModuleType\n", ""),
-              (
-                  "from firmquant.risk.capability import WriteAuthorizationContext, WriteCapabilityFactory, WriteOperation\n",
-                  "from firmquant.risk.capability import (\n"
-                  "    BrokerWriteCapability,\n"
-                  "    WriteAuthorizationContext,\n"
-                  "    WriteCapabilityFactory,\n"
-                  "    WriteOperation,\n"
-                  ")\n",
-              ),
-              ("from firmquant.strategy.account_sync import AccountStateContract\n", ""),
-              (
-                  "from firmquant.strategy.adapter import DecisionRequest, StrategyAdapter\n",
-                  "from firmquant.strategy.adapter import DecisionRequest, ProductionEngineContract, StrategyAdapter\n",
-              ),
-              (
-                  "def _load_engine(source_checkout: Path, data_directory: Path) -> object:\n",
-                  "def _load_engine(source_checkout: Path, data_directory: Path) -> ProductionEngineContract:\n",
-              ),
-              ("        module = cast(ModuleType, current)\n", "        module = current\n"),
-              (
-                  "    return engine_type(data_directory, config)\n",
-                  "    return cast(ProductionEngineContract, engine_type(data_directory, config))\n",
-              ),
-              (
-                  "            cast(AccountStateContract, account),\n",
-                  "            account,\n",
-              ),
-              (
-                  "            canonical_universe=frozenset(Symbol.parse(item) for item in self._universe.canonical_symbols),\n",
-                  "            canonical_universe=frozenset(Symbol.parse(item) for item in self._universe.base_symbols),\n",
-              ),
-              (
-                  "    def _capability(self, authorities: _ExecutionAuthorities):\n",
-                  "    def _capability(self, authorities: _ExecutionAuthorities) -> BrokerWriteCapability:\n",
-              ),
-              (
-                  "    universe = UniversePolicy.from_uquant(configured_symbols=None)\n",
-                  "    observed_now = clock()\n"
-                  "    if observed_now.tzinfo is None or observed_now.utcoffset() is None:\n"
-                  "        raise ProductionServicesUnavailable(\"PRODUCTION_CLOCK_INVALID\")\n"
-                  "    universe = UniversePolicy.from_uquant(\n"
-                  "        configured_symbols=None,\n"
-                  "        as_of=observed_now.astimezone(_SHANGHAI).date(),\n"
-                  "    )\n",
-              ),
-          ]
-          for old, new in replacements:
-              if old not in text:
-                  raise SystemExit(f"missing production-services anchor: {old[:80]!r}")
-              text = text.replace(old, new, 1)
-
-          fraction_anchor = '''def _fraction(value: Decimal, denominator: Decimal) -> Decimal:
-              if denominator <= 0:
-                  return Decimal(0)
-              return min(Decimal(1), max(Decimal(0), value / denominator))
-
-
-'''
-          count_helper = fraction_anchor + '''def _count(value: object, *, label: str) -> int:
-              if value is None:
-                  return 0
-              if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                  raise ProductionServicesUnavailable(f"{label}_INVALID")
-              return value
-
-
-'''
-          if fraction_anchor not in text:
-              raise SystemExit("missing fraction helper anchor")
-          text = text.replace(fraction_anchor, count_helper, 1)
-
-          count_replacements = [
-              ('''        attempts = int(
-              self._database.scalar(
-                  "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
-                  (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-              )
-              or 0
-          )
-''', '''        attempts = _count(
-              self._database.scalar(
-                  "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
-                  (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-              ),
-              label="BROKER_ATTEMPT_COUNT",
-          )
-'''),
-              ('''            open_order_count=int(
-                  self._database.scalar(
-                      "SELECT count(*) FROM execution_intents WHERE state IN "
-                      "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED')"
-                  )
-                  or 0
-              ),
-''', '''            open_order_count=_count(
-                  self._database.scalar(
-                      "SELECT count(*) FROM execution_intents WHERE state IN "
-                      "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED')"
-                  ),
-                  label="OPEN_ORDER_COUNT",
-              ),
-'''),
-              ('''            consecutive_rejections=int(
-                  self._database.scalar(
-                      "SELECT count(*) FROM execution_intents WHERE state = 'REJECTED' "
-                      "AND strategy_session = ?",
-                      (planned.strategy_session.isoformat(),),
-                  )
-                  or 0
-              ),
-''', '''            consecutive_rejections=_count(
-                  self._database.scalar(
-                      "SELECT count(*) FROM execution_intents WHERE state = 'REJECTED' "
-                      "AND strategy_session = ?",
-                      (planned.strategy_session.isoformat(),),
-                  ),
-                  label="CONSECUTIVE_REJECTION_COUNT",
-              ),
-'''),
-              ('''            unresolved_order_count=int(
-                  self._database.scalar(
-                      "SELECT count(*) FROM execution_intents WHERE state IN "
-                      "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                  )
-                  or 0
-              ),
-''', '''            unresolved_order_count=_count(
-                  self._database.scalar(
-                      "SELECT count(*) FROM execution_intents WHERE state IN "
-                      "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                  ),
-                  label="UNRESOLVED_ORDER_COUNT",
-              ),
-'''),
-              ('''            attempts = int(
-                  self._database.scalar(
-                      "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
-                      (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-                  )
-                  or 0
-              )
-''', '''            attempts = _count(
-                  self._database.scalar(
-                      "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
-                      (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-                  ),
-                  label="BROKER_ATTEMPT_COUNT",
-              )
-'''),
-              ('''                unresolved_order_count=int(
-                      self._database.scalar(
-                          "SELECT count(*) FROM execution_intents WHERE state IN ('CANCEL_REQUESTED','UNKNOWN')"
-                      )
-                      or 0
-                  ),
-''', '''                unresolved_order_count=_count(
-                      self._database.scalar(
-                          "SELECT count(*) FROM execution_intents WHERE state IN ('CANCEL_REQUESTED','UNKNOWN')"
-                      ),
-                      label="UNRESOLVED_ORDER_COUNT",
-                  ),
-'''),
-              ('''                submitting_unresolved_count=int(
-                      self._database.scalar("SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'")
-                      or 0
-                  ),
-''', '''                submitting_unresolved_count=_count(
-                      self._database.scalar("SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'"),
-                      label="SUBMITTING_ORDER_COUNT",
-                  ),
-'''),
-              ('''                unresolved_orders=int(
-                      self._database.scalar(
-                          "SELECT count(*) FROM execution_intents WHERE state IN "
-                          "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                      )
-                      or 0
-                  ),
-''', '''                unresolved_orders=_count(
-                      self._database.scalar(
-                          "SELECT count(*) FROM execution_intents WHERE state IN "
-                          "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                      ),
-                      label="UNRESOLVED_ORDER_COUNT",
-                  ),
-'''),
-              ('''                duplicate_economic_orders=int(
-                      self._database.scalar(
-                          "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
-                          "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
-                      )
-                      or 0
-                  ),
-''', '''                duplicate_economic_orders=_count(
-                      self._database.scalar(
-                          "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
-                          "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
-                      ),
-                      label="DUPLICATE_ECONOMIC_ORDER_COUNT",
-                  ),
-'''),
-              ('''                duplicate_fills=int(
-                      self._database.scalar(
-                          "SELECT count(*) FROM (SELECT broker_fill_id FROM fills "
-                          "GROUP BY broker_fill_id HAVING count(*) > 1)"
-                      )
-                      or 0
-                  ),
-''', '''                duplicate_fills=_count(
-                      self._database.scalar(
-                          "SELECT count(*) FROM (SELECT broker_fill_id FROM fills "
-                          "GROUP BY broker_fill_id HAVING count(*) > 1)"
-                      ),
-                      label="DUPLICATE_FILL_COUNT",
-                  ),
-'''),
-          ]
-          for old, new in count_replacements:
-              if old not in text:
-                  raise SystemExit(f"missing count anchor: {old[:90]!r}")
-              text = text.replace(old, new, 1)
-          services.write_text(text, encoding="utf-8", newline="\n")
-
-          daemon = Path("src/firmquant/application/production_daemon.py")
-          dtext = daemon.read_text(encoding="utf-8")
-          old = "from firmquant.application.production_runtime import ProductionRuntime, ProductionRuntimeReceipt\n"
-          new = old + "from firmquant.broker.gateway import BrokerEventSink\n"
-          if old not in dtext:
-              raise SystemExit("missing daemon import anchor")
-          dtext = dtext.replace(old, new, 1)
-          old = "    def subscribe(self, callback_sink: object) -> None: ...\n"
-          new = "    def subscribe(self, callback_sink: BrokerEventSink) -> None: ...\n"
-          if old not in dtext:
-              raise SystemExit("missing daemon subscribe anchor")
-          dtext = dtext.replace(old, new, 1)
-          daemon.write_text(dtext, encoding="utf-8", newline="\n")
-          PY
-          uv sync --frozen --extra dev
-          uv run ruff check --fix src/firmquant/application/production_services.py src/firmquant/application/production_daemon.py
-          uv run ruff format src/firmquant/application/production_services.py src/firmquant/application/production_daemon.py
-          uv run mypy src scripts
-          git diff --check
-          if git diff --quiet; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/firmquant/application/production_services.py src/firmquant/application/production_daemon.py
-          git commit -m "fix: close production typing boundaries"
-          git push origin HEAD:${GITHUB_REF_NAME}
+          enable-cache: true
+      - name: Preserve exact uquant source bytes
+        run: git config --global core.autocrlf false
+      - name: Sync exact locked environment
+        run: uv sync --frozen --extra dev
+      - name: Verify locked uquant identity
+        run: uv run python scripts/verify_source_baseline.py
+      - name: Run Windows-safe persistence and doctor tests
+        run: >-
+          uv run pytest
+          tests/unit/observability/test_doctor.py
+          tests/integration/test_writer_lease.py
+          tests/integration/test_backup.py
+          tests/contract/test_xtquant_adapter.py
+          tests/integration/test_xtquant_import_smoke.py
+          -q
+      - name: Run PAPER-only deployment smoke
+        run: uv run python scripts/windows_smoke.py
+      - name: Verify CLI surface
+        run: uv run python -m firmquant --help
