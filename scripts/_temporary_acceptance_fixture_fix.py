@@ -51,17 +51,25 @@ replacements = (
         "closed execution facts",
     ),
     (
-        '''        monkeypatch.setattr(ps.StrategyIdentity, "locked", lambda: SimpleNamespace(
-            uquant_commit="1" * 40,
-            verify=lambda: None,
-        ))
+        '''        monkeypatch.setattr(
+            ps.StrategyIdentity,
+            "locked",
+            lambda: SimpleNamespace(
+                uquant_commit="1" * 40,
+                verify=lambda: None,
+            ),
+        )
 ''',
-        '''        monkeypatch.setattr(ps.StrategyIdentity, "locked", lambda: SimpleNamespace(
-            uquant_commit="1" * 40,
-            canonical_universe_sha256="0" * 64,
-            config_fingerprint="0" * 64,
-            verify=lambda: None,
-        ))
+        '''        monkeypatch.setattr(
+            ps.StrategyIdentity,
+            "locked",
+            lambda: SimpleNamespace(
+                uquant_commit="1" * 40,
+                canonical_universe_sha256="0" * 64,
+                config_fingerprint="0" * 64,
+                verify=lambda: None,
+            ),
+        )
 ''',
         "builder identity",
     ),
