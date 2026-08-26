@@ -52,7 +52,7 @@ class RuntimeAccountRepository:
         self._database = database
         self._path = path
         self._clock = clock
-        self._store = UquantAccountStateStore(path)
+        self._store = UquantAccountStateStore()
 
     @property
     def path(self) -> Path:
@@ -78,15 +78,16 @@ class RuntimeAccountRepository:
             raise RuntimeError("runtime account clock must be timezone-aware")
         operation = AccountOperation.begin(
             database=self._database,
-            state_store=self._store,
-            operation_kind=operation_kind,
+            store=self._store,
+            account_path=self._path,
+            prepared_account=account,
             expected_before_sha256=expected_before_sha256,
-            prepared_state=account,
+            operation_kind=operation_kind,
             evidence_sha256=evidence_sha256,
-            created_at=now,
+            now=now,
         )
-        operation.commit_file(self._store, account, at=now)
-        operation.commit_receipt(self._database, state_store=self._store, at=now)
+        operation.commit_file(now=now)
+        operation.commit_receipt(now=now)
         return operation.expected_account_after_sha256
 
     def sync_broker_snapshot(
