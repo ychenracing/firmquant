@@ -21,7 +21,6 @@ from firmquant.config import (
 from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus, Side
 from firmquant.domain.orders import OrderState
 from firmquant.domain.states import RuntimeState
-from firmquant.domain.values import Shares
 from firmquant.execution.live_controller import ExecutionWindowPolicy, LiveExecutionController
 from firmquant.execution.planner import ExecutionPlanner
 from firmquant.execution.policy import FeeSchedule
