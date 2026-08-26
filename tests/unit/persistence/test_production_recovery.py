@@ -18,7 +18,7 @@ def test_production_recovery_uses_monotonic_execution_repository(tmp_path: Path)
             gateway=None,
             clock=lambda: NOW,
         )
-        assert isinstance(service._orders, MonotonicExecutionLedgerRepository)  # noqa: SLF001
-        assert service._orders.database is database  # noqa: SLF001
+        assert isinstance(service._orders, MonotonicExecutionLedgerRepository)
+        assert service._orders.database is database
     finally:
         database.close()
