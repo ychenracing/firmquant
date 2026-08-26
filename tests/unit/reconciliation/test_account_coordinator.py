@@ -6,14 +6,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from firmquant.reconciliation.account_coordinator import (
-    AccountReconciliationBlocked,
-    AccountReconciliationCoordinator,
-)
 
 from firmquant.persistence.account_authority import AccountBinding, AccountBindingRepository
 from firmquant.persistence.database import Database
 from firmquant.persistence.recovery import RecoveryContradiction, UquantAccountStateStore
+from firmquant.reconciliation.account_coordinator import (
+    AccountReconciliationBlocked,
+    AccountReconciliationCoordinator,
+)
 from firmquant.reconciliation.models import ReconciliationKind
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.runtime_account import RuntimeAccountRepository
