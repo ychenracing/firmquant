@@ -57,5 +57,5 @@ jobs:
               rows.append((score, name, float(s['percent_covered'])))
           rows.sort(reverse=True)
           top = '; '.join(f'{name}:{score}:{pct:.1f}%' for score, name, pct in rows[:8])
-          print(f"::notice title=Coverage Summary::total={float(totals['percent_covered']):.4f}% missing_lines={totals['missing_lines']} missing_branches={totals.get('missing_branches',0)} top={top}")
+          print(f"::warning title=Coverage Summary::total={float(totals['percent_covered']):.4f}% missing_lines={totals['missing_lines']} missing_branches={totals.get('missing_branches',0)} top={top}")
           PY
