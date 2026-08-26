@@ -71,4 +71,5 @@ manifest、版本、配置 fingerprint、universe seal，并在 VCS direct URL �
 锁定 wheel 不包含源码 fingerprint registry 引用的若干仓库级文件，因此直接从 site-packages 调用
 `uquant.engine.code_fingerprint()` 会失败关闭。firmquant 没有复制 ProductionEngine 或指纹算法，也没有修改
 uquant；证据、影响与安全边界记录在 [UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)。在策略适配器完成并通过 parity
-验证前，生产决策执行不可用。
+验证前，生产决策执行不可用。当前 `StrategyAdapter` 已在精确验证的干净源码 checkout 中通过严格 parity；wheel
+单独运行仍按上述缺口失败关闭，不能被当作无需源码身份验证的降级路径。
