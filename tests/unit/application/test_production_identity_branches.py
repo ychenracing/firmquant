@@ -9,7 +9,7 @@ import pytest
 
 import firmquant.application.production_identity as identity
 import tests.unit.application.test_production_services_acceptance as base
-from firmquant.config import Mode, Settings
+from firmquant.config import Mode
 
 
 def test_configuration_sha256_requires_regular_readable_file(
