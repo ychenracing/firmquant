@@ -63,6 +63,7 @@ def test_adapter_matches_direct_engine_exactly_in_verified_source_checkout(
         "decision_digest": EXPECTED_DECISION_DIGEST,
         "opportunity": "CHOPPY",
         "orders": 0,
+        "recovered_unapplied_account": True,
         "repeated_account_unchanged": True,
         "repeated_decision_id_equal": True,
         "recovery_required_for_unapplied_account": True,
