@@ -1,0 +1,51 @@
+name: account-authority-patch
+
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+    paths:
+      - .github/workflows/_account_authority_patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: codex/account-authority-reconciliation
+          fetch-depth: 0
+      - name: Apply exact hygiene patches
+        shell: python
+        run: |
+          from pathlib import Path
+
+          test_path = Path("tests/unit/reconciliation/test_account_preflight.py")
+          text = test_path.read_text(encoding="utf-8")
+          old = '''from firmquant.domain.values import Money, Shares\nfrom firmquant.persistence.account_authority import AccountBinding\nfrom firmquant.reconciliation.account_preflight import evaluate_account_preflight\nfrom firmquant.strategy.account_sync import sync_account\n'''
+          new = '''from firmquant.reconciliation.account_preflight import evaluate_account_preflight\n\nfrom firmquant.domain.values import Money, Shares\nfrom firmquant.persistence.account_authority import AccountBinding\nfrom firmquant.strategy.account_sync import sync_account\n'''
+          if old not in text:
+              raise SystemExit("preflight import block drifted")
+          test_path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          bootstrap_path = Path("src/firmquant/strategy/account_bootstrap.py")
+          text = bootstrap_path.read_text(encoding="utf-8")
+          old = '''        for table in ("decision_snapshots", "execution_intents", "broker_orders", "fills"):\n            if self._count(\n                self._database.scalar(f"SELECT count(*) FROM {table}"),\n                code="DATABASE_STATE_INVALID",\n            ):\n                raise AccountBootstrapDenied("ACCOUNT_ECONOMIC_HISTORY_PRESENT")\n'''
+          new = '''        economic_history = sum(\n            self._count(self._database.scalar(query), code="DATABASE_STATE_INVALID")\n            for query in (\n                "SELECT count(*) FROM decision_snapshots",\n                "SELECT count(*) FROM execution_intents",\n                "SELECT count(*) FROM broker_orders",\n                "SELECT count(*) FROM fills",\n            )\n        )\n        if economic_history:\n            raise AccountBootstrapDenied("ACCOUNT_ECONOMIC_HISTORY_PRESENT")\n'''
+          if old not in text:
+              raise SystemExit("bootstrap precondition block drifted")
+          bootstrap_path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          workflow = Path(".github/workflows/_account_authority_patch.yml")
+          workflow.unlink()
+      - name: Commit exact patches and self-delete
+        shell: bash
+        run: |
+          git config user.name firmquant-agent
+          git config user.email firmquant-agent@users.noreply.github.com
+          git add src/firmquant/strategy/account_bootstrap.py tests/unit/reconciliation/test_account_preflight.py .github/workflows/_account_authority_patch.yml
+          git commit -m "fix: clear bootstrap security and preflight test hygiene"
+          git push origin HEAD:codex/account-authority-reconciliation
