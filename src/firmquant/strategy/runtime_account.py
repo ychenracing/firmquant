@@ -30,7 +30,7 @@ class _LoadAccount(Protocol):
 def _load_account(path: Path) -> AccountStateContract:
     try:
         module = importlib.import_module("uquant.account")
-        loader = cast(_LoadAccount, getattr(module, "load_account"))
+        loader = cast(_LoadAccount, module.load_account)  # type: ignore[attr-defined]
         account = loader(path, require_hashes=True, allow_legacy_schema=False)
     except Exception as error:
         raise RuntimeError("uquant production account state cannot be loaded") from error
