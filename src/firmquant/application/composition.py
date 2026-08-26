@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from firmquant.application.operations import OperatorCommandDenied, OperatorReconciliation
+from firmquant.application.production_runtime import ProductionRuntimeFactory
 from firmquant.application.runtime import ReadOnlyBrokerSession
 from firmquant.broker.gateway import BrokerGateway
 from firmquant.broker.paper import PaperBroker
+from firmquant.broker.production_factory import build_production_xtquant_gateway
 from firmquant.broker.replay import RecordedReplayBroker
 from firmquant.config import Mode, PathSettings, Settings, load_settings
 from firmquant.domain.broker_facts import (
@@ -32,6 +34,7 @@ from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyRe
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
 from firmquant.persistence.writer_lease import WriterLease
+from firmquant.reconciliation.live_view import build_operational_ledger_view
 from firmquant.reconciliation.models import (
     ExpectedPosition,
     OperationalLedgerView,
@@ -466,9 +469,11 @@ class ConfiguredOperatorPorts:
         *,
         config_path: Path,
         clock: Callable[[], datetime] = _now_utc,
+        production_runtime_factory: ProductionRuntimeFactory | None = None,
     ) -> None:
         self._config_path = Path(config_path)
         self._clock = clock
+        self._production_runtime_factory = production_runtime_factory
 
     def _settings(self) -> Settings:
         settings = load_settings(self._config_path)
@@ -478,12 +483,31 @@ class ConfiguredOperatorPorts:
 
         return settings.model_copy(
             update={
+                "broker": settings.broker.model_copy(
+                    update={
+                        "xtquant_userdata_path": (
+                            None
+                            if settings.broker.xtquant_userdata_path is None
+                            else resolved(settings.broker.xtquant_userdata_path)
+                        ),
+                        "safety_manifest_path": (
+                            None
+                            if settings.broker.safety_manifest_path is None
+                            else resolved(settings.broker.safety_manifest_path)
+                        ),
+                    }
+                ),
                 "paths": PathSettings(
                     state_directory=resolved(settings.paths.state_directory),
                     data_directory=resolved(settings.paths.data_directory),
                     report_directory=resolved(settings.paths.report_directory),
                     backup_directory=resolved(settings.paths.backup_directory),
-                )
+                    uquant_source_checkout=(
+                        None
+                        if settings.paths.uquant_source_checkout is None
+                        else resolved(settings.paths.uquant_source_checkout)
+                    ),
+                ),
             }
         )
 
@@ -506,6 +530,23 @@ class ConfiguredOperatorPorts:
                 raise OperatorCommandDenied("REPLAY_RECORDING_UNAVAILABLE")
             return RecordedReplayBroker.from_jsonl(recording)
         raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE")
+
+    def _production_gateway(self, settings: Settings, database: Database) -> BrokerGateway:
+        if settings.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            raise OperatorCommandDenied("MODE_NOT_PRODUCTION_XTQUANT")
+        blockers = settings.xtquant_runtime_blockers()
+        if blockers:
+            raise OperatorCommandDenied(blockers[0])
+        try:
+            return build_production_xtquant_gateway(
+                settings=settings,
+                database=database,
+                clock=self._clock,
+            )
+        except OperatorCommandDenied:
+            raise
+        except Exception as error:
+            raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE") from error
 
     def doctor_broker(self) -> BrokerGateway:
         """Build a fresh read-only diagnostic gateway without write capability."""
@@ -550,7 +591,11 @@ class ConfiguredOperatorPorts:
         except Exception as error:
             raise OperatorCommandDenied("UQUANT_IDENTITY_UNAVAILABLE") from error
         account = _safe_account(self._account_path(settings))
-        gateway = self._gateway(settings, account)
+        gateway = (
+            self._production_gateway(settings, database)
+            if settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
+            else self._gateway(settings, account)
+        )
         gateway.connect()
         try:
             snapshot = ReadOnlyBrokerSession(
@@ -562,10 +607,19 @@ class ConfiguredOperatorPorts:
             facts = ReconciliationFacts(
                 broker_snapshot=snapshot,
                 strategy_account=_strategy_account(account, snapshot),
-                operational_ledger=_operational_ledger(
-                    database,
-                    expected_account_id_hash=expected_id,
-                    expected_account_type=expected_type,
+                operational_ledger=(
+                    build_operational_ledger_view(
+                        database,
+                        broker_session=snapshot.session_date,
+                        expected_account_id_hash=expected_id,
+                        expected_account_type=expected_type,
+                    )
+                    if settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
+                    else _operational_ledger(
+                        database,
+                        expected_account_id_hash=expected_id,
+                        expected_account_type=expected_type,
+                    )
                 ),
                 company_action_suspected_symbols=frozenset(),
                 uquant_code_identity_matches=account.code_hash == identity.economic_code_fingerprint,
@@ -665,6 +719,33 @@ class ConfiguredOperatorPorts:
         if mode is not settings.mode:
             raise OperatorCommandDenied("RUN_MODE_CONFIG_MISMATCH")
         database_path = settings.paths.state_directory / "firmquant.sqlite3"
+        if mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            settings.paths.state_directory.mkdir(parents=True, exist_ok=True)
+            with WriterLease.acquire(
+                database_path,
+                owner="production-runtime",
+                clock=self._clock,
+            ) as writer:
+                factory = self._production_runtime_factory
+                if factory is None:
+                    from firmquant.application.production_daemon import create_production_runtime
+
+                    runtime = create_production_runtime(
+                        config_path=self._config_path,
+                        settings=settings,
+                        writer=writer,
+                        clock=self._clock,
+                    )
+                else:
+                    runtime = factory(settings, writer)
+                receipt = runtime.run()
+            return {
+                **dict(receipt.payload()),
+                "runtime_state": RuntimeState.DISARMED.value,
+                "reconciliation_id": receipt.startup_reconciliation_id,
+                "reconciliation_passed": receipt.stopped_cleanly,
+                "blockers": [],
+            }
         with WriterLease.acquire(
             database_path,
             owner="configured-runtime",
