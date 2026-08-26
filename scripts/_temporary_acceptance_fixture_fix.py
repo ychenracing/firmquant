@@ -67,6 +67,7 @@ replacements = (
                 uquant_commit="1" * 40,
                 canonical_universe_sha256="0" * 64,
                 config_fingerprint="0" * 64,
+                economic_code_fingerprint="0" * 64,
                 verify=lambda: None,
             ),
         )
