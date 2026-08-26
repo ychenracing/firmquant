@@ -108,6 +108,16 @@ class CancelRequested(OrderEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class CancelNotAccepted(OrderEvent):
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        OrderEvent.__post_init__(self)
+        if not isinstance(self.evidence_sha256, str) or _SHA256.fullmatch(self.evidence_sha256) is None:
+            raise DomainValidationError("cancel rejection evidence must be SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
 class CancelConfirmed(OrderEvent):
     broker_order_id: str | None = None
 
@@ -181,6 +191,7 @@ type SupportedOrderEvent = (
     | UnknownResolvedNotAccepted
     | FillReported
     | CancelRequested
+    | CancelNotAccepted
     | CancelConfirmed
     | BrokerRejected
     | OrderExpired
@@ -191,6 +202,7 @@ __all__ = (
     "BrokerAcknowledged",
     "BrokerRejected",
     "CancelConfirmed",
+    "CancelNotAccepted",
     "CancelRequested",
     "FillReported",
     "OrderArmed",
