@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from firmquant.broker.fake import BrokerOperation, FakeBroker, ScriptedOutcome
 from firmquant.broker.gateway import BrokerHealth, BrokerOrderCommand
 from firmquant.broker.normalization import normalize_order
@@ -16,10 +18,10 @@ from firmquant.config import (
     Mode,
     Settings,
 )
-from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus
+from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus, Side
 from firmquant.domain.orders import OrderState
 from firmquant.domain.states import RuntimeState
-from firmquant.domain.values import Money, Shares
+from firmquant.domain.values import Shares
 from firmquant.execution.live_controller import ExecutionWindowPolicy, LiveExecutionController
 from firmquant.execution.planner import ExecutionPlanner
 from firmquant.execution.policy import FeeSchedule
@@ -279,4 +281,14 @@ def test_window_policy_is_strict_and_side_specific() -> None:
         minimum_order_lifetime=timedelta(seconds=1),
         poll_interval=timedelta(seconds=1),
     )
-    assert policy.window_for(plan_side := execution_snapshot().quotes[0].symbol and plan_side if False else None)  # type: ignore[arg-type,used-before-def]
+    assert policy.window_for(Side.SELL) == timedelta(seconds=3)
+    assert policy.window_for(Side.BUY) == timedelta(seconds=5)
+    with pytest.raises(TypeError):
+        policy.window_for("BUY")  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        ExecutionWindowPolicy(
+            sell_window=timedelta(seconds=1),
+            buy_window=timedelta(seconds=1),
+            minimum_order_lifetime=timedelta(seconds=2),
+            poll_interval=timedelta(seconds=1),
+        )
