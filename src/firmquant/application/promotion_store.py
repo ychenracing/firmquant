@@ -78,6 +78,7 @@ class PromotionStore:
             if stored != evidence:
                 raise RuntimeError("SHADOW promotion identity collision")
             return False
+
         def append_event() -> None:
             self._audit.append(
                 audit_event_id=event_id,
@@ -86,6 +87,7 @@ class PromotionStore:
                 payload=self._payload(evidence),
                 created_at=evidence.created_at,
             )
+
         if self._database.in_transaction:
             append_event()
         else:
