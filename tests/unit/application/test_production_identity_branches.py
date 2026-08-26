@@ -54,9 +54,7 @@ def test_promotion_config_identity_is_typed_stable_and_sensitive_to_execution_co
     assert identity.promotion_config_sha256(changed) != first
 
     changed_account = settings.model_copy(
-        update={
-            "broker": settings.broker.model_copy(update={"account_alias": "another-account"})
-        }
+        update={"broker": settings.broker.model_copy(update={"account_alias": "another-account"})}
     )
     assert identity.promotion_config_sha256(changed_account) != first
 
@@ -77,9 +75,7 @@ def test_current_clean_commit_requires_git_and_valid_clean_identity(
     monkeypatch.setattr(
         identity.subprocess,
         "run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            subprocess.CalledProcessError(1, "git")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.CalledProcessError(1, "git")),
     )
     with pytest.raises(RuntimeError, match="cannot be inspected"):
         identity.current_clean_firmquant_commit(tmp_path)

@@ -92,6 +92,7 @@ def test_factory_classifies_sdk_manifest_failures_and_composes_identity_wrapper(
     settings, _config = base.settings_for(tmp_path / "prod", Mode.SHADOW)
     database = Database.open(tmp_path / "firmquant.sqlite3")
     try:
+
         def missing_import(_name: str) -> object:
             raise ModuleNotFoundError("xtquant")
 
@@ -133,9 +134,9 @@ def test_factory_classifies_sdk_manifest_failures_and_composes_identity_wrapper(
         monkeypatch.setattr(
             factory,
             "EconomicIdentityBroker",
-            lambda *, gateway, database: wrapped
-            if gateway is transport and isinstance(database, Database)
-            else None,
+            lambda *, gateway, database: (
+                wrapped if gateway is transport and isinstance(database, Database) else None
+            ),
         )
         result = factory.build_production_xtquant_gateway(
             settings=settings,
