@@ -242,27 +242,27 @@ class AccountBindingRepository:
         if not hasattr(row, "__getitem__"):
             raise PersistenceConflict("account binding row is invalid")
         try:
-            raw_symbols = json.loads(str(row["data_symbols_json"]))  # type: ignore[index]
+            raw_symbols = json.loads(str(row["data_symbols_json"]))
             if not isinstance(raw_symbols, list) or not all(isinstance(item, str) for item in raw_symbols):
                 raise ValueError
             binding = AccountBinding.create(
-                account_id_hash=str(row["account_id_hash"]),  # type: ignore[index]
-                account_type=AccountType(str(row["account_type"])),  # type: ignore[index]
-                broker_snapshot_sha256=str(row["broker_snapshot_sha256"]),  # type: ignore[index]
-                account_state_sha256=str(row["account_state_sha256"]),  # type: ignore[index]
-                uquant_commit=str(row["uquant_commit"]),  # type: ignore[index]
-                uquant_code_fingerprint=str(row["uquant_code_fingerprint"]),  # type: ignore[index]
-                data_hash=str(row["data_hash"]),  # type: ignore[index]
-                data_as_of=str(row["data_as_of"]),  # type: ignore[index]
+                account_id_hash=str(row["account_id_hash"]),
+                account_type=AccountType(str(row["account_type"])),
+                broker_snapshot_sha256=str(row["broker_snapshot_sha256"]),
+                account_state_sha256=str(row["account_state_sha256"]),
+                uquant_commit=str(row["uquant_commit"]),
+                uquant_code_fingerprint=str(row["uquant_code_fingerprint"]),
+                data_hash=str(row["data_hash"]),
+                data_as_of=str(row["data_as_of"]),
                 data_symbols=tuple(raw_symbols),
-                created_at=datetime.fromisoformat(str(row["created_at"])),  # type: ignore[index]
+                created_at=datetime.fromisoformat(str(row["created_at"])),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise PersistenceConflict("account binding row is invalid") from error
         if (
-            binding.binding_id != str(row["binding_id"])  # type: ignore[index]
-            or binding.payload_json != str(row["payload_json"])  # type: ignore[index]
-            or binding.payload_sha256 != str(row["payload_sha256"])  # type: ignore[index]
+            binding.binding_id != str(row["binding_id"])
+            or binding.payload_json != str(row["payload_json"])
+            or binding.payload_sha256 != str(row["payload_sha256"])
         ):
             raise PersistenceConflict("account binding payload identity mismatch")
         return binding
