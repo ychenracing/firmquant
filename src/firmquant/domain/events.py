@@ -32,6 +32,11 @@ def _reason_code(value: str, *, label: str) -> None:
         raise DomainValidationError(f"{label} must be an uppercase reason code")
 
 
+def _evidence(value: str, *, label: str) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise DomainValidationError(f"{label} must be SHA-256")
+
+
 @dataclass(frozen=True, slots=True)
 class OrderEvent:
     event_id: str
@@ -53,6 +58,15 @@ class OrderArmed(OrderEvent):
 @dataclass(frozen=True, slots=True)
 class SubmitStarted(OrderEvent):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitNotAccepted(OrderEvent):
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        OrderEvent.__post_init__(self)
+        _evidence(self.evidence_sha256, label="submit rejection evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +93,7 @@ class UnknownResolvedNotAccepted(OrderEvent):
 
     def __post_init__(self) -> None:
         OrderEvent.__post_init__(self)
-        if not isinstance(self.evidence_sha256, str) or _SHA256.fullmatch(self.evidence_sha256) is None:
-            raise DomainValidationError("unknown resolution evidence must be SHA-256")
+        _evidence(self.evidence_sha256, label="unknown resolution evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +126,7 @@ class CancelNotAccepted(OrderEvent):
 
     def __post_init__(self) -> None:
         OrderEvent.__post_init__(self)
-        if not isinstance(self.evidence_sha256, str) or _SHA256.fullmatch(self.evidence_sha256) is None:
-            raise DomainValidationError("cancel rejection evidence must be SHA-256")
+        _evidence(self.evidence_sha256, label="cancel rejection evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +198,7 @@ type SupportedOrderEvent = (
     OrderValidated
     | OrderArmed
     | SubmitStarted
+    | SubmitNotAccepted
     | BrokerAcknowledged
     | SubmitOutcomeUnknown
     | UnknownResolvedNotAccepted
@@ -209,6 +222,7 @@ __all__ = (
     "OrderEvent",
     "OrderExpired",
     "OrderValidated",
+    "SubmitNotAccepted",
     "SubmitOutcomeUnknown",
     "SubmitStarted",
     "SupportedOrderEvent",
