@@ -17,12 +17,14 @@ from .events import (
     BrokerAcknowledged,
     BrokerRejected,
     CancelConfirmed,
+    CancelNotAccepted,
     CancelRequested,
     FillReported,
     OrderArmed,
     OrderEvent,
     OrderExpired,
     OrderValidated,
+    SubmitNotAccepted,
     SubmitOutcomeUnknown,
     SubmitStarted,
     SupportedOrderEvent,
@@ -61,6 +63,7 @@ ORDER_TRANSITIONS: Final = MappingProxyType(
         OrderState.ARMED: frozenset({OrderState.SUBMITTING, OrderState.EXPIRED}),
         OrderState.SUBMITTING: frozenset(
             {
+                OrderState.ARMED,
                 OrderState.ACKNOWLEDGED,
                 OrderState.PARTIALLY_FILLED,
                 OrderState.FILLED,
@@ -92,6 +95,8 @@ ORDER_TRANSITIONS: Final = MappingProxyType(
         ),
         OrderState.CANCEL_REQUESTED: frozenset(
             {
+                OrderState.ACKNOWLEDGED,
+                OrderState.PARTIALLY_FILLED,
                 OrderState.FILLED,
                 OrderState.CANCELLED,
                 OrderState.UNKNOWN,
@@ -475,6 +480,12 @@ class OrderAggregate:
                 state=OrderState.SUBMITTING,
                 submit_attempts=self.submit_attempts + 1,
             )
+        if isinstance(event, SubmitNotAccepted):
+            if self.state is not OrderState.SUBMITTING:
+                raise DomainTransitionError(
+                    f"illegal order transition {self.state.value} via SubmitNotAccepted"
+                )
+            return self._updated(event, state=OrderState.ARMED)
         if isinstance(event, SubmitOutcomeUnknown):
             if self.state is OrderState.SUBMITTING:
                 return self._updated(event, state=OrderState.UNKNOWN)
@@ -524,6 +535,17 @@ class OrderAggregate:
                 state=OrderState.CANCEL_REQUESTED,
                 cancel_requests=self.cancel_requests + 1,
             )
+        if isinstance(event, CancelNotAccepted):
+            if self.state is not OrderState.CANCEL_REQUESTED:
+                raise DomainTransitionError(
+                    f"illegal order transition {self.state.value} via CancelNotAccepted"
+                )
+            target = (
+                OrderState.PARTIALLY_FILLED
+                if self.filled_shares.is_positive
+                else OrderState.ACKNOWLEDGED
+            )
+            return self._updated(event, state=target)
         if isinstance(event, CancelConfirmed):
             confirmed_id = event.broker_order_id or self.broker_order_id
             if confirmed_id is None:
