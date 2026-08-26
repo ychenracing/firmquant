@@ -31,7 +31,7 @@ jobs:
               raise DomainValidationError("position account difference requires symbol")
           if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:
               raise DomainValidationError("account-level difference must not carry a symbol")
-          '''
+          '''.replace("          ", "    ", 7)
           new = '''    if (
               coverage
               in {
@@ -46,7 +46,7 @@ jobs:
               and symbol is not None
           ):
               raise DomainValidationError("account-level difference must not carry a symbol")
-          '''
+          '''.replace("          ", "    ", 13)
           if text.count(old) != 1:
               raise SystemExit("format target drifted")
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
