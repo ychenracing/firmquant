@@ -6,7 +6,7 @@ on:
       - "codex/production-live-hardening-20260826"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FIRMQ_CI: "1"
@@ -15,13 +15,11 @@ env:
   UV_FROZEN: "1"
 
 jobs:
-  coverage-repair:
+  coverage-candidate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ychenracing/uquant
@@ -35,26 +33,10 @@ jobs:
         with:
           version: "0.11.33"
       - run: uv sync --frozen --extra dev --quiet
-      - run: uv run python scripts/_temporary_coverage_repair.py
-      - run: uv run python scripts/_temporary_coverage_repair_round2.py
-      - run: >-
-          uv run ruff check --fix
-          src/firmquant/domain/events.py
-          src/firmquant/domain/orders.py
-          src/firmquant/persistence/repositories.py
-          tests/unit/application/test_production_services_branches.py
-          tests/unit/broker/test_production_xtquant_branches.py
-          tests/unit/execution/test_live_controller_branches.py
-      - run: >-
-          uv run ruff format
-          src/firmquant/domain/events.py
-          src/firmquant/domain/orders.py
-          src/firmquant/persistence/repositories.py
-          tests/unit/application/test_production_services_branches.py
-          tests/unit/broker/test_production_xtquant_branches.py
-          tests/unit/execution/test_live_controller_branches.py
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run mypy src scripts
-      - name: Full functional and coverage validation
+      - name: Full functional and 85 percent coverage gate
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
         run: >-
@@ -63,35 +45,15 @@ jobs:
           --cov-branch
           --cov-report=json:coverage.json
           --cov-report=
-          --cov-fail-under=0
+          --cov-fail-under=85
       - name: Emit concise coverage result
+        if: always()
         run: |
+          if [ ! -f coverage.json ]; then exit 0; fi
           python - <<'PY'
           import json
           from pathlib import Path
           data = json.loads(Path('coverage.json').read_text())
           totals = data['totals']
-          rows = []
-          for name, item in data['files'].items():
-              summary = item['summary']
-              score = int(summary.get('missing_lines', 0)) + int(summary.get('missing_branches', 0))
-              rows.append((score, name, float(summary['percent_covered'])))
-          rows.sort(reverse=True)
-          top = '; '.join(f'{name}:{score}:{pct:.1f}%' for score, name, pct in rows[:8])
-          print(f"::warning title=Coverage After Repair::total={float(totals['percent_covered']):.4f}% missing_lines={totals['missing_lines']} missing_branches={totals.get('missing_branches', 0)} top={top}")
+          print(f"::warning title=Coverage Candidate::total={float(totals['percent_covered']):.4f}% missing_lines={totals['missing_lines']} missing_branches={totals.get('missing_branches', 0)}")
           PY
-      - name: Commit verified repair
-        shell: bash
-        run: |
-          git diff --check
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            src/firmquant/domain/events.py \
-            src/firmquant/domain/orders.py \
-            src/firmquant/persistence/repositories.py \
-            tests/unit/application/test_production_services_branches.py \
-            tests/unit/broker/test_production_xtquant_branches.py \
-            tests/unit/execution/test_live_controller_branches.py
-          git commit -m "fix: fail closed on unknown cancel outcomes"
-          git push origin HEAD:${GITHUB_REF_NAME}
