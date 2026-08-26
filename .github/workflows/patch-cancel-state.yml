@@ -1,0 +1,59 @@
+name: Temporary cancel-state patch
+
+on:
+  push:
+    branches:
+      - codex/production-live-hardening-20260826
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !startsWith(github.event.head_commit.message, 'fix(auto): cancel state') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.11.33"
+      - run: uv sync --frozen --extra dev
+      - name: Patch order state machine
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/firmquant/domain/orders.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              "    CancelConfirmed,\n    CancelRequested,\n",
+              "    CancelConfirmed,\n    CancelNotAccepted,\n    CancelRequested,\n",
+          )
+          text = text.replace(
+              "        OrderState.CANCEL_REQUESTED: frozenset(\n            {\n                OrderState.FILLED,\n                OrderState.CANCELLED,\n                OrderState.UNKNOWN,\n            }\n        ),",
+              "        OrderState.CANCEL_REQUESTED: frozenset(\n            {\n                OrderState.ACKNOWLEDGED,\n                OrderState.PARTIALLY_FILLED,\n                OrderState.FILLED,\n                OrderState.CANCELLED,\n                OrderState.UNKNOWN,\n            }\n        ),",
+          )
+          needle = "        if isinstance(event, CancelConfirmed):\n"
+          addition = '''        if isinstance(event, CancelNotAccepted):\n            if self.state is not OrderState.CANCEL_REQUESTED:\n                raise DomainTransitionError(\n                    f"illegal order transition {self.state.value} via CancelNotAccepted"\n                )\n            target = (\n                OrderState.PARTIALLY_FILLED\n                if self.filled_shares.is_positive\n                else OrderState.ACKNOWLEDGED\n            )\n            return self._updated(event, state=target)\n'''
+          if addition not in text:
+              if needle not in text:
+                  raise SystemExit("CancelConfirmed insertion point not found")
+              text = text.replace(needle, addition + needle, 1)
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          uv run ruff check --fix src/firmquant/domain/orders.py tests/unit/domain/test_cancel_not_accepted.py
+          uv run ruff format src/firmquant/domain/orders.py tests/unit/domain/test_cancel_not_accepted.py
+          uv run mypy src scripts
+          uv run pytest tests/unit/domain/test_cancel_not_accepted.py -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/firmquant/domain/orders.py tests/unit/domain/test_cancel_not_accepted.py
+          git commit -m "fix(auto): cancel state handles definite rejection"
+          git push origin HEAD:${GITHUB_REF_NAME}
