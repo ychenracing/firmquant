@@ -10,7 +10,10 @@ from typing import Protocol
 from firmquant.domain.broker_facts import BrokerSnapshot
 from firmquant.domain.errors import DomainTypeError, DomainValidationError
 from firmquant.domain.values import Money
-from firmquant.persistence.account_authority import AccountBinding
+from firmquant.persistence.account_authority import (
+    AccountBinding,
+    ReviewedAccountAdjustmentRepository,
+)
 from firmquant.persistence.recovery import RecoveryContradiction
 from firmquant.strategy.account_prepare import PreparedAccountSync
 from firmquant.strategy.account_sync import AccountStateContract
@@ -92,6 +95,7 @@ class AccountReconciliationCoordinator:
         account_repository: _AccountRepository,
         reconciler: _Reconciler,
         cash_tolerance: Decimal,
+        reviewed_adjustments: ReviewedAccountAdjustmentRepository | None = None,
     ) -> None:
         if not isinstance(cash_tolerance, Decimal):
             raise DomainTypeError("account reconciliation cash tolerance must be Decimal")
@@ -99,9 +103,14 @@ class AccountReconciliationCoordinator:
             raise DomainValidationError(
                 "account reconciliation cash tolerance must be finite and nonnegative"
             )
+        if reviewed_adjustments is not None and not isinstance(
+            reviewed_adjustments, ReviewedAccountAdjustmentRepository
+        ):
+            raise DomainTypeError("account reconciliation reviewed adjustments must be repository or None")
         self._accounts = account_repository
         self._reconciler = reconciler
         self._cash_tolerance = Money(cash_tolerance)
+        self._reviewed_adjustments = reviewed_adjustments
 
     def reconcile(
         self,
@@ -131,6 +140,7 @@ class AccountReconciliationCoordinator:
             operational_ledger=operational_ledger,
             binding=binding,
             cash_tolerance=self._cash_tolerance,
+            reviewed_adjustments=self._reviewed_adjustments,
         )
         if not preflight.passed:
             raise AccountReconciliationBlocked(preflight.blockers)
