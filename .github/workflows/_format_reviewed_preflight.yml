@@ -22,17 +22,16 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+
           path = Path("src/firmquant/reconciliation/account_preflight.py")
           text = path.read_text(encoding="utf-8")
-          old = '''    if coverage in {
+          old_one = """    if coverage in {
               AdjustmentCoverage.POSITION_TOTAL_SHARES,
               AdjustmentCoverage.POSITION_SELLABLE_SHARES,
           } and symbol is None:
-              raise DomainValidationError("position account difference requires symbol")
-          if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:
-              raise DomainValidationError("account-level difference must not carry a symbol")
-          '''.replace("          ", "    ", 7)
-          new = '''    if (
+          """
+          old_one = old_one.replace("              ", "        ").replace("          }", "    }")
+          new_one = """    if (
               coverage
               in {
                   AdjustmentCoverage.POSITION_TOTAL_SHARES,
@@ -40,16 +39,19 @@ jobs:
               }
               and symbol is None
           ):
-              raise DomainValidationError("position account difference requires symbol")
-          if (
+          """
+          new_one = new_one.replace("              ", "        ").replace("                  ", "            ").replace("          )", "    )")
+          old_two = "    if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:\n"
+          new_two = """    if (
               coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS}
               and symbol is not None
           ):
-              raise DomainValidationError("account-level difference must not carry a symbol")
-          '''.replace("          ", "    ", 13)
-          if text.count(old) != 1:
+          """
+          new_two = new_two.replace("              ", "        ").replace("          )", "    )")
+          if text.count(old_one) != 1 or text.count(old_two) != 1:
               raise SystemExit("format target drifted")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          text = text.replace(old_one, new_one, 1).replace(old_two, new_two, 1)
+          path.write_text(text, encoding="utf-8")
           Path(".github/workflows/_format_reviewed_preflight.yml").unlink()
       - name: Commit and self-delete
         run: |
