@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from firmquant.domain.broker_facts import BrokerOrderFact, BrokerOrderStatus
+import hashlib
+from datetime import datetime
 
-from .repositories import ExecutionLedgerRepository, PersistenceConflict
+from firmquant.domain.broker_facts import BrokerOrderFact, BrokerOrderStatus
+from firmquant.domain.events import CancelNotAccepted, SubmitNotAccepted
+from firmquant.domain.orders import OrderAggregate
+
+from .repositories import BrokerAttempt, ExecutionLedgerRepository, PersistenceConflict
 
 _TERMINAL = frozenset(
     {
@@ -25,6 +30,11 @@ _STATUS_RANK = {
     BrokerOrderStatus.EXPIRED: 50,
     BrokerOrderStatus.FILLED: 60,
 }
+
+
+def _write_event_id(prefix: str, attempt: BrokerAttempt, evidence_sha256: str) -> str:
+    payload = f"{prefix}:{attempt.attempt_id}:{evidence_sha256}".encode("utf-8")
+    return prefix + "-" + hashlib.sha256(payload).hexdigest()
 
 
 class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
@@ -97,6 +107,56 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 fact.broker_order_id,
             ),
         )
+
+    def resolve_submit_not_accepted(
+        self,
+        aggregate: OrderAggregate,
+        attempt: BrokerAttempt,
+        *,
+        evidence_sha256: str,
+        occurred_at: datetime,
+    ) -> OrderAggregate:
+        """Return SUBMITTING to ARMED when rejection happened before broker acceptance."""
+
+        current = self.transition(
+            aggregate,
+            SubmitNotAccepted(
+                event_id=_write_event_id("submit-not-accepted", attempt, evidence_sha256),
+                evidence_sha256=evidence_sha256,
+            ),
+            occurred_at=occurred_at,
+        )
+        self.database.write(
+            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? "
+            "WHERE attempt_id = ?",
+            (occurred_at.isoformat(), attempt.attempt_id),
+        )
+        return current
+
+    def resolve_cancel_not_accepted(
+        self,
+        aggregate: OrderAggregate,
+        attempt: BrokerAttempt,
+        *,
+        evidence_sha256: str,
+        occurred_at: datetime,
+    ) -> OrderAggregate:
+        """Restore the open order state after a definitely rejected cancel attempt."""
+
+        current = self.transition(
+            aggregate,
+            CancelNotAccepted(
+                event_id=_write_event_id("cancel-not-accepted", attempt, evidence_sha256),
+                evidence_sha256=evidence_sha256,
+            ),
+            occurred_at=occurred_at,
+        )
+        self.database.write(
+            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? "
+            "WHERE attempt_id = ?",
+            (occurred_at.isoformat(), attempt.attempt_id),
+        )
+        return current
 
 
 __all__ = ("MonotonicExecutionLedgerRepository",)
