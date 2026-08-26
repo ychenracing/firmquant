@@ -22,7 +22,7 @@ def seeded_account():
     return account
 
 
-def test_broker_sync_is_atomically_persisted_with_account_operation_receipt(tmp_path: Path) -> None:
+def test_broker_sync_is_prepared_then_atomically_committed_with_receipt(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     state_path = tmp_path / "uquant-account.json"
     store = UquantAccountStateStore()
@@ -33,10 +33,17 @@ def test_broker_sync_is_atomically_persisted_with_account_operation_receipt(tmp_
         clock=lambda: NOW,
     )
     try:
-        account, receipt = repository.sync_broker_snapshot(completed_buy_snapshot())
+        before = store.hash_file(state_path)
+        prepared = repository.prepare_broker_snapshot(completed_buy_snapshot())
 
-        assert receipt.fills_imported == 1
-        assert account.cash == 994.9
+        assert prepared.receipt.fills_imported == 1
+        assert prepared.prepared_account.cash == 994.9
+        assert store.hash_file(state_path) == before
+        assert database.scalar("SELECT count(*) FROM account_operations") == 0
+
+        persisted = repository.commit_broker_snapshot(prepared)
+
+        assert persisted == prepared.account_after_sha256
         reloaded = repository.load()
         assert reloaded.cash == 994.9
         row = database.query_one(
@@ -45,7 +52,7 @@ def test_broker_sync_is_atomically_persisted_with_account_operation_receipt(tmp_
         assert row is not None
         assert row["operation_kind"] == "BROKER_SYNC"
         assert row["stage"] == "RECEIPT_COMMITTED"
-        assert row["actual_account_after_sha256"] == receipt.account_after_sha256
+        assert row["actual_account_after_sha256"] == prepared.account_after_sha256
     finally:
         database.close()
 
