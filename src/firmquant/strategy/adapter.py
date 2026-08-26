@@ -238,9 +238,12 @@ class StrategyAdapter:
         input_fingerprint: str,
         existing: tuple[DecisionSnapshot, ...],
     ) -> None:
-        event_id = "decision-conflict-" + hashlib.sha256(
-            (request.strategy_session.isoformat() + input_fingerprint).encode("utf-8")
-        ).hexdigest()
+        event_id = (
+            "decision-conflict-"
+            + hashlib.sha256(
+                (request.strategy_session.isoformat() + input_fingerprint).encode("utf-8")
+            ).hexdigest()
+        )
         with self._database.transaction():
             already_recorded = self._database.query_one(
                 "SELECT 1 FROM audit_events WHERE audit_event_id = ?",
@@ -274,11 +277,7 @@ class StrategyAdapter:
         )
         existing = self._snapshots.for_session(request.strategy_session)
         candidate = exact or next(
-            (
-                item
-                for item in existing
-                if item.request_fingerprint == request_fingerprint
-            ),
+            (item for item in existing if item.request_fingerprint == request_fingerprint),
             None,
         )
         if candidate is not None:
@@ -298,9 +297,7 @@ class StrategyAdapter:
                 input_fingerprint=input_fingerprint,
                 existing=existing,
             )
-            raise DecisionConflict(
-                "strategy session already has an immutable decision with different inputs"
-            )
+            raise DecisionConflict("strategy session already has an immutable decision with different inputs")
         return None
 
     def decide_once(self, request: DecisionRequest) -> DecisionSnapshot:
@@ -341,9 +338,7 @@ class StrategyAdapter:
             )
         except (RuntimeError, TypeError, ValueError) as exc:
             raise StrategyAdapterError("uquant ProductionEngine.decide() failed") from exc
-        uquant_payload = decision.canonical_payload(
-            effective_config_sha256=identity.config_fingerprint
-        )
+        uquant_payload = decision.canonical_payload(effective_config_sha256=identity.config_fingerprint)
         observed_digest = _canonical_sha256(uquant_payload)
         if decision.decision_digest != observed_digest:
             raise StrategyAdapterError("uquant decision digest differs from canonical payload")

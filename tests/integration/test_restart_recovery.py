@@ -84,9 +84,7 @@ def test_account_recovery_uses_only_before_or_expected_after_hash(
     assert report.account_receipts[0].classification is expected
     assert report.halt_required is (expected is AccountRecoveryClassification.CONTRADICTION)
     expected_stage = (
-        "CONTRADICTION"
-        if expected is AccountRecoveryClassification.CONTRADICTION
-        else "RECEIPT_COMMITTED"
+        "CONTRADICTION" if expected is AccountRecoveryClassification.CONTRADICTION else "RECEIPT_COMMITTED"
     )
     assert database.scalar("SELECT stage FROM account_operations") == expected_stage
     if expected is AccountRecoveryClassification.CONTRADICTION:
@@ -97,15 +95,10 @@ def test_account_recovery_uses_only_before_or_expected_after_hash(
             gateway=None,
             clock=lambda: NOW + timedelta(seconds=1),
         ).recover()
-        assert (
-            repeated.account_receipts[0].classification
-            is AccountRecoveryClassification.CONTRADICTION
-        )
+        assert repeated.account_receipts[0].classification is AccountRecoveryClassification.CONTRADICTION
 
 
-def test_normal_account_commit_is_write_ahead_and_idempotent(
-    database: Database, tmp_path: Path
-) -> None:
+def test_normal_account_commit_is_write_ahead_and_idempotent(database: Database, tmp_path: Path) -> None:
     store = JsonAccountStateStore()
     path = tmp_path / "account.json"
     before = {"cash": "1000", "revision": 1}

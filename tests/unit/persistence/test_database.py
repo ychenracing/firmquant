@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -96,3 +97,133 @@ def test_read_only_connection_never_creates_a_missing_database(tmp_path: Path) -
         Database.open_read_only(path)
 
     assert not path.exists()
+
+
+@pytest.mark.parametrize("timeout", [True, "5000", None])
+@pytest.mark.parametrize("opener", [Database.open, Database.open_read_only])
+def test_busy_timeout_requires_positive_integer(
+    tmp_path: Path,
+    timeout: object,
+    opener: Callable[..., Database],
+) -> None:
+    path = tmp_path / "firmquant.sqlite3"
+    path.touch()
+    with pytest.raises(TypeError, match="integer"):
+        opener(path, busy_timeout_ms=timeout)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+@pytest.mark.parametrize("opener", [Database.open, Database.open_read_only])
+def test_busy_timeout_rejects_nonpositive_values(
+    tmp_path: Path,
+    timeout: int,
+    opener: Callable[..., Database],
+) -> None:
+    path = tmp_path / "firmquant.sqlite3"
+    path.touch()
+    with pytest.raises(ValueError, match="positive"):
+        opener(path, busy_timeout_ms=timeout)
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_database_symlink_is_rejected(tmp_path: Path, read_only: bool) -> None:
+    target = tmp_path / "target.sqlite3"
+    target.touch()
+    linked = tmp_path / "linked.sqlite3"
+    linked.symlink_to(target)
+    opener = Database.open_read_only if read_only else Database.open
+    with pytest.raises(DatabaseUnavailable, match="symbolic link"):
+        opener(linked)
+
+
+def test_database_parent_must_exist(tmp_path: Path) -> None:
+    path = tmp_path / "missing" / "firmquant.sqlite3"
+    with pytest.raises(DatabaseUnavailable, match="parent directory"):
+        Database.open(path)
+
+
+@pytest.mark.parametrize(
+    ("error", "exception"),
+    [
+        (sqlite3.DatabaseError("not a database"), DatabaseCorrupt),
+        (sqlite3.DatabaseError("database is locked"), DatabaseUnavailable),
+        (OSError("path unavailable"), DatabaseUnavailable),
+    ],
+)
+def test_database_open_maps_low_level_failures_to_safe_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    exception: type[Exception],
+) -> None:
+    def fail_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise error
+
+    monkeypatch.setattr(sqlite3, "connect", fail_connect)
+    with pytest.raises(exception):
+        Database.open(tmp_path / "firmquant.sqlite3")
+
+
+@pytest.mark.parametrize(
+    ("error", "exception"),
+    [
+        (sqlite3.DatabaseError("malformed"), DatabaseCorrupt),
+        (sqlite3.DatabaseError("permission denied"), DatabaseUnavailable),
+        (OSError("path unavailable"), DatabaseUnavailable),
+    ],
+)
+def test_read_only_open_maps_low_level_failures_to_safe_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    exception: type[Exception],
+) -> None:
+    path = tmp_path / "firmquant.sqlite3"
+    path.touch()
+
+    def fail_connect(*_args: object, **_kwargs: object) -> sqlite3.Connection:
+        raise error
+
+    monkeypatch.setattr(sqlite3, "connect", fail_connect)
+    with pytest.raises(exception):
+        Database.open_read_only(path)
+
+
+def test_database_query_helpers_and_properties(db: Database) -> None:
+    assert db.path.name == "firmquant.sqlite3"
+    assert db.in_transaction is False
+    assert db.query_one("SELECT 1 AS value")["value"] == 1  # type: ignore[index]
+    assert db.query_one("SELECT 1 WHERE 0") is None
+    assert len(db.query_all("SELECT 1 UNION ALL SELECT 2")) == 2
+    assert db.scalar("SELECT 1 WHERE 0") is None
+
+
+def test_integrity_check_rejects_unexpected_result(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(db, "query_all", lambda _sql: ())
+    with pytest.raises(DatabaseCorrupt, match="integrity"):
+        db.integrity_check()
+
+
+def test_online_backup_preconditions_are_strict(db: Database, tmp_path: Path) -> None:
+    destination = tmp_path / "backup.sqlite3"
+    with db.transaction(), pytest.raises(TransactionRequired, match="inside a transaction"):
+        db.backup_to(destination)
+
+    destination.touch()
+    with pytest.raises(DatabaseUnavailable, match="must not already exist"):
+        db.backup_to(destination)
+
+    missing_parent = tmp_path / "missing" / "backup.sqlite3"
+    with pytest.raises(DatabaseUnavailable, match="parent does not exist"):
+        db.backup_to(missing_parent)
+
+
+def test_online_backup_creates_verified_database(db: Database, tmp_path: Path) -> None:
+    destination = tmp_path / "backup.sqlite3"
+    db.backup_to(destination)
+    restored = Database.open_read_only(destination)
+    try:
+        restored.integrity_check()
+        assert restored.scalar("SELECT max(version) FROM schema_migrations") == 2
+    finally:
+        restored.close()

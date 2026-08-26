@@ -144,9 +144,7 @@ class BrokerEventRepository:
         _require_text(broker_event_id, label="broker event id")
         _require_text(event_type, label="broker event type")
         if broker_sequence is not None and (
-            isinstance(broker_sequence, bool)
-            or not isinstance(broker_sequence, int)
-            or broker_sequence < 0
+            isinstance(broker_sequence, bool) or not isinstance(broker_sequence, int) or broker_sequence < 0
         ):
             raise ValueError("broker event sequence must be a nonnegative integer or null")
         if isinstance(session_date, datetime) or not isinstance(session_date, date):
@@ -177,9 +175,7 @@ class BrokerEventRepository:
         if existing is not None:
             if tuple(existing) == stable_values:
                 return False
-            raise PersistenceConflict(
-                f"broker event identity collision: {broker_event_id}"
-            )
+            raise PersistenceConflict(f"broker event identity collision: {broker_event_id}")
         self.database.write(
             """
             INSERT INTO broker_events(
@@ -230,9 +226,7 @@ class DecisionSnapshotRepository:
                 payload_sha256=str(row["payload_sha256"]),
                 created_at=datetime.fromisoformat(str(row["created_at"])),
                 supersedes_decision_id=(
-                    None
-                    if row["supersedes_decision_id"] is None
-                    else str(row["supersedes_decision_id"])
+                    None if row["supersedes_decision_id"] is None else str(row["supersedes_decision_id"])
                 ),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -271,9 +265,7 @@ class DecisionSnapshotRepository:
         if existing is not None:
             if existing["payload_sha256"] == snapshot.payload_sha256:
                 return False
-            raise PersistenceConflict(
-                f"decision snapshot identity collision: {snapshot.decision_id}"
-            )
+            raise PersistenceConflict(f"decision snapshot identity collision: {snapshot.decision_id}")
         try:
             self.database.write(
                 """
@@ -345,8 +337,7 @@ def _aggregate_payload(aggregate: OrderAggregate) -> dict[str, object]:
             for item in aggregate.fills
         ],
         "applied_events": [
-            {"event_id": item.event_id, "fingerprint": item.fingerprint}
-            for item in aggregate.applied_events
+            {"event_id": item.event_id, "fingerprint": item.fingerprint} for item in aggregate.applied_events
         ],
         "submit_attempts": aggregate.submit_attempts,
         "cancel_requests": aggregate.cancel_requests,
@@ -407,17 +398,13 @@ def _aggregate_from_json(payload_json: str) -> OrderAggregate:
         aggregate = OrderAggregate(
             intent=intent,
             state=OrderState(str(raw["state"])),
-            broker_order_id=(
-                None if raw["broker_order_id"] is None else str(raw["broker_order_id"])
-            ),
+            broker_order_id=(None if raw["broker_order_id"] is None else str(raw["broker_order_id"])),
             filled_shares=Shares(int(raw["filled_shares"])),
             fills=retained_fills,
             applied_events=retained_events,
             submit_attempts=int(raw["submit_attempts"]),
             cancel_requests=int(raw["cancel_requests"]),
-            late_fill_investigation_required=bool(
-                raw["late_fill_investigation_required"]
-            ),
+            late_fill_investigation_required=bool(raw["late_fill_investigation_required"]),
             anomalies=tuple(str(item) for item in anomalies_raw),
             version=int(raw["version"]),
         )
@@ -455,9 +442,7 @@ class ExecutionLedgerRepository:
         )
         return None if row is None else _aggregate_from_json(str(row["aggregate_json"]))
 
-    def find_economic_order(
-        self, *, decision_id: str, uquant_order_id: str
-    ) -> OrderAggregate | None:
+    def find_economic_order(self, *, decision_id: str, uquant_order_id: str) -> OrderAggregate | None:
         _require_text(decision_id, label="decision id")
         _require_text(uquant_order_id, label="uquant order id")
         row = self.database.query_one(
@@ -572,16 +557,12 @@ class ExecutionLedgerRepository:
             raise PersistenceConflict("domain order event violates stable identity") from error
         return next_aggregate
 
-    def validate_and_arm(
-        self, aggregate: OrderAggregate, *, occurred_at: datetime
-    ) -> OrderAggregate:
+    def validate_and_arm(self, aggregate: OrderAggregate, *, occurred_at: datetime) -> OrderAggregate:
         current = aggregate
         if current.state is OrderState.PLANNED:
             current = self.transition(
                 current,
-                OrderValidated(
-                    event_id=_stable_event_id("validate", current.intent.execution_id)
-                ),
+                OrderValidated(event_id=_stable_event_id("validate", current.intent.execution_id)),
                 occurred_at=occurred_at,
             )
         if current.state is OrderState.VALIDATED:
@@ -610,9 +591,7 @@ class ExecutionLedgerRepository:
         started_at: datetime,
     ) -> BrokerAttempt:
         attempt_number = self._next_attempt_number(aggregate.intent.execution_id)
-        attempt_id = _stable_event_id(
-            "attempt", aggregate.intent.execution_id, attempt_number, command_kind
-        )
+        attempt_id = _stable_event_id("attempt", aggregate.intent.execution_id, attempt_number, command_kind)
         payload_json = canonical_json(command_payload)
         payload_sha256 = hashlib.sha256(payload_json.encode()).hexdigest()
         self.database.write(
@@ -739,9 +718,7 @@ class ExecutionLedgerRepository:
         )
         return next_aggregate
 
-    def _record_broker_order(
-        self, fact: BrokerOrderFact, *, execution_id: str
-    ) -> None:
+    def _record_broker_order(self, fact: BrokerOrderFact, *, execution_id: str) -> None:
         existing = self.database.query_one(
             "SELECT * FROM broker_orders WHERE broker_order_id = ?",
             (fact.broker_order_id,),
@@ -889,11 +866,25 @@ class ExecutionLedgerRepository:
             fill.raw_payload_sha256,
         )
         if existing is not None:
-            observed = tuple(existing[key] for key in (
-                "identity_kind", "broker_order_id", "execution_id", "broker_event_id",
-                "symbol", "side", "shares", "price", "commission", "stamp_duty",
-                "transfer_fee", "session_date", "event_time", "raw_payload_sha256"
-            ))
+            observed = tuple(
+                existing[key]
+                for key in (
+                    "identity_kind",
+                    "broker_order_id",
+                    "execution_id",
+                    "broker_event_id",
+                    "symbol",
+                    "side",
+                    "shares",
+                    "price",
+                    "commission",
+                    "stamp_duty",
+                    "transfer_fee",
+                    "session_date",
+                    "event_time",
+                    "raw_payload_sha256",
+                )
+            )
             if observed != stable:
                 raise PersistenceConflict("broker fill identity collision")
             return
@@ -927,9 +918,7 @@ class ExecutionLedgerRepository:
             or fact.requested_shares != aggregate.intent.requested_shares
         ):
             raise PersistenceConflict("queried broker order contradicts execution intent")
-        ordered_fills = tuple(
-            sorted(fills, key=lambda item: (item.event_sequence, item.broker_fill_id))
-        )
+        ordered_fills = tuple(sorted(fills, key=lambda item: (item.event_sequence, item.broker_fill_id)))
         if any(
             fill.broker_order_id != fact.broker_order_id
             or fill.symbol != fact.symbol
@@ -986,9 +975,7 @@ class ExecutionLedgerRepository:
             current = self.transition(
                 current,
                 BrokerAcknowledged(
-                    event_id=_stable_event_id(
-                        "ack", fact.broker_order_id, fact.event_sequence
-                    ),
+                    event_id=_stable_event_id("ack", fact.broker_order_id, fact.event_sequence),
                     broker_order_id=fact.broker_order_id,
                 ),
                 occurred_at=received_at,
@@ -1033,9 +1020,7 @@ class ExecutionLedgerRepository:
         received_at: datetime,
     ) -> OrderAggregate:
         self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
-        self._complete_attempt(
-            attempt, fact, response_kind="SUBMIT_RETURN", received_at=received_at
-        )
+        self._complete_attempt(attempt, fact, response_kind="SUBMIT_RETURN", received_at=received_at)
         current = aggregate
         if fact.status is BrokerOrderStatus.REJECTED:
             return self.transition(
@@ -1074,9 +1059,7 @@ class ExecutionLedgerRepository:
         current = self.transition(
             current,
             BrokerAcknowledged(
-                event_id=_stable_event_id(
-                    "ack", fact.broker_order_id, fact.event_sequence
-                ),
+                event_id=_stable_event_id("ack", fact.broker_order_id, fact.event_sequence),
                 broker_order_id=fact.broker_order_id,
             ),
             occurred_at=received_at,
@@ -1121,9 +1104,7 @@ class ExecutionLedgerRepository:
         received_at: datetime,
     ) -> OrderAggregate:
         self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
-        self._complete_attempt(
-            attempt, fact, response_kind="CANCEL_RETURN", received_at=received_at
-        )
+        self._complete_attempt(attempt, fact, response_kind="CANCEL_RETURN", received_at=received_at)
         current = aggregate
         for fill in sorted(fills, key=lambda item: (item.event_sequence, item.broker_fill_id)):
             if any(existing.broker_fill_id == fill.broker_fill_id for existing in current.fills):

@@ -97,9 +97,7 @@ def _optional_text(value: object, *, label: str) -> str | None:
     return _text(value, label=label)
 
 
-def _enum[EnumT: StrEnum](
-    enum_type: type[EnumT], value: object, *, label: str
-) -> EnumT:
+def _enum[EnumT: StrEnum](enum_type: type[EnumT], value: object, *, label: str) -> EnumT:
     text = _text(value, label=label).upper()
     try:
         return enum_type(text)
@@ -187,15 +185,9 @@ def _canonical_json_value(value: object, *, label: str) -> object:
     if isinstance(value, Mapping):
         if not all(isinstance(key, str) for key in value):
             raise DomainTypeError(f"{label} mapping keys must be text")
-        return {
-            key: _canonical_json_value(item, label=f"{label}.{key}")
-            for key, item in value.items()
-        }
+        return {key: _canonical_json_value(item, label=f"{label}.{key}") for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [
-            _canonical_json_value(item, label=f"{label}[{index}]")
-            for index, item in enumerate(value)
-        ]
+        return [_canonical_json_value(item, label=f"{label}[{index}]") for index, item in enumerate(value)]
     raise DomainTypeError(f"{label} contains unsupported raw type {type(value).__name__}")
 
 
@@ -216,9 +208,7 @@ def normalize_account(raw: Mapping[str, object]) -> BrokerAccountFact:
     payload = _schema(
         raw,
         label="broker account",
-        required=frozenset(
-            {"account_id_hash", "account_type", "available_cash", "total_assets"}
-        ),
+        required=frozenset({"account_id_hash", "account_type", "available_cash", "total_assets"}),
     )
     account_id_hash = _text(payload["account_id_hash"], label="account id hash")
     return BrokerAccountFact(
@@ -233,9 +223,7 @@ def normalize_position(raw: Mapping[str, object]) -> BrokerPositionFact:
     payload = _schema(
         raw,
         label="broker position",
-        required=frozenset(
-            {"symbol", "total_shares", "sellable_shares", "average_cost", "market_value"}
-        ),
+        required=frozenset({"symbol", "total_shares", "sellable_shares", "average_cost", "market_value"}),
     )
     average_cost = _price(payload["average_cost"], label="average cost", optional=True)
     return BrokerPositionFact(
@@ -274,9 +262,7 @@ def normalize_instrument(raw: Mapping[str, object]) -> InstrumentFact:
         raise AssertionError("required price unexpectedly normalized as null")
     return InstrumentFact(
         symbol=Symbol.parse(_text(payload["symbol"], label="instrument symbol")),
-        security_type=_enum(
-            SecurityType, payload["security_type"], label="security type"
-        ),
+        security_type=_enum(SecurityType, payload["security_type"], label="security type"),
         status=_enum(SecurityStatus, payload["status"], label="security status"),
         trading_unit=_shares(payload["trading_unit"], label="trading unit"),
         price_tick=price_tick,
@@ -313,18 +299,14 @@ def normalize_quote(raw: Mapping[str, object], *, received_at: datetime) -> Quot
     return QuoteFact(
         symbol=Symbol.parse(_text(payload["symbol"], label="quote symbol")),
         last_price=_price(payload["last_price"], label="last price", optional=True),
-        previous_close=_price(
-            payload["previous_close"], label="previous close", optional=True
-        ),
+        previous_close=_price(payload["previous_close"], label="previous close", optional=True),
         bid_price=_price(payload["bid_price"], label="bid price", optional=True),
         ask_price=_price(payload["ask_price"], label="ask price", optional=True),
         volume=_shares(payload["volume"], label="quote volume"),
         turnover=_money(payload["turnover"], label="quote turnover"),
         lower_limit=_price(payload["lower_limit"], label="lower limit", optional=True),
         upper_limit=_price(payload["upper_limit"], label="upper limit", optional=True),
-        market_status=_enum(
-            MarketSessionStatus, payload["market_status"], label="market status"
-        ),
+        market_status=_enum(MarketSessionStatus, payload["market_status"], label="market status"),
         sequence=_sequence(payload["sequence"], label="quote sequence"),
         session_date=_date(payload["session_date"], label="quote session date"),
         event_time=_datetime(payload["event_time"], label="quote event_time"),
@@ -364,9 +346,7 @@ def normalize_order(
     digest = raw_payload_sha256 or canonical_raw_payload_sha256(payload)
     return BrokerOrderFact(
         broker_order_id=_text(payload["broker_order_id"], label="broker order id"),
-        client_order_id=_optional_text(
-            payload["client_order_id"], label="client order id"
-        ),
+        client_order_id=_optional_text(payload["client_order_id"], label="client order id"),
         symbol=Symbol.parse(_text(payload["symbol"], label="order symbol")),
         side=_enum(Side, payload["side"], label="order side"),
         price_type=_enum(PriceType, payload["price_type"], label="price type"),
@@ -462,9 +442,7 @@ def _safe_payload(fact: NormalizedBrokerEventFact) -> Mapping[str, object]:
         payload = {
             "symbol": fact.symbol.canonical,
             "last_price": None if fact.last_price is None else fact.last_price.canonical,
-            "previous_close": (
-                None if fact.previous_close is None else fact.previous_close.canonical
-            ),
+            "previous_close": (None if fact.previous_close is None else fact.previous_close.canonical),
             "bid_price": None if fact.bid_price is None else fact.bid_price.canonical,
             "ask_price": None if fact.ask_price is None else fact.ask_price.canonical,
             "volume": fact.volume.value,
@@ -481,9 +459,7 @@ def _safe_payload(fact: NormalizedBrokerEventFact) -> Mapping[str, object]:
     return MappingProxyType(payload)
 
 
-def normalize_broker_event(
-    raw: Mapping[str, object], *, received_at: datetime
-) -> BrokerEventEnvelope:
+def normalize_broker_event(raw: Mapping[str, object], *, received_at: datetime) -> BrokerEventEnvelope:
     wrapper = _schema(
         raw,
         label="broker callback",
@@ -495,9 +471,7 @@ def normalize_broker_event(
     received = _datetime(received_at, label="broker event received_at")
     digest = canonical_raw_payload_sha256(payload)
     if event_type is BrokerEventType.ORDER:
-        order = normalize_order(
-            payload, received_at=received, raw_payload_sha256=digest
-        )
+        order = normalize_order(payload, received_at=received, raw_payload_sha256=digest)
         fact: NormalizedBrokerEventFact = order
         sequence = order.event_sequence
     elif event_type is BrokerEventType.FILL:

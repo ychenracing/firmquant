@@ -38,6 +38,8 @@ jobs:
         run: uv run bandit -q -r src scripts
       - name: Dependency audit
         run: uv run pip-audit --cache-dir .pytest_cache/pip-audit
+      - name: Firmquant sensitive-data scan
+        run: uv run python scripts/secret_scan.py
 
   secret-scan:
     runs-on: ubuntu-latest

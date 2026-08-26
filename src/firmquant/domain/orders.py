@@ -176,13 +176,9 @@ class ExecutionIntent:
             raise DomainTypeError("execution intent requested shares must be Shares")
         if not self.requested_shares.is_positive:
             raise DomainValidationError("execution intent requested shares must be positive")
-        if isinstance(self.strategy_session, datetime) or not isinstance(
-            self.strategy_session, date
-        ):
+        if isinstance(self.strategy_session, datetime) or not isinstance(self.strategy_session, date):
             raise DomainTypeError("strategy session must be a date")
-        if not isinstance(self.uquant_source_sha, str) or _GIT_SHA.fullmatch(
-            self.uquant_source_sha
-        ) is None:
+        if not isinstance(self.uquant_source_sha, str) or _GIT_SHA.fullmatch(self.uquant_source_sha) is None:
             raise DomainValidationError("uquant source SHA must be a 40-character Git SHA")
         expected_execution_id, expected_key = _intent_hashes(
             decision_id=self.decision_id,
@@ -284,9 +280,7 @@ class OrderAggregate:
             _canonical_id(self.broker_order_id, label="aggregate broker order id")
         if not isinstance(self.filled_shares, Shares):
             raise DomainTypeError("aggregate filled shares must be Shares")
-        if not isinstance(self.fills, tuple) or not all(
-            isinstance(fill, AppliedFill) for fill in self.fills
-        ):
+        if not isinstance(self.fills, tuple) or not all(isinstance(fill, AppliedFill) for fill in self.fills):
             raise DomainTypeError("aggregate fills must be an AppliedFill tuple")
         if sum(fill.shares.value for fill in self.fills) != self.filled_shares.value:
             raise DomainValidationError("aggregate filled shares do not match retained fills")
@@ -391,9 +385,7 @@ class OrderAggregate:
             filled_shares=self.filled_shares if filled_shares is None else filled_shares,
             fills=self.fills if fills is None else fills,
             applied_events=(*self.applied_events, identity),
-            submit_attempts=(
-                self.submit_attempts if submit_attempts is None else submit_attempts
-            ),
+            submit_attempts=(self.submit_attempts if submit_attempts is None else submit_attempts),
             cancel_requests=self.cancel_requests if cancel_requests is None else cancel_requests,
             late_fill_investigation_required=(
                 self.late_fill_investigation_required
@@ -421,9 +413,7 @@ class OrderAggregate:
         if existing is not None:
             if existing == candidate:
                 return self
-            raise DomainTransitionError(
-                f"broker fill identity collision: {event.broker_fill_id}"
-            )
+            raise DomainTransitionError(f"broker fill identity collision: {event.broker_fill_id}")
         allowed_states = {
             OrderState.SUBMITTING,
             OrderState.UNKNOWN,
@@ -433,9 +423,7 @@ class OrderAggregate:
             *TERMINAL_ORDER_STATES,
         }
         if self.state not in allowed_states:
-            raise DomainTransitionError(
-                f"illegal order transition {self.state.value} via FillReported"
-            )
+            raise DomainTransitionError(f"illegal order transition {self.state.value} via FillReported")
         cumulative = self.filled_shares.value + event.shares.value
         if cumulative > self.intent.requested_shares.value:
             raise DomainTransitionError("cumulative fill shares exceed requested shares")

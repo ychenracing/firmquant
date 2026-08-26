@@ -20,8 +20,7 @@ def test_replay_result_is_independent_of_recording_line_order(
         left_path = root / "left.jsonl"
         right_path = root / "right.jsonl"
         events = {
-            sequence: order_event(event_id=f"event-{sequence}", sequence=sequence)
-            for sequence in ordering
+            sequence: order_event(event_id=f"event-{sequence}", sequence=sequence) for sequence in ordering
         }
         write_recording(left_path, [events[sequence] for sequence in ordering])
         write_recording(right_path, [events[sequence] for sequence in reversed(ordering)])

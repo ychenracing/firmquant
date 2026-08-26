@@ -47,9 +47,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         identity = load_locked_source_identity()
         firmquant_root = (
-            arguments.firmquant_root.resolve()
-            if arguments.firmquant_root is not None
-            else _repository_root()
+            arguments.firmquant_root.resolve() if arguments.firmquant_root is not None else _repository_root()
         )
         identity.verify_firmquant_files(firmquant_root)
         verify_uquant_identity(identity, wheel_path=arguments.wheel)

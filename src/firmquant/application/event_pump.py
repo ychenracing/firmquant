@@ -111,9 +111,7 @@ class DomainEventPump:
             elif self._writer_thread_id != current:
                 self._halt_reason = self._halt_reason or "BROKER_EVENT_MULTIPLE_WRITERS"
                 self._halt.set()
-                raise BrokerEventWriterViolation(
-                    "broker events must be dispatched by one writer thread"
-                )
+                raise BrokerEventWriterViolation("broker events must be dispatched by one writer thread")
 
     def dispatch_one(self, writer: Callable[[BrokerEventEnvelope], None]) -> bool:
         """Dispatch one queued event; callback threads never invoke ``writer``."""

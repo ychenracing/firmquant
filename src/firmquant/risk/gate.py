@@ -63,9 +63,7 @@ def _duration(value: object, *, label: str, allow_zero: bool = False) -> None:
         raise DomainValidationError(f"{label} must be {'nonnegative' if allow_zero else 'positive'}")
 
 
-def _fraction(
-    value: object, *, label: str, maximum: Decimal = Decimal(1), allow_zero: bool = True
-) -> None:
+def _fraction(value: object, *, label: str, maximum: Decimal = Decimal(1), allow_zero: bool = True) -> None:
     if not isinstance(value, Decimal):
         raise DomainTypeError(f"{label} must be Decimal")
     if not value.is_finite() or value < 0 or value > maximum or (not allow_zero and value == 0):
@@ -212,9 +210,7 @@ class ExecutionRiskContext:
             if not isinstance(universe_values, frozenset) or not all(
                 isinstance(item, Symbol) for item in universe_values
             ):
-                raise DomainTypeError(
-                    f"risk {universe_label} must be frozenset[Symbol]"
-                )
+                raise DomainTypeError(f"risk {universe_label} must be frozenset[Symbol]")
         if not isinstance(self.uquant_target_shares, Shares):
             raise DomainTypeError("uquant target shares must be Shares")
         for fraction_label, fraction_value in (
@@ -294,9 +290,7 @@ def _max_shares_for_notional(notional: Decimal, price: Decimal) -> int:
 class ExecutionRiskGate:
     """Evaluate all known safety facts in fixed precedence without increasing shares."""
 
-    def evaluate(
-        self, command: RiskCommand, context: ExecutionRiskContext
-    ) -> GateDecision:
+    def evaluate(self, command: RiskCommand, context: ExecutionRiskContext) -> GateDecision:
         if not isinstance(command, RiskCommand):
             raise DomainTypeError("execution risk gate requires RiskCommand")
         if not isinstance(context, ExecutionRiskContext):
@@ -336,13 +330,9 @@ class ExecutionRiskGate:
             halt.append("DEPLOYMENT_ALLOWLIST_EXPANDS_UNIVERSE")
         if broker_command.requested_shares.value > command.uquant_authorized_shares.value:
             halt.append("COMMAND_EXCEEDS_UQUANT_AUTHORIZATION")
-        if not context.broker_connected and (
-            context.disconnect_duration > limits.max_disconnect_duration
-        ):
+        if not context.broker_connected and (context.disconnect_duration > limits.max_disconnect_duration):
             halt.append("BROKER_DISCONNECT_LIMIT")
-        if context.quote is not None and (
-            context.quote.received_at - context.now > limits.max_clock_drift
-        ):
+        if context.quote is not None and (context.quote.received_at - context.now > limits.max_clock_drift):
             halt.append("QUOTE_TIME_IN_FUTURE")
         if halt:
             return _zero(GateAction.HALT, halt)
@@ -383,15 +373,14 @@ class ExecutionRiskGate:
             )
             if any(item is None for item in price_limits):
                 block.append("PRICE_LIMIT_FACT_MISSING")
-            elif (
-                instrument.lower_limit != quote.lower_limit
-                or instrument.upper_limit != quote.upper_limit
-            ):
+            elif instrument.lower_limit != quote.lower_limit or instrument.upper_limit != quote.upper_limit:
                 block.append("PRICE_LIMIT_FACT_MISMATCH")
             lower = instrument.lower_limit
             upper = instrument.upper_limit
-            if lower is not None and upper is not None and not (
-                lower.value <= broker_command.limit_price.value <= upper.value
+            if (
+                lower is not None
+                and upper is not None
+                and not (lower.value <= broker_command.limit_price.value <= upper.value)
             ):
                 block.append("LIMIT_PRICE_OUT_OF_BOUNDS")
             if broker_command.limit_price.decimal_places > instrument.price_precision:
@@ -406,9 +395,7 @@ class ExecutionRiskGate:
                     if anchor is None:
                         continue
                     deviation = (
-                        abs(broker_command.limit_price.value - anchor.value)
-                        / anchor.value
-                        * Decimal(10000)
+                        abs(broker_command.limit_price.value - anchor.value) / anchor.value * Decimal(10000)
                     )
                     if deviation > limits.max_price_deviation_bps:
                         block.append("PRICE_DEVIATION_LIMIT")
@@ -453,9 +440,7 @@ class ExecutionRiskGate:
             return _zero(GateAction.DELAY, delay)
 
         if instrument is None or quote is None:
-            raise DomainValidationError(
-                "blocked missing market facts reached quantity evaluation"
-            )
+            raise DomainValidationError("blocked missing market facts reached quantity evaluation")
         requested = broker_command.requested_shares.value
         candidate = min(requested, command.uquant_authorized_shares.value)
         shrink_reasons: list[str] = []
@@ -472,9 +457,7 @@ class ExecutionRiskGate:
                 context.uquant_target_shares.value - current_shares,
                 "UQUANT_TARGET_SHARES_SHRINK",
             )
-            target_symbol_notional = (
-                context.uquant_target_weight * context.total_assets.value
-            )
+            target_symbol_notional = context.uquant_target_weight * context.total_assets.value
             apply_cap(
                 _max_shares_for_notional(
                     target_symbol_notional - context.actual_symbol_notional.value,
@@ -482,9 +465,9 @@ class ExecutionRiskGate:
                 ),
                 "UQUANT_TARGET_WEIGHT_SHRINK",
             )
-            target_gross = min(
-                context.uquant_target_gross, context.uquant_target_gross_cap
-            ) * context.total_assets.value
+            target_gross = (
+                min(context.uquant_target_gross, context.uquant_target_gross_cap) * context.total_assets.value
+            )
             apply_cap(
                 _max_shares_for_notional(
                     target_gross - context.actual_gross_notional.value,
@@ -494,25 +477,21 @@ class ExecutionRiskGate:
             )
             apply_cap(
                 _max_shares_for_notional(
-                    limits.max_symbol_notional.value
-                    - context.actual_symbol_notional.value,
+                    limits.max_symbol_notional.value - context.actual_symbol_notional.value,
                     broker_command.limit_price.value,
                 ),
                 "SYMBOL_NOTIONAL_CAP_SHRINK",
             )
             apply_cap(
                 _max_shares_for_notional(
-                    limits.max_total_gross_notional.value
-                    - context.actual_gross_notional.value,
+                    limits.max_total_gross_notional.value - context.actual_gross_notional.value,
                     broker_command.limit_price.value,
                 ),
                 "TOTAL_GROSS_CAP_SHRINK",
             )
             cash_for_gross = context.available_cash.value - command.estimated_fees.value
             apply_cap(
-                _max_shares_for_notional(
-                    cash_for_gross, broker_command.limit_price.value
-                ),
+                _max_shares_for_notional(cash_for_gross, broker_command.limit_price.value),
                 "AVAILABLE_CASH_SHRINK",
             )
         else:
@@ -530,32 +509,27 @@ class ExecutionRiskGate:
                     "SELLABLE_QUANTITY_SHRINK",
                 )
         apply_cap(
-            _max_shares_for_notional(
-                limits.max_order_notional.value, broker_command.limit_price.value
-            ),
+            _max_shares_for_notional(limits.max_order_notional.value, broker_command.limit_price.value),
             "ORDER_NOTIONAL_CAP_SHRINK",
         )
         apply_cap(
             _max_shares_for_notional(
-                limits.max_daily_submitted_notional.value
-                - context.daily_submitted_notional.value,
+                limits.max_daily_submitted_notional.value - context.daily_submitted_notional.value,
                 broker_command.limit_price.value,
             ),
             "DAILY_SUBMITTED_CAP_SHRINK",
         )
         apply_cap(
             _max_shares_for_notional(
-                limits.max_daily_filled_notional.value
-                - context.daily_filled_notional.value,
+                limits.max_daily_filled_notional.value - context.daily_filled_notional.value,
                 broker_command.limit_price.value,
             ),
             "DAILY_FILLED_CAP_SHRINK",
         )
         volume_cap = int(
-            (
-                Decimal(quote.volume.value)
-                * context.uquant_max_volume_participation
-            ).to_integral_value(rounding=ROUND_FLOOR)
+            (Decimal(quote.volume.value) * context.uquant_max_volume_participation).to_integral_value(
+                rounding=ROUND_FLOOR
+            )
         )
         apply_cap(volume_cap, "VOLUME_PARTICIPATION_SHRINK")
         unit = instrument.trading_unit.value

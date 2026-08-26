@@ -45,9 +45,7 @@ class SafeConfigModel(BaseModel):
         rendered: dict[str, object] = {}
         for name in self.__class__.model_fields:
             value = getattr(self, name)
-            rendered[name] = (
-                "<redacted>" if name in self.sensitive_fields else self._safe_value(value)
-            )
+            rendered[name] = "<redacted>" if name in self.sensitive_fields else self._safe_value(value)
         return rendered
 
     def safe_repr(self) -> str:
@@ -85,9 +83,7 @@ class BrokerAdapter(StrEnum):
 class BrokerSettings(SafeConfigModel):
     """Broker selection and local references; never broker credentials."""
 
-    sensitive_fields: ClassVar[frozenset[str]] = frozenset(
-        {"account_alias", "xtquant_userdata_path"}
-    )
+    sensitive_fields: ClassVar[frozenset[str]] = frozenset({"account_alias", "xtquant_userdata_path"})
 
     adapter: BrokerAdapter = BrokerAdapter.PAPER
     account_alias: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
@@ -174,13 +170,10 @@ class Settings(SafeConfigModel):
             Mode.LIVE: BrokerAdapter.XTQUANT,
         }[self.mode]
         if self.broker.adapter is not expected_adapter:
-            raise ValueError(
-                f"{self.mode.value} requires broker adapter {expected_adapter.value}"
-            )
+            raise ValueError(f"{self.mode.value} requires broker adapter {expected_adapter.value}")
 
         if self.mode in real_modes and not (
-            self.compliance.program_trading_report_confirmed
-            and self.compliance.broker_api_authorized
+            self.compliance.program_trading_report_confirmed and self.compliance.broker_api_authorized
         ):
             raise ValueError(f"{self.mode.value} requires both compliance confirmations")
         if self.mode is Mode.CANARY and self.canary_caps is None:

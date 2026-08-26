@@ -203,18 +203,12 @@ class FakeBroker:
 
     def _next_outcome(self, operation: BrokerOperation) -> ScriptedOutcome:
         if not self._outcomes:
-            raise UnscriptedBrokerOperation(
-                f"fake broker {operation.value.lower()} has no scripted outcome"
-            )
+            raise UnscriptedBrokerOperation(f"fake broker {operation.value.lower()} has no scripted outcome")
         outcome = self._outcomes.popleft()
         if outcome.operation is not operation:
-            raise ScriptedOperationMismatch(
-                f"expected {outcome.operation.value}, observed {operation.value}"
-            )
+            raise ScriptedOperationMismatch(f"expected {outcome.operation.value}, observed {operation.value}")
         if outcome.callbacks and self._sink is None:
-            raise UnscriptedBrokerOperation(
-                "scripted callbacks require subscribe() before broker write"
-            )
+            raise UnscriptedBrokerOperation("scripted callbacks require subscribe() before broker write")
         return outcome
 
     def _apply_order(self, response: BrokerOrderFact) -> None:

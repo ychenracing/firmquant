@@ -211,9 +211,7 @@ def test_raw_payload_digest_is_order_independent_and_bound_to_exact_payload() ->
     right = {"price": "10.10", "shares": 100, "symbol": "600519.SH"}
 
     assert canonical_raw_payload_sha256(left) == canonical_raw_payload_sha256(right)
-    assert canonical_raw_payload_sha256(left) != canonical_raw_payload_sha256(
-        {**left, "shares": 200}
-    )
+    assert canonical_raw_payload_sha256(left) != canonical_raw_payload_sha256({**left, "shares": 200})
 
 
 def test_broker_event_envelope_owns_digest_and_normalized_metadata() -> None:

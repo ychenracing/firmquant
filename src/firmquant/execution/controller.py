@@ -105,20 +105,14 @@ class ExecutionController:
             if candidate == position.total_shares.value and planned.target_shares.value == 0:
                 return candidate, "AUTHORIZED"
             candidate -= candidate % unit
-            return (
-                (candidate, "SELLABLE_SHRINK")
-                if candidate < authorization
-                else (candidate, "AUTHORIZED")
-            )
+            return (candidate, "SELLABLE_SHRINK") if candidate < authorization else (candidate, "AUTHORIZED")
         target_gap = max(0, planned.target_shares.value - current)
         candidate = min(authorization, target_gap)
         candidate -= candidate % unit
         if candidate <= 0:
             return 0, "TARGET_ALREADY_SATISFIED"
         cash = self._gateway.query_account().available_cash.value
-        maximum_by_gross = int(
-            (cash / planned.limit_price.value).to_integral_value(rounding=ROUND_FLOOR)
-        )
+        maximum_by_gross = int((cash / planned.limit_price.value).to_integral_value(rounding=ROUND_FLOOR))
         candidate = min(candidate, maximum_by_gross)
         candidate -= candidate % unit
         authorized_candidate = candidate
@@ -211,9 +205,7 @@ class ExecutionController:
             cancel_requests=aggregate.cancel_requests,
         )
 
-    def _new_aggregate(
-        self, planned: PlannedOrder, *, shares: int, occurred_at: datetime
-    ) -> OrderAggregate:
+    def _new_aggregate(self, planned: PlannedOrder, *, shares: int, occurred_at: datetime) -> OrderAggregate:
         intent = ExecutionIntent.create(
             decision_id=planned.decision_id,
             uquant_order_id=planned.uquant_order_id,
@@ -228,20 +220,12 @@ class ExecutionController:
             return self._ledger.validate_and_arm(aggregate, occurred_at=occurred_at)
 
     def _broker_fills(self, broker_order_id: str) -> tuple[BrokerFillFact, ...]:
-        return tuple(
-            fill
-            for fill in self._gateway.query_fills()
-            if fill.broker_order_id == broker_order_id
-        )
+        return tuple(fill for fill in self._gateway.query_fills() if fill.broker_order_id == broker_order_id)
 
-    def _submit(
-        self, aggregate: OrderAggregate, command: BrokerOrderCommand
-    ) -> tuple[OrderAggregate, int]:
+    def _submit(self, aggregate: OrderAggregate, command: BrokerOrderCommand) -> tuple[OrderAggregate, int]:
         started_at = self._clock()
         with self._ledger.database.transaction():
-            submitting, attempt = self._ledger.begin_submit(
-                aggregate, command, started_at=started_at
-            )
+            submitting, attempt = self._ledger.begin_submit(aggregate, command, started_at=started_at)
         try:
             response = self._gateway.submit_order(command)
         except Exception:
@@ -272,9 +256,7 @@ class ExecutionController:
             raise DomainValidationError("cannot cancel without broker order id")
         started_at = self._clock()
         with self._ledger.database.transaction():
-            cancelling, attempt = self._ledger.begin_cancel(
-                aggregate, started_at=started_at
-            )
+            cancelling, attempt = self._ledger.begin_cancel(aggregate, started_at=started_at)
         try:
             response = self._gateway.cancel_order(aggregate.broker_order_id)
         except Exception:
@@ -311,9 +293,7 @@ class ExecutionController:
         cancel_calls = 0
         for planned in plan.orders:
             if unresolved_unknown:
-                outcomes.append(
-                    self._outcome(planned, None, reason_code="BLOCKED_BY_UNRESOLVED_UNKNOWN")
-                )
+                outcomes.append(self._outcome(planned, None, reason_code="BLOCKED_BY_UNRESOLVED_UNKNOWN"))
                 continue
             existing = self._ledger.find_economic_order(
                 decision_id=planned.decision_id,
@@ -353,9 +333,7 @@ class ExecutionController:
                 if aggregate.state is OrderState.FILLED and sizing_reason != "AUTHORIZED"
                 else self._reason_for_state(aggregate)
             )
-            outcomes.append(
-                self._outcome(planned, aggregate, reason_code=outcome_reason)
-            )
+            outcomes.append(self._outcome(planned, aggregate, reason_code=outcome_reason))
             if planned.side is Side.SELL:
                 cash_after_sells = self._gateway.query_account().available_cash
         ending_cash = self._gateway.query_account().available_cash

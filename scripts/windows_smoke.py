@@ -143,8 +143,13 @@ def _assert_cli_is_fail_closed() -> None:
     diagnostic = io.StringIO()
     with redirect_stderr(diagnostic):
         return_code = cli_main(["status"])
-    if return_code != 2 or "没有执行券商写操作" not in diagnostic.getvalue():
-        raise AssertionError("unimplemented CLI command did not fail closed")
+    rendered = diagnostic.getvalue()
+    if (
+        return_code != 2
+        or "CONFIGURATION_UNAVAILABLE" not in rendered
+        or "没有执行未授权券商写操作" not in rendered
+    ):
+        raise AssertionError("CLI without configuration did not fail closed")
 
 
 def run_smoke() -> dict[str, object]:
@@ -183,6 +188,12 @@ def run_smoke() -> dict[str, object]:
             )
         )
         database_path = state_directory / "firmquant.sqlite3"
+        with WriterLease.acquire(
+            database_path,
+            owner="windows-smoke-bootstrap",
+            clock=lambda: NOW,
+        ):
+            pass
         doctor = Doctor.for_local_environment(
             settings,
             database_path=database_path,

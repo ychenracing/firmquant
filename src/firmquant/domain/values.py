@@ -95,9 +95,7 @@ def _validate_decimal(
         raise DomainValidationError(f"{label} must have a finite decimal exponent")
     decimal_places = max(0, -exponent)
     if decimal_places > max_decimal_places:
-        raise DomainValidationError(
-            f"{label} exceeds {max_decimal_places} decimal places"
-        )
+        raise DomainValidationError(f"{label} exceeds {max_decimal_places} decimal places")
     integer_digits = max(1, value.copy_abs().adjusted() + 1)
     if integer_digits > _MAX_INTEGER_DIGITS:
         raise DomainValidationError(f"{label} exceeds {_MAX_INTEGER_DIGITS} integer digits")

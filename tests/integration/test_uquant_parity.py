@@ -32,9 +32,7 @@ def test_adapter_matches_direct_engine_exactly_in_verified_source_checkout(
         text=True,
     ).stdout.strip()
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (str(source_checkout), str(repository_root / "src"))
-    )
+    environment["PYTHONPATH"] = os.pathsep.join((str(source_checkout), str(repository_root / "src")))
     completed = subprocess.run(
         [
             sys.executable,

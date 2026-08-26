@@ -115,12 +115,8 @@ class ReconciliationService:
             "kind": kind,
             "snapshot_id": facts.broker_snapshot.snapshot_id,
             "broker_snapshot_sha256": facts.broker_snapshot.raw_payload_sha256,
-            "strategy_economic_state_sha256": (
-                facts.strategy_account.economic_state_sha256
-            ),
-            "expected_account_identity_hash": (
-                facts.operational_ledger.expected_account_id_hash
-            ),
+            "strategy_economic_state_sha256": (facts.strategy_account.economic_state_sha256),
+            "expected_account_identity_hash": (facts.operational_ledger.expected_account_id_hash),
             "broker_event_watermark": facts.broker_snapshot.broker_event_watermark,
             "broker_order_count": len(facts.broker_snapshot.orders),
             "broker_fill_count": len(facts.broker_snapshot.fills),
@@ -131,16 +127,19 @@ class ReconciliationService:
         }
         details_json = canonical_json(details)
         details_sha256 = hashlib.sha256(details_json.encode("utf-8")).hexdigest()
-        reconciliation_id = "recon_" + hashlib.sha256(
-            canonical_json(
-                {
-                    "kind": kind,
-                    "details_sha256": details_sha256,
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                }
-            ).encode("utf-8")
-        ).hexdigest()
+        reconciliation_id = (
+            "recon_"
+            + hashlib.sha256(
+                canonical_json(
+                    {
+                        "kind": kind,
+                        "details_sha256": details_sha256,
+                        "started_at": started_at,
+                        "completed_at": completed_at,
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+        )
         receipt = ReconciliationReceipt(
             reconciliation_id=reconciliation_id,
             kind=kind,
@@ -199,29 +198,17 @@ class ReconciliationService:
         blockers: set[str],
         evidence: list[str],
     ) -> None:
-        broker = {
-            position.symbol: position for position in facts.broker_snapshot.positions
-        }
-        strategy = {
-            position.symbol: position for position in facts.strategy_account.positions
-        }
+        broker = {position.symbol: position for position in facts.broker_snapshot.positions}
+        strategy = {position.symbol: position for position in facts.strategy_account.positions}
         for symbol in sorted(set(broker) | set(strategy), key=lambda item: item.canonical):
             broker_position = broker.get(symbol)
             strategy_position = strategy.get(symbol)
             broker_total = 0 if broker_position is None else broker_position.total_shares.value
-            expected_total = (
-                0 if strategy_position is None else strategy_position.total_shares.value
-            )
-            broker_sellable = (
-                0 if broker_position is None else broker_position.sellable_shares.value
-            )
-            expected_sellable = (
-                0 if strategy_position is None else strategy_position.sellable_shares.value
-            )
+            expected_total = 0 if strategy_position is None else strategy_position.total_shares.value
+            broker_sellable = 0 if broker_position is None else broker_position.sellable_shares.value
+            expected_sellable = 0 if strategy_position is None else strategy_position.sellable_shares.value
             if broker_total != expected_total:
-                blockers.update(
-                    {"POSITION_SHARE_MISMATCH", "UNEXPLAINED_POSITION_CHANGE"}
-                )
+                blockers.update({"POSITION_SHARE_MISMATCH", "UNEXPLAINED_POSITION_CHANGE"})
                 evidence.append(
                     _evidence_hash(
                         "position_total",
@@ -231,9 +218,7 @@ class ReconciliationService:
                     )
                 )
             if broker_sellable != expected_sellable:
-                blockers.update(
-                    {"SELLABLE_SHARE_MISMATCH", "UNEXPLAINED_POSITION_CHANGE"}
-                )
+                blockers.update({"SELLABLE_SHARE_MISMATCH", "UNEXPLAINED_POSITION_CHANGE"})
                 evidence.append(
                     _evidence_hash(
                         "position_sellable",
@@ -249,13 +234,8 @@ class ReconciliationService:
         blockers: set[str],
         evidence: list[str],
     ) -> None:
-        broker_orders = {
-            order.broker_order_id: order for order in facts.broker_snapshot.orders
-        }
-        local_orders = {
-            order.broker_order_id: order
-            for order in facts.operational_ledger.orders
-        }
+        broker_orders = {order.broker_order_id: order for order in facts.broker_snapshot.orders}
+        local_orders = {order.broker_order_id: order for order in facts.operational_ledger.orders}
         known_uquant_ids = facts.strategy_account.known_uquant_order_ids
         for broker_id, broker_order in broker_orders.items():
             local = local_orders.get(broker_id)
@@ -333,9 +313,7 @@ class ReconciliationService:
         blockers: set[str],
         evidence: list[str],
     ) -> None:
-        known_orders = {
-            order.broker_order_id: order for order in facts.operational_ledger.orders
-        }
+        known_orders = {order.broker_order_id: order for order in facts.operational_ledger.orders}
         known_uquant = facts.strategy_account.known_uquant_order_ids
         broker_fill_ids: set[str] = set()
         for fill in facts.broker_snapshot.fills:
@@ -431,9 +409,7 @@ class ReconciliationService:
             elif tuple(existing) != stable:
                 raise PersistenceConflict("reconciliation receipt identity collision")
             self._audit.append(
-                audit_event_id="reconciliation." + receipt.reconciliation_id.removeprefix(
-                    "recon_"
-                ),
+                audit_event_id="reconciliation." + receipt.reconciliation_id.removeprefix("recon_"),
                 category="reconciliation.receipt",
                 actor="firmquant",
                 payload={

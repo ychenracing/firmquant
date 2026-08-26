@@ -118,9 +118,7 @@ class RuntimeStatus:
             if reason == self.reason and canonical_blockers == self.blockers:
                 return self
         elif target not in RUNTIME_TRANSITIONS[self.state]:
-            raise DomainTransitionError(
-                f"illegal runtime transition {self.state.value} -> {target.value}"
-            )
+            raise DomainTransitionError(f"illegal runtime transition {self.state.value} -> {target.value}")
         return replace(
             self,
             state=target,

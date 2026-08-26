@@ -12,9 +12,7 @@ import pandas as pd
 
 def write_synthetic_market_data(source_checkout: Path, data_directory: Path) -> None:
     manifest = json.loads(
-        (source_checkout / "uquant/contracts/resources/ai_universe_manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (source_checkout / "uquant/contracts/resources/ai_universe_manifest.json").read_text(encoding="utf-8")
     )
     symbols = tuple(member["symbol"] for member in manifest["members"])
     data_directory.mkdir()
@@ -23,23 +21,18 @@ def write_synthetic_market_data(source_checkout: Path, data_directory: Path) -> 
         lines = ["date,open,high,low,close,volume,amount"]
         for session_index, session in enumerate(dates):
             base = 20.0 + symbol_index * 0.7
-            close = base * (1.0 + 0.00045 * session_index) * (
-                1.0
-                + 0.012
-                * math.sin(
-                    session_index / (13 + symbol_index % 5) + symbol_index
-                )
+            close = (
+                base
+                * (1.0 + 0.00045 * session_index)
+                * (1.0 + 0.012 * math.sin(session_index / (13 + symbol_index % 5) + symbol_index))
             )
-            open_price = close * (
-                1.0 + 0.001 * math.sin(session_index / 7 + symbol_index)
-            )
+            open_price = close * (1.0 + 0.001 * math.sin(session_index / 7 + symbol_index))
             high = max(open_price, close) * 1.01
             low = min(open_price, close) * 0.99
             volume = 1_000_000 + symbol_index * 1_000 + session_index * 10
             amount = close * volume
             lines.append(
-                f"{session.date()},{open_price:.8f},{high:.8f},{low:.8f},"
-                f"{close:.8f},{volume},{amount:.4f}"
+                f"{session.date()},{open_price:.8f},{high:.8f},{low:.8f},{close:.8f},{volume},{amount:.4f}"
             )
         (data_directory / f"{symbol}.csv").write_text(
             "\n".join(lines) + "\n",
@@ -73,9 +66,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         as_of=session.isoformat(),
         account=direct_account,
     )
-    direct_payload = direct.canonical_payload(
-        effective_config_sha256=config_fingerprint(direct_engine.cfg)
-    )
+    direct_payload = direct.canonical_payload(effective_config_sha256=config_fingerprint(direct_engine.cfg))
     direct_account_sha256 = economic_state_sha256(direct_account)
 
     database = Database.open(Path(args.database))
@@ -102,15 +93,11 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
 
         repeated_before = economic_state_sha256(adapted_account)
         repeated = adapter.decide_once(request)
-        repeated_account_unchanged = (
-            economic_state_sha256(adapted_account) == repeated_before
-        )
+        repeated_account_unchanged = economic_state_sha256(adapted_account) == repeated_before
 
         recovery_required = False
         try:
-            adapter.decide_once(
-                replace(request, account=AccountState.empty(2_000_000.0))
-            )
+            adapter.decide_once(replace(request, account=AccountState.empty(2_000_000.0)))
         except DecisionRecoveryRequired:
             recovery_required = True
 
@@ -124,9 +111,9 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
                 )
             )
         except DecisionConflict:
-            conflict_recorded = database.scalar(
-                "SELECT count(*) FROM audit_events WHERE category = 'DECISION_CONFLICT'"
-            ) == 1
+            conflict_recorded = (
+                database.scalar("SELECT count(*) FROM audit_events WHERE category = 'DECISION_CONFLICT'") == 1
+            )
 
         stored = database.query_one(
             "SELECT payload_sha256 FROM decision_snapshots WHERE decision_id = ?",

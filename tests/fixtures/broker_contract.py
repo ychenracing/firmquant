@@ -208,8 +208,7 @@ def write_recording(
     )
     path.write_text(
         "".join(
-            json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            + "\n"
+            json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
             for record in records
         ),
         encoding="utf-8",

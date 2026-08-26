@@ -72,9 +72,7 @@ def _order_identity_map(snapshot: BrokerSnapshot) -> dict[str, BrokerOrderFact]:
     for order in snapshot.orders:
         economic_id = order.client_order_id
         if economic_id is None:
-            raise StrategySyncError(
-                f"broker order {order.broker_order_id!r} has no uquant order identity"
-            )
+            raise StrategySyncError(f"broker order {order.broker_order_id!r} has no uquant order identity")
         if economic_id in economic_ids:
             raise StrategySyncError("multiple broker orders claim one uquant order identity")
         if order.status is BrokerOrderStatus.UNKNOWN:
@@ -109,9 +107,7 @@ def _fill_payloads(
             raise StrategySyncError("only confirmed broker fills can enter uquant account sync")
         order = orders.get(fill.broker_order_id)
         if order is None:
-            raise StrategySyncError(
-                f"broker fill {fill.broker_fill_id!r} has no mapped broker order"
-            )
+            raise StrategySyncError(f"broker fill {fill.broker_fill_id!r} has no mapped broker order")
         if fill.symbol != order.symbol or fill.side is not order.side:
             raise StrategySyncError("broker fill symbol or side differs from mapped order")
         if fill.event_sequence <= 0:

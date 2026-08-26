@@ -32,7 +32,7 @@ def _uquant_payload() -> dict[str, object]:
                 "exit_kind": "strategy",
                 "event_id": "evt_" + "1" * 64,
                 "event_signal_date": "2026-06-30",
-                "event_target_weight_hex": 0.5.hex(),
+                "event_target_weight_hex": (0.5).hex(),
                 "origin_subsystem": "LEADER",
                 "mechanism": "LEADER_SELECTION",
                 "origin_lifecycle": "CORE",
@@ -111,9 +111,7 @@ def test_snapshot_is_canonical_immutable_and_contains_complete_decision_evidence
     assert canonical["targets"] == snapshot.uquant_payload["targets"]
     assert canonical["pending_orders"] == snapshot.uquant_payload["orders"]
     assert canonical["reason_codes"] == ["base_normal", "strategy_target"]
-    assert snapshot.payload_sha256 == hashlib.sha256(
-        snapshot.canonical_json().encode("utf-8")
-    ).hexdigest()
+    assert snapshot.payload_sha256 == hashlib.sha256(snapshot.canonical_json().encode("utf-8")).hexdigest()
 
     detached = snapshot.uquant_payload
     detached["opportunity"] = "WEAK"
@@ -124,9 +122,7 @@ def test_snapshot_is_canonical_immutable_and_contains_complete_decision_evidence
 
 def test_decision_id_is_stable_for_identical_economic_input_and_output() -> None:
     first = _snapshot(created_at=datetime(2026, 6, 30, 9, tzinfo=UTC))
-    second = _snapshot(
-        created_at=datetime(2026, 6, 30, 9, tzinfo=UTC) + timedelta(minutes=1)
-    )
+    second = _snapshot(created_at=datetime(2026, 6, 30, 9, tzinfo=UTC) + timedelta(minutes=1))
 
     assert first.decision_id == second.decision_id
     assert first.payload_sha256 != second.payload_sha256

@@ -74,9 +74,10 @@ def test_migrations_are_repeatable_without_rewriting_receipts(db: Database) -> N
 
     apply_migrations(db)
 
-    assert db.query_all(
-        "SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version"
-    ) == before
+    assert (
+        db.query_all("SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version")
+        == before
+    )
 
 
 def test_failed_migration_is_fully_rolled_back(db: Database) -> None:
@@ -93,10 +94,7 @@ def test_failed_migration_is_fully_rolled_back(db: Database) -> None:
         apply_migrations(db, migrations=(*MIGRATIONS, failing))
 
     assert (
-        db.scalar(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'must_rollback'"
-        )
-        == 0
+        db.scalar("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'must_rollback'") == 0
     )
     assert db.scalar("SELECT max(version) FROM schema_migrations") == CURRENT_SCHEMA_VERSION
 
@@ -117,9 +115,7 @@ def test_raw_broker_event_is_append_only_and_idempotent(db: Database) -> None:
         assert repository.append(**arguments) is True
     with db.transaction():
         assert repository.append(**arguments) is False
-    with db.transaction(), pytest.raises(
-        PersistenceConflict, match="broker event identity collision"
-    ):
+    with db.transaction(), pytest.raises(PersistenceConflict, match="broker event identity collision"):
         repository.append(**{**arguments, "safe_payload": {"symbol": "sh600000"}})
 
     with pytest.raises(sqlite3.IntegrityError, match="append-only"), db.transaction():

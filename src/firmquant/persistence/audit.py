@@ -257,9 +257,7 @@ class AuditLedger:
                 raise AuditChainBroken(f"audit chain hash mismatch at sequence {sequence}")
             previous_hash = observed_chain
         if expected_count is not None and len(rows) != expected_count:
-            raise AuditChainBroken(
-                f"audit count mismatch: expected {expected_count}, observed {len(rows)}"
-            )
+            raise AuditChainBroken(f"audit count mismatch: expected {expected_count}, observed {len(rows)}")
         if expected_head_hash is not None and previous_hash != expected_head_hash:
             raise AuditChainBroken(
                 f"audit head mismatch: expected {expected_head_hash}, observed {previous_hash}"

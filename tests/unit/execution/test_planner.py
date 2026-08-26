@@ -29,9 +29,7 @@ def test_plan_is_stable_sell_first_and_never_expands_target_gap() -> None:
     assert sell.uquant_authorized_shares.value == sell.current_shares.value
     assert buy.side is Side.BUY
     assert buy.uquant_authorized_shares == Shares(800)
-    assert buy.uquant_authorized_shares.value == (
-        buy.target_shares.value - buy.current_shares.value
-    )
+    assert buy.uquant_authorized_shares.value == (buy.target_shares.value - buy.current_shares.value)
 
 
 def test_sentinel_freeze_blocks_only_new_buy_intent() -> None:

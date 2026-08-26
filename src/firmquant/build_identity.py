@@ -189,9 +189,7 @@ class SourceIdentity:
             wheel_payload_manifest_sha256=_string(mapping, "wheel_payload_manifest_sha256"),
             wheel_bytes=_integer(mapping, "wheel_bytes"),
             wheel_member_count=_integer(mapping, "wheel_member_count"),
-            uquant_package_manifest_sha256=_string(
-                mapping, "uquant_package_manifest_sha256"
-            ),
+            uquant_package_manifest_sha256=_string(mapping, "uquant_package_manifest_sha256"),
             uquant_package_member_count=_integer(mapping, "uquant_package_member_count"),
             economic_code_fingerprint=_string(mapping, "economic_code_fingerprint"),
             account_code_fingerprint=_string(mapping, "account_code_fingerprint"),
@@ -303,9 +301,7 @@ def verify_uquant_source_checkout(identity: SourceIdentity, repository_root: Pat
         ("execution_account_v1", identity.account_code_fingerprint),
     ):
         try:
-            observed = _uquant_git_source_surface_fingerprint(
-                root, identity.uquant_commit, surface
-            )
+            observed = _uquant_git_source_surface_fingerprint(root, identity.uquant_commit, surface)
         except (OSError, RuntimeError, ValueError) as exc:
             raise SourceIdentityError(f"cannot fingerprint uquant source surface: {surface}") from exc
         if observed != expected:
@@ -330,9 +326,7 @@ def _member_manifest(
         ):
             raise SourceIdentityError(f"unsafe or duplicate package member: {name!r}")
         observed_names.add(name)
-        summaries.append(
-            {"path": name, "sha256": _sha256_bytes(content), "size": len(content)}
-        )
+        summaries.append({"path": name, "sha256": _sha256_bytes(content), "size": len(content)})
     summaries.sort(key=lambda member: str(member["path"]))
     encoded = json.dumps(
         summaries,
@@ -430,8 +424,7 @@ def _verify_wheel(identity: SourceIdentity, wheel_path: Path) -> None:
     _require_file_sha256(wheel_path, identity.wheel_sha256, label="uquant wheel SHA-256")
     if wheel_path.name != identity.wheel_filename:
         raise SourceIdentityError(
-            f"uquant wheel filename mismatch: expected {identity.wheel_filename}, "
-            f"observed {wheel_path.name}"
+            f"uquant wheel filename mismatch: expected {identity.wheel_filename}, observed {wheel_path.name}"
         )
     if wheel_path.stat().st_size != identity.wheel_bytes:
         raise SourceIdentityError("uquant wheel byte size mismatch")
@@ -471,8 +464,7 @@ def _verify_embedded_expectation(identity: SourceIdentity) -> None:
         if observed != reviewed:
             label = labels.get(field.name, field.name.replace("_", " "))
             raise SourceIdentityError(
-                f"{label} differs from embedded reviewed baseline: "
-                f"expected {reviewed}, observed {observed}"
+                f"{label} differs from embedded reviewed baseline: expected {reviewed}, observed {observed}"
             )
 
 

@@ -86,9 +86,7 @@ class KillSwitch:
     ) -> KillSwitchStatus:
         _reason(reason)
         _aware(now)
-        if not isinstance(operator_confirmed, bool) or not isinstance(
-            reconciliation_passed, bool
-        ):
+        if not isinstance(operator_confirmed, bool) or not isinstance(reconciliation_passed, bool):
             raise DomainTypeError("kill switch reset gates must be bool")
         if not operator_confirmed:
             raise DomainValidationError("kill switch reset requires operator confirmation")

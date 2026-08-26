@@ -111,13 +111,9 @@ class UquantAccountStateStore:
         Callable[[object, str | Path], None],
     ]:
         module = importlib.import_module("uquant.account")
-        economic = cast(
-            Callable[[object], str], getattr(module, "economic_state_sha256", None)
-        )
+        economic = cast(Callable[[object], str], getattr(module, "economic_state_sha256", None))
         load = cast(Callable[..., object], getattr(module, "load_account", None))
-        save = cast(
-            Callable[[object, str | Path], None], getattr(module, "save_account", None)
-        )
+        save = cast(Callable[[object, str | Path], None], getattr(module, "save_account", None))
         if not callable(economic) or not callable(load) or not callable(save):
             raise RecoveryError("uquant account persistence contract is unavailable")
         return economic, load, save
@@ -218,9 +214,7 @@ class AccountOperation:
         _aware(now, label="account operation begin time")
         current = store.hash_file(path)
         if current != expected_before_sha256:
-            raise RecoveryContradiction(
-                "account file does not match the recorded operation precondition"
-            )
+            raise RecoveryContradiction("account file does not match the recorded operation precondition")
         expected_after = store.hash_state(prepared_account)
         _digest(expected_after, label="expected account after digest")
         identity = operation_id or "acctop_" + os.urandom(32).hex()
@@ -380,9 +374,7 @@ class RecoveryService:
         if not isinstance(database, Database):
             raise DomainTypeError("recovery database must be Database")
         if (account_store is None) != (account_path is None):
-            raise DomainValidationError(
-                "recovery account store and path must be configured together"
-            )
+            raise DomainValidationError("recovery account store and path must be configured together")
         if account_store is not None and not isinstance(account_store, AccountStateStore):
             raise DomainTypeError("recovery account store must satisfy AccountStateStore")
         if gateway is not None and not isinstance(gateway, BrokerGateway):
@@ -442,9 +434,7 @@ class RecoveryService:
         self._append_report_audit(report, now=now)
         return report
 
-    def _recover_accounts(
-        self, now: datetime
-    ) -> tuple[tuple[AccountRecoveryReceipt, ...], tuple[str, ...]]:
+    def _recover_accounts(self, now: datetime) -> tuple[tuple[AccountRecoveryReceipt, ...], tuple[str, ...]]:
         rows = self._database.query_all(
             "SELECT * FROM account_operations WHERE stage != 'RECEIPT_COMMITTED' "
             "ORDER BY created_at, operation_id"
@@ -463,9 +453,7 @@ class RecoveryService:
                     AccountRecoveryReceipt(
                         operation_id=operation_id,
                         classification=AccountRecoveryClassification.CONTRADICTION,
-                        actual_account_sha256=(
-                            None if retained_actual is None else str(retained_actual)
-                        ),
+                        actual_account_sha256=(None if retained_actual is None else str(retained_actual)),
                     )
                 )
                 blockers.add("ACCOUNT_OPERATION_CONTRADICTION")
@@ -484,9 +472,7 @@ class RecoveryService:
                 if actual == before:
                     classification = AccountRecoveryClassification.NOT_APPLIED
                 elif actual == expected_after:
-                    classification = (
-                        AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING
-                    )
+                    classification = AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING
             target_stage = (
                 "CONTRADICTION"
                 if classification is AccountRecoveryClassification.CONTRADICTION
@@ -524,9 +510,7 @@ class RecoveryService:
             if not isinstance(payload, dict):
                 return False
             expected = payload.get("account_path_sha256")
-            return isinstance(expected, str) and expected == _path_sha256(
-                self._account_path
-            )
+            return isinstance(expected, str) and expected == _path_sha256(self._account_path)
         except (OSError, RuntimeError, TypeError, ValueError):
             return False
 
@@ -559,14 +543,10 @@ class RecoveryService:
             created_at=now,
         )
 
-    def _recover_orders(
-        self, now: datetime
-    ) -> tuple[tuple[OrderRecoveryReceipt, ...], tuple[str, ...]]:
+    def _recover_orders(self, now: datetime) -> tuple[tuple[OrderRecoveryReceipt, ...], tuple[str, ...]]:
         attempts = self._pending_attempts()
         known_mapping_count = _count_scalar(
-            self._database.scalar(
-                "SELECT count(*) FROM broker_orders WHERE ownership = 'SYSTEM'"
-            ),
+            self._database.scalar("SELECT count(*) FROM broker_orders WHERE ownership = 'SYSTEM'"),
             label="known broker mapping count",
         )
         if not attempts and known_mapping_count == 0:
@@ -577,9 +557,7 @@ class RecoveryService:
                 now=now,
                 reason="BROKER_RECOVERY_UNAVAILABLE",
             )
-            unavailable_blockers = (
-                ("BROKER_RECOVERY_UNAVAILABLE",) if attempts else ()
-            )
+            unavailable_blockers = ("BROKER_RECOVERY_UNAVAILABLE",) if attempts else ()
             return unavailable_receipts, unavailable_blockers
         try:
             health = self._gateway.health()
@@ -593,9 +571,7 @@ class RecoveryService:
                 now=now,
                 reason="BROKER_RECOVERY_UNAVAILABLE",
             )
-            unavailable_blockers = (
-                ("BROKER_RECOVERY_UNAVAILABLE",) if attempts else ()
-            )
+            unavailable_blockers = ("BROKER_RECOVERY_UNAVAILABLE",) if attempts else ()
             return unavailable_receipts, unavailable_blockers
 
         receipts: list[OrderRecoveryReceipt] = []
@@ -620,9 +596,7 @@ class RecoveryService:
                 )
             else:
                 candidates = tuple(
-                    order
-                    for order in broker_orders
-                    if order.broker_order_id == aggregate.broker_order_id
+                    order for order in broker_orders if order.broker_order_id == aggregate.broker_order_id
                 )
             if not candidates:
                 receipts.extend(
@@ -645,9 +619,7 @@ class RecoveryService:
                 continue
             fact = candidates[0]
             related_fills = tuple(
-                fill
-                for fill in broker_fills
-                if fill.broker_order_id == fact.broker_order_id
+                fill for fill in broker_fills if fill.broker_order_id == fact.broker_order_id
             )
             if not self._broker_evidence_matches(
                 aggregate,
@@ -817,11 +789,7 @@ class RecoveryService:
             if aggregate is None:
                 blockers.add("RECOVERY_AGGREGATE_MISSING")
                 continue
-            related_fills = tuple(
-                fill
-                for fill in broker_fills
-                if fill.broker_order_id == broker_order_id
-            )
+            related_fills = tuple(fill for fill in broker_fills if fill.broker_order_id == broker_order_id)
             before_version = aggregate.version
             try:
                 with self._database.transaction():

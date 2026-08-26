@@ -204,9 +204,7 @@ class ArmService:
         if lease_id_factory is not None and not callable(lease_id_factory):
             raise DomainTypeError("arm lease id factory must be callable")
         self._mac_key = mac_key
-        self._lease_id_factory = lease_id_factory or (
-            lambda: "arm_" + os.urandom(16).hex()
-        )
+        self._lease_id_factory = lease_id_factory or (lambda: "arm_" + os.urandom(16).hex())
 
     @staticmethod
     def confirmation_phrase(mode: Mode) -> str:

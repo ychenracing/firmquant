@@ -56,9 +56,7 @@ def test_healthy_order_is_allowed_without_changing_quantity() -> None:
     ],
 )
 def test_systemic_anomalies_halt(changes: dict[str, object], reason: str) -> None:
-    decision = ExecutionRiskGate().evaluate(
-        risk_command(), replace(risk_context(), **changes)
-    )
+    decision = ExecutionRiskGate().evaluate(risk_command(), replace(risk_context(), **changes))
 
     assert decision.action is GateAction.HALT
     assert decision.authorized_shares == Shares(0)
@@ -130,9 +128,7 @@ def test_disconnect_is_delayed_then_halted_after_bounded_duration() -> None:
         ),
     ],
 )
-def test_static_order_and_security_violations_block(
-    context: object, reason: str
-) -> None:
+def test_static_order_and_security_violations_block(context: object, reason: str) -> None:
     decision = ExecutionRiskGate().evaluate(risk_command(), context)  # type: ignore[arg-type]
 
     assert decision.action is GateAction.BLOCK
@@ -140,9 +136,7 @@ def test_static_order_and_security_violations_block(
 
 
 def test_freeze_new_risk_blocks_buy_but_not_risk_reducing_sell() -> None:
-    blocked = ExecutionRiskGate().evaluate(
-        risk_command(), replace(risk_context(), freeze_new_risk=True)
-    )
+    blocked = ExecutionRiskGate().evaluate(risk_command(), replace(risk_context(), freeze_new_risk=True))
     position = BrokerPositionFact(
         symbol=SYMBOL,
         total_shares=Shares(500),
@@ -159,9 +153,7 @@ def test_freeze_new_risk_blocks_buy_but_not_risk_reducing_sell() -> None:
         actual_symbol_notional=position.market_value,
         actual_gross_notional=position.market_value,
     )
-    sell = ExecutionRiskGate().evaluate(
-        risk_command(side=Side.SELL), sell_context
-    )
+    sell = ExecutionRiskGate().evaluate(risk_command(side=Side.SELL), sell_context)
 
     assert blocked.action is GateAction.BLOCK
     assert "FREEZE_NEW_RISK" in blocked.reason_codes
@@ -237,9 +229,7 @@ def test_sell_is_shrunk_to_sellable_t_plus_one_quantity_and_lot() -> None:
 def test_transient_and_lifecycle_limits_have_explicit_actions(
     changes: dict[str, object], action: GateAction, reason: str
 ) -> None:
-    decision = ExecutionRiskGate().evaluate(
-        risk_command(), replace(risk_context(), **changes)
-    )
+    decision = ExecutionRiskGate().evaluate(risk_command(), replace(risk_context(), **changes))
 
     assert decision.action is action
     assert reason in decision.reason_codes
@@ -299,9 +289,7 @@ def test_volume_participation_comes_from_uquant_context_and_shrinks_by_lot() -> 
 
 
 def test_command_exceeding_uquant_authorization_halts_instead_of_normalizing_it() -> None:
-    decision = ExecutionRiskGate().evaluate(
-        risk_command(requested=500, authorized=100), risk_context()
-    )
+    decision = ExecutionRiskGate().evaluate(risk_command(requested=500, authorized=100), risk_context())
 
     assert decision.action is GateAction.HALT
     assert decision.authorized_shares == Shares(0)

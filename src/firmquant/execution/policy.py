@@ -36,16 +36,13 @@ class FeeBreakdown:
 
     def __post_init__(self) -> None:
         if not all(
-            isinstance(value, Money)
-            for value in (self.commission, self.stamp_duty, self.transfer_fee)
+            isinstance(value, Money) for value in (self.commission, self.stamp_duty, self.transfer_fee)
         ):
             raise DomainTypeError("fee breakdown values must be Money")
 
     @property
     def total(self) -> Money:
-        return Money(
-            self.commission.value + self.stamp_duty.value + self.transfer_fee.value
-        )
+        return Money(self.commission.value + self.stamp_duty.value + self.transfer_fee.value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,9 +99,7 @@ class FeeSchedule:
             raise DomainValidationError("fee shares must be positive Shares")
         gross = price.value * shares.value
         commission = self._round(max(self.minimum_commission, gross * self.commission_rate))
-        stamp_duty = self._round(
-            gross * self.stamp_duty_rate if side is Side.SELL else Decimal(0)
-        )
+        stamp_duty = self._round(gross * self.stamp_duty_rate if side is Side.SELL else Decimal(0))
         transfer_fee = self._round(gross * self.transfer_fee_rate)
         return FeeBreakdown(
             commission=Money(commission),

@@ -264,9 +264,10 @@ class DecisionSnapshot:
             "uquant_commit": identity.uquant_commit,
             "uquant_code_fingerprint": identity.economic_code_fingerprint,
         }
-        decision_id = "decision_" + hashlib.sha256(
-            _canonical_json(decision_identity_payload).encode("utf-8")
-        ).hexdigest()
+        decision_id = (
+            "decision_"
+            + hashlib.sha256(_canonical_json(decision_identity_payload).encode("utf-8")).hexdigest()
+        )
         payload = {
             "schema": "firmquant.decision-snapshot.v1",
             "strategy_session": strategy_session.isoformat(),

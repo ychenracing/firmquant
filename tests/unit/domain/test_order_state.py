@@ -57,9 +57,7 @@ def test_intent_identity_is_stable_and_binds_economic_fields() -> None:
 def test_submit_exception_becomes_unknown_not_rejected() -> None:
     order = _submitting_order()
 
-    changed = order.apply(
-        SubmitOutcomeUnknown(event_id="evt-timeout", diagnostic_code="BROKER_TIMEOUT")
-    )
+    changed = order.apply(SubmitOutcomeUnknown(event_id="evt-timeout", diagnostic_code="BROKER_TIMEOUT"))
 
     assert changed.state is OrderState.UNKNOWN
     assert changed.submit_attempts == 1
@@ -68,9 +66,7 @@ def test_submit_exception_becomes_unknown_not_rejected() -> None:
 def test_cancel_confirmation_can_resolve_before_ack_callback() -> None:
     submitting = _submitting_order()
 
-    cancelled = submitting.apply(
-        CancelConfirmed(event_id="evt-cancelled", broker_order_id="broker-order-1")
-    )
+    cancelled = submitting.apply(CancelConfirmed(event_id="evt-cancelled", broker_order_id="broker-order-1"))
 
     assert cancelled.state is OrderState.CANCELLED
     assert cancelled.broker_order_id == "broker-order-1"
@@ -83,9 +79,7 @@ def test_unknown_order_is_not_resubmitted_until_absence_is_proven() -> None:
 
     with pytest.raises(DomainTransitionError, match=r"UNKNOWN.*SubmitStarted"):
         unknown.apply(SubmitStarted(event_id="evt-blind-resubmit"))
-    resolved = unknown.apply(
-        UnknownResolvedNotAccepted(event_id="evt-proof", evidence_sha256="a" * 64)
-    )
+    resolved = unknown.apply(UnknownResolvedNotAccepted(event_id="evt-proof", evidence_sha256="a" * 64))
 
     assert resolved.state is OrderState.ARMED
     assert resolved.apply(SubmitStarted(event_id="evt-retry")).submit_attempts == 2
@@ -93,9 +87,7 @@ def test_unknown_order_is_not_resubmitted_until_absence_is_proven() -> None:
 
 def test_partial_fill_cancel_race_preserves_confirmed_fill() -> None:
     order = _submitting_order()
-    order = order.apply(
-        BrokerAcknowledged(event_id="evt-ack", broker_order_id="broker-order-1")
-    )
+    order = order.apply(BrokerAcknowledged(event_id="evt-ack", broker_order_id="broker-order-1"))
     order = order.apply(
         FillReported(
             event_id="evt-fill-1",
@@ -124,9 +116,7 @@ def test_partial_fill_cancel_race_preserves_confirmed_fill() -> None:
 
 def test_late_fill_after_cancelled_is_retained_and_requires_investigation() -> None:
     cancelled = _submitting_order(requested_shares=1_000)
-    cancelled = cancelled.apply(
-        BrokerAcknowledged(event_id="evt-ack", broker_order_id="broker-order-1")
-    )
+    cancelled = cancelled.apply(BrokerAcknowledged(event_id="evt-ack", broker_order_id="broker-order-1"))
     cancelled = cancelled.apply(CancelRequested(event_id="evt-cancel-request"))
     cancelled = cancelled.apply(CancelConfirmed(event_id="evt-cancelled"))
 
@@ -190,9 +180,7 @@ def test_out_of_order_ack_does_not_regress_partial_fill() -> None:
         )
     )
 
-    changed = order.apply(
-        BrokerAcknowledged(event_id="evt-late-ack", broker_order_id="broker-order-1")
-    )
+    changed = order.apply(BrokerAcknowledged(event_id="evt-late-ack", broker_order_id="broker-order-1"))
 
     assert changed.state is OrderState.PARTIALLY_FILLED
 

@@ -128,9 +128,7 @@ class PaperBroker:
         instrument_values = _typed_tuple(instruments, InstrumentFact, label="instruments")
         quote_values = _typed_tuple(quotes, QuoteFact, label="quotes")
         self._positions = {position.symbol: position for position in position_values}
-        self._instruments = {
-            instrument.symbol: instrument for instrument in instrument_values
-        }
+        self._instruments = {instrument.symbol: instrument for instrument in instrument_values}
         self._quotes = {quote.symbol: quote for quote in quote_values}
         if len(self._positions) != len(position_values):
             raise DomainValidationError("paper broker contains duplicate positions")
@@ -185,9 +183,7 @@ class PaperBroker:
                     "total_shares": position.total_shares.value,
                     "sellable_shares": position.sellable_shares.value,
                     "average_cost": (
-                        None
-                        if position.average_cost is None
-                        else position.average_cost.canonical
+                        None if position.average_cost is None else position.average_cost.canonical
                     ),
                     "market_value": position.market_value.canonical,
                 }
@@ -254,14 +250,11 @@ class PaperBroker:
         self._require_connected()
         return self._account
 
-    def query_positions(
-        self, *, connected_required: bool = True
-    ) -> tuple[BrokerPositionFact, ...]:
+    def query_positions(self, *, connected_required: bool = True) -> tuple[BrokerPositionFact, ...]:
         if connected_required:
             self._require_connected()
         return tuple(
-            self._positions[symbol]
-            for symbol in sorted(self._positions, key=lambda item: item.canonical)
+            self._positions[symbol] for symbol in sorted(self._positions, key=lambda item: item.canonical)
         )
 
     def query_orders(self) -> tuple[BrokerOrderFact, ...]:
@@ -367,9 +360,7 @@ class PaperBroker:
             return
         error = self._callback_error
         if error is None:
-            raise PaperCallbackDeliveryError(
-                "paper callback delivery is degraded; reconcile before retry"
-            )
+            raise PaperCallbackDeliveryError("paper callback delivery is degraded; reconcile before retry")
         raise PaperCallbackDeliveryError(
             "paper callback delivery is degraded; reconcile before retry"
         ) from error
@@ -392,7 +383,16 @@ class PaperBroker:
         sequence: int,
         event_time: datetime,
     ) -> dict[str, object]:
-        quote = self._quotes[command.symbol]
+        quote = self._quotes.get(command.symbol)
+        instrument = self._instruments.get(command.symbol)
+        if quote is not None:
+            session_date = quote.session_date
+        elif instrument is not None:
+            session_date = instrument.session_date
+        else:
+            raise BrokerFactUnavailable(
+                f"paper cannot assert an order session without market facts: {command.symbol}"
+            )
         return {
             "broker_order_id": broker_order_id,
             "client_order_id": command.client_order_id,
@@ -403,7 +403,7 @@ class PaperBroker:
             "requested_shares": command.requested_shares.value,
             "filled_shares": filled_shares,
             "limit_price": command.limit_price.canonical,
-            "session_date": quote.session_date.isoformat(),
+            "session_date": session_date.isoformat(),
             "event_time": event_time.isoformat(),
             "event_sequence": sequence,
         }
@@ -458,10 +458,7 @@ class PaperBroker:
         )
         if any(limit is None for limit in limits):
             return "PRICE_LIMIT_FACT_MISSING"
-        if (
-            instrument.lower_limit != quote.lower_limit
-            or instrument.upper_limit != quote.upper_limit
-        ):
+        if instrument.lower_limit != quote.lower_limit or instrument.upper_limit != quote.upper_limit:
             return "PRICE_LIMIT_FACT_MISMATCH"
         if instrument.session_date != quote.session_date:
             return "MARKET_FACT_SESSION_MISMATCH"
@@ -479,9 +476,7 @@ class PaperBroker:
         requested = command.requested_shares.value
         position = self._positions.get(command.symbol)
         full_odd_lot_sell = (
-            command.side is Side.SELL
-            and position is not None
-            and requested == position.total_shares.value
+            command.side is Side.SELL and position is not None and requested == position.total_shares.value
         )
         if requested % unit != 0 and not full_odd_lot_sell:
             return "TRADING_UNIT_INVALID"
@@ -556,9 +551,7 @@ class PaperBroker:
                 return None, "ORDER_NOT_MARKETABLE"
             multiplier = Decimal(1) - self._policy.fill_model.slippage_bps / Decimal(10000)
         raw_price = base.value * multiplier
-        tick_units = (raw_price / instrument.price_tick.value).quantize(
-            Decimal(1), rounding=ROUND_HALF_UP
-        )
+        tick_units = (raw_price / instrument.price_tick.value).quantize(Decimal(1), rounding=ROUND_HALF_UP)
         price = Price(tick_units * instrument.price_tick.value)
         if command.side is Side.BUY and price.value > command.limit_price.value:
             return None, "SLIPPAGE_EXCEEDS_LIMIT"
@@ -573,8 +566,7 @@ class PaperBroker:
     def _participation_capacity(self, *, command: BrokerOrderCommand, quote: QuoteFact) -> int:
         maximum = int(
             (
-                Decimal(quote.volume.value)
-                * self._policy.fill_model.max_volume_participation
+                Decimal(quote.volume.value) * self._policy.fill_model.max_volume_participation
             ).to_integral_value(rounding=ROUND_FLOOR)
         )
         consumed = self._consumed_volume.get((quote.session_date, command.symbol), 0)
@@ -600,17 +592,13 @@ class PaperBroker:
                 return position.total_shares.value
         return candidate - candidate % unit
 
-    def _affordable_buy_shares(
-        self, *, price: Price, candidate: int, trading_unit: int
-    ) -> int:
+    def _affordable_buy_shares(self, *, price: Price, candidate: int, trading_unit: int) -> int:
         available = self._account.available_cash.value
         maximum = min(candidate, int((available / price.value).to_integral_value(ROUND_FLOOR)))
         maximum -= maximum % trading_unit
         while maximum > 0:
             shares = Shares(maximum)
-            fees = self._policy.fee_schedule.calculate(
-                side=Side.BUY, price=price, shares=shares
-            )
+            fees = self._policy.fee_schedule.calculate(side=Side.BUY, price=price, shares=shares)
             if price.value * maximum + fees.total.value <= available:
                 return maximum
             maximum -= trading_unit
@@ -710,9 +698,7 @@ class PaperBroker:
             total_assets=_money(total_assets, label="paper total assets"),
         )
 
-    def match(
-        self, broker_order_id: str, *, quote: QuoteFact | None = None
-    ) -> PaperMatchResult:
+    def match(self, broker_order_id: str, *, quote: QuoteFact | None = None) -> PaperMatchResult:
         self._require_connected()
         self._require_callback_delivery()
         if not isinstance(broker_order_id, str) or not broker_order_id:
@@ -745,9 +731,7 @@ class PaperBroker:
         )
         if price is None:
             if price_reason is None:
-                raise DomainValidationError(
-                    "paper fill rejection is missing a deterministic reason"
-                )
+                raise DomainValidationError("paper fill rejection is missing a deterministic reason")
             self._reasons[broker_order_id] = price_reason
             return PaperMatchResult(order=order, fill=None, reason_code=price_reason)
         remaining = order.requested_shares.value - order.filled_shares.value
@@ -771,7 +755,11 @@ class PaperBroker:
                 trading_unit=instrument.trading_unit.value,
             )
         if quantity <= 0:
-            reason = "CASH_INSUFFICIENT" if command.side is Side.BUY and candidate > 0 else "VOLUME_CAPACITY_EXHAUSTED"
+            reason = (
+                "CASH_INSUFFICIENT"
+                if command.side is Side.BUY and candidate > 0
+                else "VOLUME_CAPACITY_EXHAUSTED"
+            )
             self._reasons[broker_order_id] = reason
             return PaperMatchResult(order=order, fill=None, reason_code=reason)
         shares = Shares(quantity)
@@ -782,9 +770,7 @@ class PaperBroker:
         )
         match_count = self._match_counts[broker_order_id] + 1
         self._match_counts[broker_order_id] = match_count
-        fill_identity = (
-            f"{broker_order_id}\0{match_count}\0{quantity}\0{price.canonical}"
-        )
+        fill_identity = f"{broker_order_id}\0{match_count}\0{quantity}\0{price.canonical}"
         fill_id = _stable_id("paper-fill-", fill_identity)
         now = self._clock()
         fill_payload = self._fill_payload(

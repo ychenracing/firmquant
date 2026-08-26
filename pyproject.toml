@@ -61,6 +61,7 @@ pretty = true
 [tool.coverage.run]
 branch = true
 source = ["firmquant"]
+patch = ["subprocess"]
 
 [tool.coverage.report]
 fail_under = 85
@@ -69,4 +70,6 @@ skip_covered = true
 exclude_also = [
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
+    "^\\s*\\.\\.\\.\\s*$",
+    "^\\s*(async\\s+)?def .*:\\s*\\.\\.\\.\\s*$",
 ]

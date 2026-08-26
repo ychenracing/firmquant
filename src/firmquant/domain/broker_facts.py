@@ -160,9 +160,7 @@ class InstrumentFact:
         if not 0 <= self.price_precision <= 8:
             raise DomainValidationError("price precision must be between zero and eight")
         prices = tuple(
-            price
-            for price in (self.price_tick, self.lower_limit, self.upper_limit)
-            if price is not None
+            price for price in (self.price_tick, self.lower_limit, self.upper_limit) if price is not None
         )
         if any(price.decimal_places > self.price_precision for price in prices):
             raise DomainValidationError("instrument price exceeds declared precision")
@@ -330,9 +328,7 @@ class BrokerSnapshot:
             ("orders", self.orders, BrokerOrderFact),
             ("fills", self.fills, BrokerFillFact),
         ):
-            if not isinstance(values, tuple) or not all(
-                isinstance(value, expected_type) for value in values
-            ):
+            if not isinstance(values, tuple) or not all(isinstance(value, expected_type) for value in values):
                 raise DomainTypeError(f"broker snapshot {label} must be a typed tuple")
         position_symbols = [position.symbol for position in self.positions]
         if len(position_symbols) != len(set(position_symbols)):

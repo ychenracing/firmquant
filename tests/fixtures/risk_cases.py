@@ -89,9 +89,7 @@ def risk_command(
     authorized: int = 500,
     price: str = "10",
 ) -> RiskCommand:
-    identity = hashlib.sha256(
-        f"{side.value}:{requested}:{authorized}:{price}".encode()
-    ).hexdigest()
+    identity = hashlib.sha256(f"{side.value}:{requested}:{authorized}:{price}".encode()).hexdigest()
     command = BrokerOrderCommand(
         execution_id="exec_" + identity,
         idempotency_key=hashlib.sha256(f"idem:{identity}".encode()).hexdigest(),

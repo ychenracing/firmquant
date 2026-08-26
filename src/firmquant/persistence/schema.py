@@ -476,9 +476,7 @@ def apply_migrations(
                 version = int(row["version"])
                 migration = expected.get(version)
                 if migration is None:
-                    raise MigrationError(
-                        f"database schema version {version} is newer than this executable"
-                    )
+                    raise MigrationError(f"database schema version {version} is newer than this executable")
                 if row["name"] != migration.name or row["checksum"] != migration.checksum:
                     raise MigrationError(f"migration receipt mismatch at version {version}")
             applied = {int(row["version"]) for row in rows}

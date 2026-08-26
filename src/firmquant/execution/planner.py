@@ -48,9 +48,7 @@ class ExecutionBrokerSnapshot:
             isinstance(item, InstrumentFact) for item in self.instruments
         ):
             raise DomainTypeError("execution instruments must be a typed tuple")
-        if not isinstance(self.quotes, tuple) or not all(
-            isinstance(item, QuoteFact) for item in self.quotes
-        ):
+        if not isinstance(self.quotes, tuple) or not all(isinstance(item, QuoteFact) for item in self.quotes):
             raise DomainTypeError("execution quotes must be a typed tuple")
         if not isinstance(self.market_status, MarketSessionStatus):
             raise DomainTypeError("execution market status must be MarketSessionStatus")
@@ -211,9 +209,7 @@ class ExecutionPlanner:
             raise ExecutionPlanningError("sentinel freeze_new_risk must be boolean")
         instruments = {item.symbol: item for item in broker_snapshot.instruments}
         quotes = {item.symbol: item for item in broker_snapshot.quotes}
-        positions = {
-            item.symbol: item for item in broker_snapshot.broker_snapshot.positions
-        }
+        positions = {item.symbol: item for item in broker_snapshot.broker_snapshot.positions}
         broker_client_ids = {
             item.client_order_id
             for item in broker_snapshot.broker_snapshot.orders
@@ -236,25 +232,17 @@ class ExecutionPlanner:
             except (TypeError, ValueError) as error:
                 raise ExecutionPlanningError(f"invalid uquant order identity: {order_id}") from error
             weight = _weight(raw.get("target_weight"))
-            reason_code = _text(
-                raw.get("reason_code"), label="uquant order reason code"
-            )
+            reason_code = _text(raw.get("reason_code"), label="uquant order reason code")
             if order_id in broker_client_ids:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "EXISTING_BROKER_ORDER")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "EXISTING_BROKER_ORDER"))
                 continue
             if freeze_new_risk and side is Side.BUY:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "SENTINEL_FREEZE_NEW_RISK")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "SENTINEL_FREEZE_NEW_RISK"))
                 continue
             instrument = instruments.get(symbol)
             quote = quotes.get(symbol)
             if instrument is None:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "INSTRUMENT_FACT_MISSING")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "INSTRUMENT_FACT_MISSING"))
                 continue
             if quote is None:
                 blockers.append(PlanningBlocker(order_id, symbol.canonical, "QUOTE_FACT_MISSING"))
@@ -263,59 +251,41 @@ class ExecutionPlanner:
                 instrument.security_type is not SecurityType.EQUITY
                 or instrument.status is not SecurityStatus.TRADING
             ):
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "INSTRUMENT_NOT_TRADING")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "INSTRUMENT_NOT_TRADING"))
                 continue
             if broker_snapshot.market_status not in {
                 MarketSessionStatus.OPEN,
                 MarketSessionStatus.AUCTION,
             }:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "MARKET_NOT_TRADABLE")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "MARKET_NOT_TRADABLE"))
                 continue
             reference = quote.ask_price if side is Side.BUY else quote.bid_price
             if reference is None:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "REFERENCE_PRICE_MISSING")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "REFERENCE_PRICE_MISSING"))
                 continue
             if quote.lower_limit is None or quote.upper_limit is None:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "PRICE_LIMIT_FACT_MISSING")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "PRICE_LIMIT_FACT_MISSING"))
                 continue
             current = positions.get(symbol)
             current_shares = 0 if current is None else current.total_shares.value
             equity = broker_snapshot.broker_snapshot.account.total_assets.value
             unit = instrument.trading_unit.value
-            desired_units = (
-                weight * equity / reference.value / unit
-            ).to_integral_value(rounding=ROUND_FLOOR)
+            desired_units = (weight * equity / reference.value / unit).to_integral_value(rounding=ROUND_FLOOR)
             desired_shares = int(desired_units) * unit
             if side is Side.BUY:
                 authorized = max(0, desired_shares - current_shares)
             else:
-                authorized = (
-                    current_shares
-                    if weight == 0
-                    else max(0, current_shares - desired_shares)
-                )
+                authorized = current_shares if weight == 0 else max(0, current_shares - desired_shares)
                 if authorized != current_shares:
                     authorized -= authorized % unit
             if authorized <= 0:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "TARGET_ALREADY_SATISFIED")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "TARGET_ALREADY_SATISFIED"))
                 continue
             expected_side = Side.BUY if desired_shares > current_shares else Side.SELL
             if weight == 0 and current_shares > 0:
                 expected_side = Side.SELL
             if side is not expected_side:
-                blockers.append(
-                    PlanningBlocker(order_id, symbol.canonical, "UQUANT_DIRECTION_CONTRADICTION")
-                )
+                blockers.append(PlanningBlocker(order_id, symbol.canonical, "UQUANT_DIRECTION_CONTRADICTION"))
                 continue
             planned.append(
                 PlannedOrder(

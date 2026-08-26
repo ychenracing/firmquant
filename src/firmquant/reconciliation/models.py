@@ -61,9 +61,7 @@ class ExpectedPosition:
     def __post_init__(self) -> None:
         if not isinstance(self.symbol, Symbol):
             raise DomainTypeError("expected position symbol must be Symbol")
-        if not isinstance(self.total_shares, Shares) or not isinstance(
-            self.sellable_shares, Shares
-        ):
+        if not isinstance(self.total_shares, Shares) or not isinstance(self.sellable_shares, Shares):
             raise DomainTypeError("expected position quantities must be Shares")
         if not self.total_shares.is_positive:
             raise DomainValidationError("expected position must contain positive shares")
@@ -82,9 +80,7 @@ class StrategyAccountView:
     economic_state_sha256: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.available_cash, Money) or not isinstance(
-            self.total_assets, Money
-        ):
+        if not isinstance(self.available_cash, Money) or not isinstance(self.total_assets, Money):
             raise DomainTypeError("strategy account cash and assets must be Money")
         if self.available_cash.value > self.total_assets.value:
             raise DomainValidationError("strategy available cash cannot exceed total assets")
@@ -121,9 +117,7 @@ class OperationalOrderView:
             raise DomainTypeError("operational order symbol must be Symbol")
         if not isinstance(self.side, Side):
             raise DomainTypeError("operational order side must be Side")
-        if not isinstance(self.requested_shares, Shares) or not isinstance(
-            self.filled_shares, Shares
-        ):
+        if not isinstance(self.requested_shares, Shares) or not isinstance(self.filled_shares, Shares):
             raise DomainTypeError("operational order quantities must be Shares")
         if not self.requested_shares.is_positive:
             raise DomainValidationError("operational requested shares must be positive")
@@ -192,8 +186,7 @@ class ReconciliationFacts:
         if not isinstance(self.operational_ledger, OperationalLedgerView):
             raise DomainTypeError("reconciliation ledger must be OperationalLedgerView")
         if not isinstance(self.company_action_suspected_symbols, frozenset) or not all(
-            isinstance(symbol, Symbol)
-            for symbol in self.company_action_suspected_symbols
+            isinstance(symbol, Symbol) for symbol in self.company_action_suspected_symbols
         ):
             raise DomainTypeError("company action suspicions must be frozenset[Symbol]")
         identities = (
@@ -219,9 +212,10 @@ class ReconciliationReceipt:
     details_sha256: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reconciliation_id, str) or _RECONCILIATION_ID.fullmatch(
-            self.reconciliation_id
-        ) is None:
+        if (
+            not isinstance(self.reconciliation_id, str)
+            or _RECONCILIATION_ID.fullmatch(self.reconciliation_id) is None
+        ):
             raise DomainValidationError("reconciliation id is not canonical")
         if not isinstance(self.kind, ReconciliationKind):
             raise DomainTypeError("reconciliation kind must be ReconciliationKind")
@@ -239,9 +233,7 @@ class ReconciliationReceipt:
             if not isinstance(values, tuple):
                 raise DomainTypeError(f"reconciliation {collection_label} must be tuple")
             if tuple(sorted(set(values))) != values:
-                raise DomainValidationError(
-                    f"reconciliation {collection_label} must be sorted and unique"
-                )
+                raise DomainValidationError(f"reconciliation {collection_label} must be sorted and unique")
             for value in values:
                 _canonical_text(value, label=f"reconciliation {collection_label}")
         if self.passed != (not self.blockers):

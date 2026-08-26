@@ -26,9 +26,7 @@ from tests.fixtures.broker_contract import (
 )
 
 
-def _policy(
-    *, participation: str = "0.005", slippage_bps: str = "0"
-) -> ExecutionPolicy:
+def _policy(*, participation: str = "0.005", slippage_bps: str = "0") -> ExecutionPolicy:
     return ExecutionPolicy(
         fill_model=FillModel(
             max_volume_participation=Decimal(participation),
@@ -107,9 +105,7 @@ def test_paper_slippage_and_fees_update_cash_without_binary_float() -> None:
     broker = _paper(policy=_policy(participation="1", slippage_bps="10"))
     broker.connect()
 
-    order = broker.submit_order(
-        order_command(shares=100, limit_price="10.20", identity="slippage")
-    )
+    order = broker.submit_order(order_command(shares=100, limit_price="10.20", identity="slippage"))
     fill = broker.query_fills()[0]
 
     assert order.status is BrokerOrderStatus.FILLED
@@ -127,9 +123,7 @@ def test_paper_buy_is_t_plus_one_and_cannot_be_sold_same_day() -> None:
     assert position.total_shares == Shares(100)
     assert position.sellable_shares == Shares(0)
 
-    sell = broker.submit_order(
-        order_command(side=Side.SELL, identity="same-day-sell")
-    )
+    sell = broker.submit_order(order_command(side=Side.SELL, identity="same-day-sell"))
     assert sell.status is BrokerOrderStatus.REJECTED
     assert broker.reason_for(sell.broker_order_id) == "T1_SELLABLE_EXCEEDED"
     assert broker.query_positions()[0].total_shares == Shares(100)
@@ -154,9 +148,7 @@ def test_paper_rejects_invalid_trading_unit_and_price_boundary() -> None:
     broker.connect()
 
     odd_lot = broker.submit_order(order_command(shares=50, identity="odd-buy"))
-    out_of_bounds = broker.submit_order(
-        order_command(limit_price="12.00", identity="out-of-bounds")
-    )
+    out_of_bounds = broker.submit_order(order_command(limit_price="12.00", identity="out-of-bounds"))
 
     assert odd_lot.status is BrokerOrderStatus.REJECTED
     assert broker.reason_for(odd_lot.broker_order_id) == "TRADING_UNIT_INVALID"
@@ -180,9 +172,7 @@ def test_paper_blocks_buy_at_upper_limit_without_guessing_percentage() -> None:
     )
     broker.connect()
 
-    order = broker.submit_order(
-        order_command(limit_price=upper.canonical, identity="upper-limit")
-    )
+    order = broker.submit_order(order_command(limit_price=upper.canonical, identity="upper-limit"))
 
     assert order.status is BrokerOrderStatus.ACKNOWLEDGED
     assert order.filled_shares == Shares(0)
@@ -249,9 +239,7 @@ def test_paper_ids_and_results_are_deterministic() -> None:
 def test_paper_cancels_only_an_open_system_order_idempotently() -> None:
     broker = _paper()
     broker.connect()
-    acknowledged = broker.submit_order(
-        order_command(limit_price="9.50", identity="resting-order")
-    )
+    acknowledged = broker.submit_order(order_command(limit_price="9.50", identity="resting-order"))
     assert acknowledged.status is BrokerOrderStatus.ACKNOWLEDGED
 
     cancelled = broker.cancel_order(acknowledged.broker_order_id)

@@ -79,16 +79,12 @@ def _json_record(line: str, *, line_number: int) -> dict[str, object]:
     return value
 
 
-def _exact_keys(
-    value: Mapping[str, object], *, expected: frozenset[str], label: str
-) -> None:
+def _exact_keys(value: Mapping[str, object], *, expected: frozenset[str], label: str) -> None:
     keys = frozenset(value)
     if keys != expected:
         missing = sorted(expected - keys)
         unexpected = sorted(keys - expected)
-        raise ReplayFormatError(
-            f"{label} schema mismatch; missing={missing!r}, unexpected={unexpected!r}"
-        )
+        raise ReplayFormatError(f"{label} schema mismatch; missing={missing!r}, unexpected={unexpected!r}")
 
 
 def _mapping(value: object, *, label: str) -> dict[str, object]:
@@ -182,10 +178,7 @@ class RecordedReplayBroker:
             raise ReplayFormatError(f"cannot read UTF-8 broker recording: {path}") from error
         if not lines or any(not line for line in lines):
             raise ReplayFormatError("broker recording cannot contain blank lines")
-        records = tuple(
-            _json_record(line, line_number=index)
-            for index, line in enumerate(lines, start=1)
-        )
+        records = tuple(_json_record(line, line_number=index) for index, line in enumerate(lines, start=1))
         state = records[0]
         _exact_keys(
             state,
@@ -224,9 +217,7 @@ class RecordedReplayBroker:
             )
             instrument_values = tuple(
                 normalize_instrument(item)
-                for item in _mapping_list(
-                    state["instruments"], label="recording instruments"
-                )
+                for item in _mapping_list(state["instruments"], label="recording instruments")
             )
             quote_values = tuple(
                 normalize_quote(item, received_at=captured_at)
@@ -256,15 +247,11 @@ class RecordedReplayBroker:
             try:
                 envelope = normalize_broker_event(raw_event, received_at=captured_at)
             except (DomainTypeError, DomainValidationError) as error:
-                raise ReplayFormatError(
-                    f"invalid normalized event on line {line_number}: {error}"
-                ) from error
+                raise ReplayFormatError(f"invalid normalized event on line {line_number}: {error}") from error
             identity = (envelope.event_type.value, envelope.raw_payload_sha256)
             previous = identities.setdefault(envelope.broker_event_id, identity)
             if previous != identity:
-                raise ReplayFormatError(
-                    f"broker event identity collision: {envelope.broker_event_id}"
-                )
+                raise ReplayFormatError(f"broker event identity collision: {envelope.broker_event_id}")
             events.append((envelope, copy.deepcopy(raw_event)))
         events.sort(
             key=lambda item: (

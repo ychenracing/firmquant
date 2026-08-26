@@ -180,9 +180,7 @@ def test_local_terminal_broker_active_contradiction_halts(database: Database) ->
         ({"config_identity_matches": False}, "CONFIG_IDENTITY_DRIFT"),
     ],
 )
-def test_identity_drift_halts(
-    database: Database, changes: dict[str, object], blocker: str
-) -> None:
+def test_identity_drift_halts(database: Database, changes: dict[str, object], blocker: str) -> None:
     receipt = service(database).run(
         ReconciliationKind.MANUAL,
         replace(healthy_reconciliation_facts(), **changes),
