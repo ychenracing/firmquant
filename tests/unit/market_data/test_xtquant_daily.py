@@ -53,7 +53,7 @@ def test_daily_update_appends_only_and_returns_verified_manifest(tmp_path: Path)
     assert receipt.latest_common_session == date(2026, 8, 25)
     assert receipt.appended_rows == 1
     assert len(receipt.manifest_sha256) == 64
-    assert provider.calls == [(('sh600519',), date(2026, 8, 25))]
+    assert provider.calls == [(("sh600519",), date(2026, 8, 25))]
     text = (tmp_path / "sh600519.csv").read_text(encoding="utf-8")
     assert "2026-08-25,11,11,11,11,1000,11000" in text
 
