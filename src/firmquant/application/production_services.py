@@ -433,7 +433,7 @@ class ProductionServiceHooks:
             ) from error
         except RecoveryContradiction as error:
             raise ProductionServicesUnavailable("ACCOUNT_COMMIT_CONTRADICTION") from error
-        return cast(ReconciliationReceipt, result.receipt), snapshot, result.account
+        return result.receipt, snapshot, result.account
 
     def _require_promotion(self, account_hash: str) -> None:
         if self._settings.mode is Mode.SHADOW:
