@@ -4,7 +4,7 @@ import hashlib
 import sys
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,10 +33,8 @@ from firmquant.domain.broker_facts import MarketSessionStatus
 from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.execution.planner import ExecutionPlanner
-from firmquant.market_data.calendar import AuthoritativeTradingCalendar, CalendarCoverageError
+from firmquant.market_data.calendar import AuthoritativeTradingCalendar
 from firmquant.market_data.xtquant_daily import DailyDataUpdateReceipt
-from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
-from firmquant.persistence.repositories import DecisionSnapshotRepository
 from firmquant.persistence.writer_lease import WriterLease
 from firmquant.reconciliation.models import ReconciliationKind
 from firmquant.strategy.snapshots import DecisionSnapshot
@@ -110,9 +108,7 @@ class Accounts:
         operation_kind: str,
         evidence_sha256: str,
     ) -> str:
-        self.persisted.append(
-            (expected_before_sha256, operation_kind, evidence_sha256)
-        )
+        self.persisted.append((expected_before_sha256, operation_kind, evidence_sha256))
         return self.persist_result
 
 
@@ -479,6 +475,7 @@ def test_startup_requires_recovery_then_smoke_reconciliation_and_promotion(
 
     RecoveryService.result = RecoveryResult()
     with hook_case(tmp_path / "reconcile") as (hooks, _writer, _broker, _accounts):
+
         def fail(_kind):
             raise RuntimeError("reconcile failed")
 
@@ -496,7 +493,7 @@ def test_canary_promotion_gate_is_identity_bound(tmp_path: Path) -> None:
 
         thresholds = hooks._settings.promotion
         ps.PromotionStore(hooks._database).append(
-            ShadowPromotionEvidence(
+            ps.ShadowPromotionEvidence(
                 firmquant_commit=hooks._identity.firmquant_commit,
                 uquant_commit=hooks._identity.uquant_commit,
                 config_sha256=hooks._identity.promotion_config_sha256,
@@ -543,10 +540,13 @@ def test_audit_and_reconciliation_receipt_lookup_are_idempotent(tmp_path: Path) 
         hooks._audit(event_id, "RUNTIME", {"schema": "test.v1", "value": 1})
         hooks._audit(event_id, "RUNTIME", {"schema": "test.v1", "value": 1})
         assert hooks._audited(event_id)
-        assert hooks._database.scalar(
-            "SELECT count(*) FROM audit_events WHERE audit_event_id = ?",
-            (event_id,),
-        ) == 1
+        assert (
+            hooks._database.scalar(
+                "SELECT count(*) FROM audit_events WHERE audit_event_id = ?",
+                (event_id,),
+            )
+            == 1
+        )
         with pytest.raises(ProductionServicesUnavailable, match="RECEIPT_MISSING"):
             hooks._latest_passed_reconciliation(ReconciliationKind.EOD)
 
@@ -665,9 +665,7 @@ def test_risk_helpers_track_external_activity_notionals_and_drawdown(
         submitted, filled = hooks._notionals(EXECUTION_SESSION)
         assert submitted == Money(Decimal("0"))
         assert filled == Money(Decimal("0"))
-        equity, intraday, drawdown = hooks._account_risk_fractions(
-            execution_snapshot().broker_snapshot
-        )
+        equity, intraday, drawdown = hooks._account_risk_fractions(execution_snapshot().broker_snapshot)
         assert equity == 0
         assert intraday == 0
         assert drawdown == 0
@@ -775,10 +773,14 @@ def test_builder_is_fail_closed_and_composes_single_daemon_path(
             )
 
         monkeypatch.setattr(ps.XtQuantSafetyManifest, "load", lambda _path: safety)
-        monkeypatch.setattr(ps.StrategyIdentity, "locked", lambda: SimpleNamespace(
-            uquant_commit="1" * 40,
-            verify=lambda: None,
-        ))
+        monkeypatch.setattr(
+            ps.StrategyIdentity,
+            "locked",
+            lambda: SimpleNamespace(
+                uquant_commit="1" * 40,
+                verify=lambda: None,
+            ),
+        )
         monkeypatch.setattr(ps, "current_clean_firmquant_commit", lambda: "f" * 40)
         monkeypatch.setattr(
             ps,
