@@ -13,7 +13,11 @@ def _nonnegative(value: Decimal, *, label: str) -> None:
 
 
 def _fraction(value: Decimal, *, label: str) -> None:
-    if not isinstance(value, Decimal) or not value.is_finite() or not Decimal(0) <= value <= Decimal(1):
+    if (
+        not isinstance(value, Decimal)
+        or not value.is_finite()
+        or not Decimal(0) <= value <= Decimal(1)
+    ):
         raise ValueError(f"{label} must be a Decimal between zero and one")
 
 
@@ -59,7 +63,9 @@ class ExecutionReplaySummary:
     sessions: int
 
 
-def summarize_execution_replay(points: tuple[ExecutionReplayPoint, ...]) -> ExecutionReplaySummary:
+def summarize_execution_replay(
+    points: tuple[ExecutionReplayPoint, ...],
+) -> ExecutionReplaySummary:
     if not isinstance(points, tuple) or not points:
         raise ValueError("execution replay requires a non-empty point tuple")
     if not all(isinstance(point, ExecutionReplayPoint) for point in points):
@@ -81,11 +87,21 @@ def summarize_execution_replay(points: tuple[ExecutionReplayPoint, ...]) -> Exec
     return ExecutionReplaySummary(
         cumulative_return=cumulative_return,
         max_drawdown=max_drawdown,
-        turnover_notional=sum((point.turnover_notional for point in points), start=Decimal(0)),
-        slippage_cost=sum((point.slippage_cost for point in points), start=Decimal(0)),
-        unfilled_loss=sum((point.unfilled_loss for point in points), start=Decimal(0)),
+        turnover_notional=sum(
+            (point.turnover_notional for point in points),
+            start=Decimal(0),
+        ),
+        slippage_cost=sum(
+            (point.slippage_cost for point in points),
+            start=Decimal(0),
+        ),
+        unfilled_loss=sum(
+            (point.unfilled_loss for point in points),
+            start=Decimal(0),
+        ),
         max_target_tracking_error=max(tracking),
-        mean_target_tracking_error=sum(tracking, start=Decimal(0)) / Decimal(len(tracking)),
+        mean_target_tracking_error=sum(tracking, start=Decimal(0))
+        / Decimal(len(tracking)),
         sessions=len(points),
     )
 

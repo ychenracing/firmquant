@@ -24,7 +24,11 @@ def _count(value: int, *, label: str) -> None:
 
 
 def _fraction(value: Decimal, *, label: str) -> None:
-    if not isinstance(value, Decimal) or not value.is_finite() or not Decimal(0) <= value <= Decimal(1):
+    if (
+        not isinstance(value, Decimal)
+        or not value.is_finite()
+        or not Decimal(0) <= value <= Decimal(1)
+    ):
         raise ValueError(f"{label} must be a Decimal between zero and one")
 
 
@@ -78,7 +82,12 @@ class ShadowPromotionEvidence:
             "max_target_tracking_error": str(self.max_target_tracking_error),
             "created_at": self.created_at.isoformat(),
         }
-        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
         return hashlib.sha256(encoded).hexdigest()
 
     def qualifies(
