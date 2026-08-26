@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from firmquant.domain.broker_facts import AccountType
+from firmquant.domain.values import Symbol
 from firmquant.persistence.account_authority import (
     AccountBinding,
     AccountBindingRepository,
@@ -10,9 +12,6 @@ from firmquant.persistence.account_authority import (
     ReviewedAccountAdjustment,
     ReviewedAccountAdjustmentRepository,
 )
-
-from firmquant.domain.broker_facts import AccountType
-from firmquant.domain.values import Symbol
 from firmquant.persistence.database import Database
 
 NOW = datetime(2026, 1, 6, 3, tzinfo=UTC)

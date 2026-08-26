@@ -21,7 +21,6 @@ from firmquant.persistence.account_authority import (
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
 from firmquant.persistence.recovery import UquantAccountStateStore
-from firmquant.persistence.repositories import canonical_json
 
 from .account_sync import AccountStateContract
 from .identity import StrategyIdentity, StrategyIdentityViolation
@@ -72,6 +71,13 @@ class _AccountStateFactory(Protocol):
     def empty(cls, cash: float) -> object: ...
 
 
+class _MutableAccountIdentity(Protocol):
+    code_hash: str
+    data_hash: str
+    data_hash_as_of: str
+    data_hash_symbols: list[str]
+
+
 class AccountBootstrapService:
     def __init__(
         self,
@@ -120,7 +126,7 @@ class AccountBootstrapService:
             raise AccountBootstrapDenied("ACTIVE_ARM_LEASE_PRESENT")
         for table in ("decision_snapshots", "execution_intents", "broker_orders", "fills"):
             if self._count(
-                self._database.scalar(f"SELECT count(*) FROM {table}"),  # noqa: S608 - fixed table allowlist
+                self._database.scalar(f"SELECT count(*) FROM {table}"),
                 code="DATABASE_STATE_INVALID",
             ):
                 raise AccountBootstrapDenied("ACCOUNT_ECONOMIC_HISTORY_PRESENT")
@@ -194,10 +200,11 @@ class AccountBootstrapService:
         data: BootstrapDataIdentity,
     ) -> None:
         try:
-            setattr(account, "code_hash", identity.economic_code_fingerprint)
-            setattr(account, "data_hash", data.data_hash)
-            setattr(account, "data_hash_as_of", data.as_of)
-            setattr(account, "data_hash_symbols", list(data.symbols))
+            target = cast(_MutableAccountIdentity, account)
+            target.code_hash = identity.economic_code_fingerprint
+            target.data_hash = data.data_hash
+            target.data_hash_as_of = data.as_of
+            target.data_hash_symbols = list(data.symbols)
         except (AttributeError, TypeError) as error:
             raise AccountBootstrapDenied("UQUANT_ACCOUNT_CONTRACT_UNAVAILABLE") from error
 
@@ -272,13 +279,12 @@ class AccountBootstrapService:
                 raise AccountBootstrapDenied("ACCOUNT_STATE_SEED_REQUIRED")
             candidate = self._strict_load(seed_path)
             self._validate_seed(candidate, snapshot=snapshot, identity=identity, data=data)
+        elif seed_path is not None:
+            candidate = self._strict_load(seed_path)
+            self._validate_seed(candidate, snapshot=snapshot, identity=identity, data=data)
         else:
-            if seed_path is not None:
-                candidate = self._strict_load(seed_path)
-                self._validate_seed(candidate, snapshot=snapshot, identity=identity, data=data)
-            else:
-                candidate = self._empty_account(snapshot.account.available_cash.value)
-                self._set_identity(candidate, identity=identity, data=data)
+            candidate = self._empty_account(snapshot.account.available_cash.value)
+            self._set_identity(candidate, identity=identity, data=data)
         try:
             account_state_sha256 = self._store.hash_state(candidate)
         except Exception as error:
@@ -297,15 +303,6 @@ class AccountBootstrapService:
             created_at=now,
         )
         operation_id = self._operation_id(binding)
-        operation_payload = {
-            "schema": "firmquant.account-bootstrap-operation.v1",
-            "operation_id": operation_id,
-            "binding_id": binding.binding_id,
-            "account_state_sha256": account_state_sha256,
-            "broker_snapshot_sha256": snapshot.raw_payload_sha256,
-        }
-        operation_payload_json = canonical_json(operation_payload)
-        operation_payload_sha256 = hashlib.sha256(operation_payload_json.encode("utf-8")).hexdigest()
         with self._database.transaction():
             self._database.write(
                 """
