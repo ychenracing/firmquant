@@ -6,16 +6,16 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from uquant.account import load_account, save_account
-from uquant.types import AccountState
-
-from firmquant.domain.values import Money
-from firmquant.persistence.database import Database
 from firmquant.strategy.account_bootstrap import (
     AccountBootstrapDenied,
     AccountBootstrapService,
     BootstrapDataIdentity,
 )
+from uquant.account import load_account, save_account
+from uquant.types import AccountState
+
+from firmquant.domain.values import Money
+from firmquant.persistence.database import Database
 from firmquant.strategy.identity import StrategyIdentity
 from tests.fixtures.broker_snapshots import completed_buy_snapshot
 
