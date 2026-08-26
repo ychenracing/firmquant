@@ -33,7 +33,7 @@ _STATUS_RANK = {
 
 
 def _write_event_id(prefix: str, attempt: BrokerAttempt, evidence_sha256: str) -> str:
-    payload = f"{prefix}:{attempt.attempt_id}:{evidence_sha256}".encode("utf-8")
+    payload = f"{prefix}:{attempt.attempt_id}:{evidence_sha256}".encode()
     return prefix + "-" + hashlib.sha256(payload).hexdigest()
 
 
@@ -127,8 +127,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             occurred_at=occurred_at,
         )
         self.database.write(
-            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? "
-            "WHERE attempt_id = ?",
+            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? WHERE attempt_id = ?",
             (occurred_at.isoformat(), attempt.attempt_id),
         )
         return current
@@ -152,8 +151,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             occurred_at=occurred_at,
         )
         self.database.write(
-            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? "
-            "WHERE attempt_id = ?",
+            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? WHERE attempt_id = ?",
             (occurred_at.isoformat(), attempt.attempt_id),
         )
         return current
