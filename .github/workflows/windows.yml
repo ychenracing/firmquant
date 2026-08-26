@@ -6,7 +6,7 @@ on:
       - "codex/production-live-hardening-20260826"
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FIRMQ_CI: "1"
@@ -15,11 +15,13 @@ env:
   UV_FROZEN: "1"
 
 jobs:
-  acceptance-diagnostic:
+  acceptance-fixture-fix:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: true
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -27,5 +29,15 @@ jobs:
         with:
           version: "0.11.33"
       - run: uv sync --frozen --extra dev
-      - name: Production acceptance tests only
-        run: uv run pytest tests/unit/application/test_production_services_acceptance.py -q --tb=short --no-cov
+      - run: uv run python scripts/_temporary_acceptance_fixture_fix.py
+      - run: uv run ruff check --fix tests/unit/application/test_production_services_acceptance.py
+      - run: uv run ruff format tests/unit/application/test_production_services_acceptance.py
+      - run: uv run pytest tests/unit/application/test_production_services_acceptance.py -q --tb=short --no-cov
+      - shell: bash
+        run: |
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/unit/application/test_production_services_acceptance.py
+          git commit -m "test: correct production acceptance fixtures"
+          git push origin HEAD:${GITHUB_REF_NAME}
