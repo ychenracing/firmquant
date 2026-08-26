@@ -130,6 +130,15 @@ class CancelNotAccepted(OrderEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class CancelOutcomeUnknown(OrderEvent):
+    diagnostic_code: str
+
+    def __post_init__(self) -> None:
+        OrderEvent.__post_init__(self)
+        _reason_code(self.diagnostic_code, label="cancel diagnostic code")
+
+
+@dataclass(frozen=True, slots=True)
 class CancelConfirmed(OrderEvent):
     broker_order_id: str | None = None
 
@@ -205,6 +214,7 @@ type SupportedOrderEvent = (
     | FillReported
     | CancelRequested
     | CancelNotAccepted
+    | CancelOutcomeUnknown
     | CancelConfirmed
     | BrokerRejected
     | OrderExpired
@@ -216,6 +226,7 @@ __all__ = (
     "BrokerRejected",
     "CancelConfirmed",
     "CancelNotAccepted",
+    "CancelOutcomeUnknown",
     "CancelRequested",
     "FillReported",
     "OrderArmed",

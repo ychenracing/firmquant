@@ -285,7 +285,7 @@ def test_finish_open_order_honors_minimum_lifetime_before_cancel(
         executor = base.controller(database, broker, clock)
         aggregate = executor._new_aggregate(
             planned,
-            shares=planned.uquant_authorized_shares,
+            shares=planned.uquant_authorized_shares.value,
             occurred_at=NOW,
         )
         aggregate = executor._submit_live(aggregate, planned)
@@ -306,7 +306,9 @@ def test_failure_evidence_does_not_serialize_exception_message(tmp_path: Path) -
         reason_codes = ("A", "B")
 
     class BadReasons(RuntimeError):
-        reason_codes = ["SECRET"]
+        def __init__(self, message: str) -> None:
+            self.reason_codes = ["SECRET"]
+            super().__init__(message)
 
     first = LiveExecutionController._failure_evidence(WithReasons("sensitive-a"))
     second = LiveExecutionController._failure_evidence(WithReasons("sensitive-b"))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -37,7 +38,7 @@ def _command(*, side: Side = Side.BUY) -> BrokerOrderCommand:
         side=side,
         price_type=PriceType.LIMIT,
         requested_shares=Shares(100),
-        limit_price=Price("10.10"),
+        limit_price=Price(Decimal("10.10")),
         strategy_session=datetime(2026, 8, 24, tzinfo=UTC).date(),
     )
 
@@ -103,8 +104,20 @@ def test_query_orders_and_fills_are_sorted_by_stable_broker_identity() -> None:
     assert [item.broker_order_id for item in broker.query_orders()] == ["9001", "9002"]
 
     facade.trades = [
-        SdkObject(traded_id="fill-2", order_id=9002, traded_time=93102),
-        SdkObject(traded_id="fill-1", order_id=9001, traded_time=93101),
+        SdkObject(
+            traded_id="fill-2",
+            order_id=9002,
+            traded_time=93102,
+            traded_volume=100,
+            traded_price=10.1,
+        ),
+        SdkObject(
+            traded_id="fill-1",
+            order_id=9001,
+            traded_time=93101,
+            traded_volume=100,
+            traded_price=10.1,
+        ),
     ]
     assert [item.broker_fill_id for item in broker.query_fills()] == ["fill-1", "fill-2"]
 
@@ -142,16 +155,25 @@ def test_submit_outcome_classification_covers_every_broker_boundary(
         broker.submit_order(command)
 
     monkeypatch.setattr(facade, "query_stock_order", lambda _order_id: None)
-    with _broker_write_authorization_scope(), pytest.raises(BrokerWriteOutcomeUnknown, match="not yet queryable"):
+    with (
+        _broker_write_authorization_scope(),
+        pytest.raises(BrokerWriteOutcomeUnknown, match="not yet queryable"),
+    ):
         broker.submit_order(command)
 
     monkeypatch.setattr(facade, "query_stock_order", lambda _order_id: object())
-    with _broker_write_authorization_scope(), pytest.raises(BrokerWriteOutcomeUnknown, match="fact is invalid"):
+    with (
+        _broker_write_authorization_scope(),
+        pytest.raises(BrokerWriteOutcomeUnknown, match="fact is invalid"),
+    ):
         broker.submit_order(command)
 
     wrong = SdkObject(order_id=9002, order_remark=client_order_tag(command.client_order_id))
     monkeypatch.setattr(facade, "query_stock_order", lambda _order_id: wrong)
-    with _broker_write_authorization_scope(), pytest.raises(BrokerWriteOutcomeUnknown, match="identity cannot be proven"):
+    with (
+        _broker_write_authorization_scope(),
+        pytest.raises(BrokerWriteOutcomeUnknown, match="identity cannot be proven"),
+    ):
         broker.submit_order(command)
 
     accepted = SdkObject(
@@ -187,7 +209,10 @@ def test_cancel_outcome_classification_covers_every_broker_boundary(
         broker.cancel_order("9001")
 
     monkeypatch.setattr(facade, "cancel_order_stock", lambda _order_id: True)
-    with _broker_write_authorization_scope(), pytest.raises(BrokerWriteOutcomeUnknown, match="invalid result"):
+    with (
+        _broker_write_authorization_scope(),
+        pytest.raises(BrokerWriteOutcomeUnknown, match="invalid result"),
+    ):
         broker.cancel_order("9001")
 
     monkeypatch.setattr(facade, "cancel_order_stock", lambda _order_id: 1)
@@ -208,7 +233,10 @@ def test_cancel_outcome_classification_covers_every_broker_boundary(
         broker.cancel_order("9001")
 
     monkeypatch.setattr(facade, "query_stock_order", lambda _order_id: object())
-    with _broker_write_authorization_scope(), pytest.raises(BrokerWriteOutcomeUnknown, match="fact is invalid"):
+    with (
+        _broker_write_authorization_scope(),
+        pytest.raises(BrokerWriteOutcomeUnknown, match="fact is invalid"),
+    ):
         broker.cancel_order("9001")
 
     cancelled = SdkObject(order_id=9001, order_status=facade.constants.order_canceled)
@@ -239,10 +267,11 @@ def test_operational_callbacks_reject_bad_identity_and_surface_sink_failure() ->
     )
     assert broker.health().diagnostic_code == "CALLBACK_SCHEMA_INVALID"
 
-    broker.subscribe(lambda _event: (_ for _ in ()).throw(RuntimeError("sink")))
+    failing_broker, failing_facade, _ = base._broker()
+    failing_broker.subscribe(lambda _event: (_ for _ in ()).throw(RuntimeError("sink")))
     with pytest.raises(RuntimeError, match="sink"):
-        facade.emit("DISCONNECTED", {})
-    assert broker.health().diagnostic_code == "CALLBACK_SINK_FAILED"
+        failing_facade.emit("DISCONNECTED", {})
+    assert failing_broker.health().diagnostic_code == "CALLBACK_SINK_FAILED"
 
 
 def test_operational_error_payload_handles_unbound_cancel_and_negative_order_id() -> None:
@@ -259,6 +288,4 @@ def test_operational_error_payload_handles_unbound_cancel_and_negative_order_id(
     assert payload["broker_order_id"] is None
     assert payload["client_order_id"] is None
     assert payload["error_code"] == -5
-    assert broker._operational_event_id("CANCEL_ERROR", {"order": 1}).startswith(
-        "xtquant-cancel_error-"
-    )
+    assert broker._operational_event_id("CANCEL_ERROR", {"order": 1}).startswith("xtquant-cancel_error-")

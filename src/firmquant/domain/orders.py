@@ -18,6 +18,7 @@ from .events import (
     BrokerRejected,
     CancelConfirmed,
     CancelNotAccepted,
+    CancelOutcomeUnknown,
     CancelRequested,
     FillReported,
     OrderArmed,
@@ -544,6 +545,12 @@ class OrderAggregate:
                 OrderState.PARTIALLY_FILLED if self.filled_shares.is_positive else OrderState.ACKNOWLEDGED
             )
             return self._updated(event, state=target)
+        if isinstance(event, CancelOutcomeUnknown):
+            if self.state is not OrderState.CANCEL_REQUESTED:
+                raise DomainTransitionError(
+                    f"illegal order transition {self.state.value} via CancelOutcomeUnknown"
+                )
+            return self._updated(event, state=OrderState.UNKNOWN)
         if isinstance(event, CancelConfirmed):
             confirmed_id = event.broker_order_id or self.broker_order_id
             if confirmed_id is None:

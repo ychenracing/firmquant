@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +20,8 @@ from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus
 from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.domain.values import Money, Shares
 from firmquant.execution.planner import ExecutionPlanner
-from firmquant.reconciliation.models import ReconciliationKind
 from firmquant.risk.arm import ArmBinding, ArmService
+from firmquant.risk.capability import WriteCapabilityDenied
 from firmquant.risk.gate import GateAction, GateDecision
 from firmquant.security.secrets import SecretBytes
 from tests.fixtures.session_cases import NOW, STRATEGY_SESSION, decision_snapshot, execution_snapshot
@@ -44,7 +44,7 @@ def _command(planned) -> BrokerOrderCommand:
 def _insert_arm(
     hooks: ps.ProductionServiceHooks,
     *,
-    ttl: timedelta = timedelta(minutes=5),
+    ttl: timedelta = timedelta(minutes=10),
     mac_key: bytes = b"k" * 32,
     corrupt_mac: bool = False,
 ) -> None:
@@ -242,7 +242,18 @@ def test_clock_runtime_state_heartbeat_and_halt_control_fail_closed(tmp_path: Pa
     with base.hook_case(tmp_path / "state") as (hooks, _writer, _broker, _accounts):
         with pytest.raises(TypeError, match="heartbeat"):
             hooks.heartbeat(object())
-        hooks.heartbeat(ps.ProductionHeartbeat(sequence=1, observed_at=NOW))
+        hooks.heartbeat(
+            ps.ProductionHeartbeat(
+                mode=Mode.SHADOW,
+                observed_at=NOW,
+                writer_generation=hooks._writer.generation,
+                pending_events=0,
+                processed_events=0,
+                decisions=0,
+                executions=0,
+                eod=0,
+            )
+        )
         hooks.halt("")
         assert hooks.status.state is RuntimeState.HALTED
         revision = hooks.status.revision
@@ -271,9 +282,11 @@ def test_arm_loading_covers_missing_invalid_expiring_and_valid_leases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FIRMQUANT_SECRET_ARM_MAC_KEY", "k" * 32)
-    with base.hook_case(tmp_path / "missing", mode=Mode.CANARY) as (hooks, _writer, broker, _accounts):
-        with pytest.raises(ps.ProductionServicesUnavailable, match="LEASE_REQUIRED"):
-            hooks._load_arm(broker.query_account().account_id_hash)
+    with (
+        base.hook_case(tmp_path / "missing", mode=Mode.CANARY) as (hooks, _writer, broker, _accounts),
+        pytest.raises(ps.ProductionServicesUnavailable, match="LEASE_REQUIRED"),
+    ):
+        hooks._load_arm(broker.query_account().account_id_hash)
 
     with base.hook_case(tmp_path / "invalid", mode=Mode.CANARY) as (hooks, _writer, broker, _accounts):
         _insert_arm(hooks, corrupt_mac=True)
@@ -292,7 +305,7 @@ def test_arm_loading_covers_missing_invalid_expiring_and_valid_leases(
 
 
 def test_order_ownership_notional_and_drawdown_helpers_cover_nonzero_paths(tmp_path: Path) -> None:
-    with base.hook_case(tmp_path) as (hooks, _writer, broker, accounts):
+    with base.hook_case(tmp_path) as (hooks, _writer, _broker, accounts):
         with hooks._database.transaction():
             hooks._database.write(
                 """
@@ -411,7 +424,6 @@ def test_order_ownership_notional_and_drawdown_helpers_cover_nonzero_paths(tmp_p
         assert equity > 0
         assert intraday > 0
         assert drawdown == Decimal("0.5")
-        broker.set_orders((replace(execution_snapshot().broker_snapshot.orders[0], client_order_id=None),)) if execution_snapshot().broker_snapshot.orders else None
 
 
 def test_risk_context_and_capability_submit_follow_single_authorized_path(
@@ -430,7 +442,12 @@ def test_risk_context_and_capability_submit_follow_single_authorized_path(
         monkeypatch.setattr(
             ps.StrategyIdentity,
             "locked",
-            lambda: SimpleNamespace(uquant_commit=hooks._identity.uquant_commit),
+            lambda: SimpleNamespace(
+                uquant_commit=hooks._identity.uquant_commit,
+                canonical_universe_sha256="0" * 64,
+                config_fingerprint="0" * 64,
+                economic_code_fingerprint="0" * 64,
+            ),
         )
         monkeypatch.setattr(
             ps.ExecutionRiskGate,
@@ -482,7 +499,7 @@ def test_risk_context_and_capability_submit_follow_single_authorized_path(
         assert len(broker.submitted_commands) == 1
 
         bad = replace(command, client_order_id="UNKNOWN")
-        with pytest.raises(Exception):
+        with pytest.raises(WriteCapabilityDenied):
             capability.submit_order(bad)
 
 
@@ -556,9 +573,11 @@ def test_cycle_failure_paths_halt_with_specific_blockers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with base.hook_case(tmp_path / "not-ready") as (hooks, _writer, _broker, _accounts):
-        with pytest.raises(ps.ProductionServicesUnavailable, match="NOT_READY"):
-            hooks.cycle(NOW)
+    with (
+        base.hook_case(tmp_path / "not-ready") as (hooks, _writer, _broker, _accounts),
+        pytest.raises(ps.ProductionServicesUnavailable, match="NOT_READY"),
+    ):
+        hooks.cycle(NOW)
 
     with base.hook_case(tmp_path / "execute") as (hooks, _writer, _broker, _accounts):
         base.ready(hooks)

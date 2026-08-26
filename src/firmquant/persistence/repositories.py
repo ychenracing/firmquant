@@ -25,6 +25,7 @@ from firmquant.domain.events import (
     BrokerAcknowledged,
     BrokerRejected,
     CancelConfirmed,
+    CancelOutcomeUnknown,
     CancelRequested,
     FillReported,
     OrderArmed,
@@ -701,12 +702,20 @@ class ExecutionLedgerRepository:
         diagnostic_code: str,
         occurred_at: datetime,
     ) -> OrderAggregate:
-        next_aggregate = self.transition(
-            aggregate,
-            SubmitOutcomeUnknown(
+        event = (
+            CancelOutcomeUnknown(
                 event_id=_stable_event_id("unknown", attempt.attempt_id, diagnostic_code),
                 diagnostic_code=diagnostic_code,
-            ),
+            )
+            if attempt.command_kind == "CANCEL"
+            else SubmitOutcomeUnknown(
+                event_id=_stable_event_id("unknown", attempt.attempt_id, diagnostic_code),
+                diagnostic_code=diagnostic_code,
+            )
+        )
+        next_aggregate = self.transition(
+            aggregate,
+            event,
             occurred_at=occurred_at,
         )
         self.database.write(
