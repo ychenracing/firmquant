@@ -102,8 +102,8 @@ class OfficialXtQuantDailyHistoryProvider(DailyHistoryProvider):
         parsed = Symbol.parse(symbol)
         code = parsed.xtquant
         end = through.strftime("%Y%m%d")
-        downloader = getattr(self._xtdata, "download_history_data")
-        reader = getattr(self._xtdata, "get_market_data_ex")
+        downloader = self._xtdata.download_history_data  # type: ignore[attr-defined]
+        reader = self._xtdata.get_market_data_ex  # type: ignore[attr-defined]
         downloader(
             stock_code=code,
             period="1d",
