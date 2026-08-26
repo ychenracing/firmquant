@@ -80,14 +80,33 @@ class BrokerAdapter(StrEnum):
     XTQUANT = "XTQUANT"
 
 
+PositiveInteger = Annotated[int, Field(gt=0, strict=True)]
+PositiveNotional = Annotated[
+    Decimal,
+    Field(gt=Decimal("0"), max_digits=20, decimal_places=4),
+]
+SafeFraction = Annotated[
+    Decimal,
+    Field(ge=Decimal("0"), le=Decimal("1"), max_digits=10, decimal_places=8),
+]
+
+
 class BrokerSettings(SafeConfigModel):
     """Broker selection and local references; never broker credentials."""
 
-    sensitive_fields: ClassVar[frozenset[str]] = frozenset({"account_alias", "xtquant_userdata_path"})
+    sensitive_fields: ClassVar[frozenset[str]] = frozenset(
+        {
+            "account_alias",
+            "xtquant_userdata_path",
+            "safety_manifest_path",
+        }
+    )
 
     adapter: BrokerAdapter = BrokerAdapter.PAPER
     account_alias: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
     xtquant_userdata_path: Path | None = Field(default=None, repr=False)
+    session_id: PositiveInteger | None = Field(default=None, repr=False)
+    safety_manifest_path: Path | None = Field(default=None, repr=False)
 
 
 class ComplianceSettings(SafeConfigModel):
@@ -97,14 +116,8 @@ class ComplianceSettings(SafeConfigModel):
     broker_api_authorized: bool = Field(default=False, strict=True)
 
 
-PositiveNotional = Annotated[
-    Decimal,
-    Field(gt=Decimal("0"), max_digits=20, decimal_places=4),
-]
-
-
 class DeploymentCaps(SafeConfigModel):
-    """CANARY-only deployment safety caps; none are strategy parameters."""
+    """Mode-specific absolute safety caps; none are strategy parameters."""
 
     max_order_notional: PositiveNotional
     max_daily_submitted_notional: PositiveNotional
@@ -132,6 +145,68 @@ class DeploymentCaps(SafeConfigModel):
         return self
 
 
+class ExecutionRuntimeSettings(SafeConfigModel):
+    """Operational execution/risk limits that may only shrink uquant intent."""
+
+    sell_window_seconds: PositiveInteger = 300
+    buy_window_seconds: PositiveInteger = 300
+    min_order_lifetime_seconds: PositiveInteger = 3
+    poll_interval_seconds: PositiveInteger = 1
+    max_order_lifetime_seconds: PositiveInteger = 120
+    max_open_orders: PositiveInteger = 4
+    max_consecutive_rejections: PositiveInteger = 3
+    max_disconnect_seconds: PositiveInteger = 30
+    max_replacements: PositiveInteger = 2
+    max_submit_count_window: PositiveInteger = 20
+    max_cancel_count_window: PositiveInteger = 20
+    max_quote_age_seconds: PositiveInteger = 5
+    max_clock_drift_seconds: PositiveInteger = 2
+    max_price_deviation_bps: Decimal = Decimal("200")
+    max_equity_change_fraction: SafeFraction = Decimal("0.10")
+    max_intraday_loss_fraction: SafeFraction = Decimal("0.08")
+    max_capital_drawdown_fraction: SafeFraction = Decimal("0.25")
+
+    @field_validator(
+        "max_price_deviation_bps",
+        "max_equity_change_fraction",
+        "max_intraday_loss_fraction",
+        "max_capital_drawdown_fraction",
+        mode="before",
+    )
+    @classmethod
+    def reject_binary_float(cls, value: object) -> object:
+        if isinstance(value, float):
+            raise ValueError("risk decimals must not use binary float")
+        return value
+
+    @model_validator(mode="after")
+    def validate_execution_limits(self) -> Self:
+        if not self.max_price_deviation_bps.is_finite() or not (
+            Decimal("0") <= self.max_price_deviation_bps <= Decimal("10000")
+        ):
+            raise ValueError("max_price_deviation_bps must be between 0 and 10000")
+        if self.min_order_lifetime_seconds > self.max_order_lifetime_seconds:
+            raise ValueError("minimum order lifetime cannot exceed maximum order lifetime")
+        if self.poll_interval_seconds > self.max_order_lifetime_seconds:
+            raise ValueError("poll interval cannot exceed maximum order lifetime")
+        return self
+
+
+class PromotionSettings(SafeConfigModel):
+    """Frozen evidence thresholds required before a real-money mode can be armed."""
+
+    min_shadow_sessions: PositiveInteger = 20
+    min_shadow_orders: PositiveInteger = 50
+    max_target_tracking_error: SafeFraction = Decimal("0.05")
+
+    @field_validator("max_target_tracking_error", mode="before")
+    @classmethod
+    def reject_binary_float(cls, value: object) -> object:
+        if isinstance(value, float):
+            raise ValueError("promotion thresholds must not use binary float")
+        return value
+
+
 class PathSettings(SafeConfigModel):
     """Local state locations; every value is redacted from safe representations."""
 
@@ -139,6 +214,7 @@ class PathSettings(SafeConfigModel):
     data_directory: Path = Field(default=Path("var/data"), repr=False)
     report_directory: Path = Field(default=Path("var/reports"), repr=False)
     backup_directory: Path = Field(default=Path("var/backups"), repr=False)
+    uquant_source_checkout: Path | None = Field(default=None, repr=False)
 
 
 class Settings(SafeConfigModel):
@@ -151,7 +227,36 @@ class Settings(SafeConfigModel):
     broker: BrokerSettings = Field(default_factory=BrokerSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     compliance: ComplianceSettings = Field(default_factory=ComplianceSettings)
+    execution: ExecutionRuntimeSettings = Field(default_factory=ExecutionRuntimeSettings)
+    promotion: PromotionSettings = Field(default_factory=PromotionSettings)
     canary_caps: DeploymentCaps | None = None
+    live_caps: DeploymentCaps | None = None
+
+    @property
+    def active_deployment_caps(self) -> DeploymentCaps | None:
+        if self.mode is Mode.CANARY:
+            return self.canary_caps
+        if self.mode is Mode.LIVE:
+            return self.live_caps
+        return None
+
+    def xtquant_runtime_blockers(self) -> tuple[str, ...]:
+        """Return deterministic local prerequisites without touching proprietary SDK state."""
+
+        if self.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            return ()
+        blockers: list[str] = []
+        if self.broker.account_alias is None:
+            blockers.append("XTQUANT_ACCOUNT_ALIAS_MISSING")
+        if self.broker.xtquant_userdata_path is None:
+            blockers.append("XTQUANT_USERDATA_PATH_MISSING")
+        if self.broker.session_id is None:
+            blockers.append("XTQUANT_SESSION_ID_MISSING")
+        if self.broker.safety_manifest_path is None:
+            blockers.append("XTQUANT_SAFETY_MANIFEST_MISSING")
+        if self.paths.uquant_source_checkout is None:
+            blockers.append("UQUANT_SOURCE_CHECKOUT_MISSING")
+        return tuple(blockers)
 
     @model_validator(mode="after")
     def validate_mode_authority(self) -> Self:
@@ -178,6 +283,8 @@ class Settings(SafeConfigModel):
             raise ValueError(f"{self.mode.value} requires both compliance confirmations")
         if self.mode is Mode.CANARY and self.canary_caps is None:
             raise ValueError("CANARY deployment caps have no defaults and must all be configured")
+        if self.mode is Mode.LIVE and self.live_caps is None:
+            raise ValueError("LIVE deployment caps have no defaults and must all be configured")
         return self
 
 
@@ -204,8 +311,10 @@ __all__ = (
     "ComplianceSettings",
     "ConfigurationError",
     "DeploymentCaps",
+    "ExecutionRuntimeSettings",
     "Mode",
     "PathSettings",
+    "PromotionSettings",
     "Settings",
     "load_settings",
 )
