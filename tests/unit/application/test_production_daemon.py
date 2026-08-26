@@ -170,19 +170,21 @@ def test_daemon_halts_before_cycle_when_event_pump_requires_halt(tmp_path: Path)
 
 def test_daemon_rejects_nonproduction_mode(tmp_path: Path) -> None:
     clock = Clock()
-    with WriterLease.acquire(
-        tmp_path / "firmquant.sqlite3",
-        owner="production-test",
-        clock=clock,
-    ) as writer:
-        with pytest.raises(ValueError, match="production mode"):
-            ProductionDaemon(
-                mode=Mode.PAPER,
-                writer=writer,
-                broker=Broker(),
-                pump=Pump(),
-                hooks=Hooks(),
-                clock=clock,
-                sleep=clock.sleep,
-                stop_requested=lambda: True,
-            )
+    with (
+        WriterLease.acquire(
+            tmp_path / "firmquant.sqlite3",
+            owner="production-test",
+            clock=clock,
+        ) as writer,
+        pytest.raises(ValueError, match="production mode"),
+    ):
+        ProductionDaemon(
+            mode=Mode.PAPER,
+            writer=writer,
+            broker=Broker(),
+            pump=Pump(),
+            hooks=Hooks(),
+            clock=clock,
+            sleep=clock.sleep,
+            stop_requested=lambda: True,
+        )
