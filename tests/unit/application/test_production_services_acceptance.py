@@ -30,7 +30,7 @@ from firmquant.config import (
     Settings,
 )
 from firmquant.domain.broker_facts import MarketSessionStatus
-from firmquant.domain.states import RuntimeState, RuntimeStatus
+from firmquant.domain.states import RuntimeState
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.execution.planner import ExecutionPlanner
 from firmquant.market_data.calendar import AuthoritativeTradingCalendar
@@ -294,7 +294,7 @@ def hook_case(
         firmquant_commit="f" * 40,
         uquant_commit="1" * 40,
         config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
-        promotion_config_sha256="p" * 64,
+        promotion_config_sha256="c" * 64,
         safety_manifest_sha256="s" * 64,
     )
     account_repository = Accounts(root)
@@ -326,12 +326,9 @@ def hook_case(
 
 
 def ready(hooks: ProductionServiceHooks) -> None:
-    hooks._status = RuntimeStatus(
-        state=RuntimeState.READY,
-        revision=3,
-        reason="ready for test",
-        blockers=(),
-    )
+    hooks._transition(RuntimeState.STARTING, reason="test startup")
+    hooks._transition(RuntimeState.RECONCILING, reason="test reconciliation")
+    hooks._transition(RuntimeState.READY, reason="test ready")
 
 
 def test_helpers_fail_closed_and_normalize_authority_facts(tmp_path: Path) -> None:
@@ -370,7 +367,7 @@ def test_helpers_fail_closed_and_normalize_authority_facts(tmp_path: Path) -> No
     with pytest.raises(ProductionServicesUnavailable, match="CASH"):
         ps._strategy_view(account, (), repository)
 
-    assert ps._fee_schedule(safety_manifest()).minimum_commission == Money(Decimal("5"))
+    assert ps._fee_schedule(safety_manifest()).minimum_commission == Decimal("5")
     symbols = ps._decision_symbols(decision_snapshot())
     assert BUY_SYMBOL in symbols
     with pytest.raises(ProductionServicesUnavailable, match="ORDER_PAYLOAD"):
@@ -643,8 +640,10 @@ def test_execute_fails_closed_for_ambiguous_or_invalid_market_facts(
                 Account(),
             ),
         )
+        base = execution_snapshot()
         bad = replace(
-            execution_snapshot(),
+            base,
+            quotes=tuple(replace(quote, market_status=MarketSessionStatus.CLOSED) for quote in base.quotes),
             market_status=MarketSessionStatus.CLOSED,
         )
         monkeypatch.setattr(hooks, "_execution_facts", lambda _decision: bad)
@@ -778,6 +777,9 @@ def test_builder_is_fail_closed_and_composes_single_daemon_path(
             "locked",
             lambda: SimpleNamespace(
                 uquant_commit="1" * 40,
+                canonical_universe_sha256="0" * 64,
+                config_fingerprint="0" * 64,
+                economic_code_fingerprint="0" * 64,
                 verify=lambda: None,
             ),
         )
