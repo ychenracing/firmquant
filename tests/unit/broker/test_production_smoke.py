@@ -35,7 +35,7 @@ def test_readonly_smoke_queries_authoritative_facts_and_records_zero_writes(tmp_
             firmquant_commit="f" * 40,
             uquant_commit="1" * 40,
             config_sha256="c" * 64,
-            safety_manifest_sha256="s" * 64,
+            safety_manifest_sha256="b" * 64,
             clock=lambda: NOW,
         )
         assert receipt.read_healthy is True
@@ -49,7 +49,7 @@ def test_readonly_smoke_queries_authoritative_facts_and_records_zero_writes(tmp_
             uquant_commit="1" * 40,
             config_sha256="c" * 64,
             account_hash=snapshot.account.account_id_hash,
-            safety_manifest_sha256="s" * 64,
+            safety_manifest_sha256="b" * 64,
         )
         assert stored == receipt
     finally:
@@ -67,7 +67,7 @@ def test_smoke_identity_mismatch_is_not_accepted_for_live_gate(tmp_path: Path) -
                 uquant_commit="1" * 40,
                 config_sha256="c" * 64,
                 account_hash="a" * 64,
-                safety_manifest_sha256="s" * 64,
+                safety_manifest_sha256="b" * 64,
             )
             is None
         )
