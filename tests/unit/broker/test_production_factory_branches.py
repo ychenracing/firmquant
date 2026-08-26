@@ -103,7 +103,9 @@ def test_factory_classifies_sdk_manifest_failures_and_composes_identity_wrapper(
                 importer=missing_import,
             )
 
-        importer = lambda name: SimpleNamespace(name=name)
+        def importer(name: str) -> object:
+            return SimpleNamespace(name=name)
+
         monkeypatch.setattr(
             factory.XtQuantSafetyManifest,
             "load",
