@@ -21,6 +21,7 @@ from firmquant.config import (
 from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus, Side
 from firmquant.domain.orders import OrderState
 from firmquant.domain.states import RuntimeState
+from firmquant.domain.values import Money
 from firmquant.execution.live_controller import ExecutionWindowPolicy, LiveExecutionController
 from firmquant.execution.planner import ExecutionPlanner
 from firmquant.execution.policy import FeeSchedule
@@ -72,8 +73,13 @@ def live_settings() -> Settings:
 def fake_broker(clock: MutableClock) -> FakeBroker:
     facts = execution_snapshot()
     snapshot = facts.broker_snapshot
+    account = replace(
+        snapshot.account,
+        available_cash=Money(Decimal("10000")),
+        total_assets=Money(Decimal("20000")),
+    )
     broker = FakeBroker(
-        account=snapshot.account,
+        account=account,
         positions=snapshot.positions,
         orders=snapshot.orders,
         fills=snapshot.fills,
