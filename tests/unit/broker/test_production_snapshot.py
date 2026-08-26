@@ -82,15 +82,11 @@ def test_snapshot_retries_then_fails_when_position_quantities_keep_changing() ->
     position = base.positions[0]
     low = replace(
         base,
-        positions=(
-            replace(position, total_shares=Shares(100), sellable_shares=Shares(100)),
-        ),
+        positions=(replace(position, total_shares=Shares(100), sellable_shares=Shares(100)),),
     )
     high = replace(
         base,
-        positions=(
-            replace(position, total_shares=Shares(200), sellable_shares=Shares(200)),
-        ),
+        positions=(replace(position, total_shares=Shares(200), sellable_shares=Shares(200)),),
     )
     broker = ScriptedReads([low, high, low, high])
 
