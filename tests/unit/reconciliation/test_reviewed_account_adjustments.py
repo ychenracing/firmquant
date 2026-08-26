@@ -5,9 +5,9 @@ from decimal import Decimal
 from typing import Any, cast
 
 import firmquant.reconciliation.account_preflight as account_preflight
-
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.persistence.account_authority import (
+    AccountBinding,
     AdjustmentCoverage,
     ReviewedAccountAdjustment,
     ReviewedAccountAdjustmentRepository,
@@ -18,8 +18,24 @@ from tests.fixtures.broker_snapshots import completed_buy_snapshot, open_buy_acc
 from tests.fixtures.reconciliation_cases import NOW, healthy_reconciliation_facts
 
 
+def _binding() -> AccountBinding:
+    snapshot = completed_buy_snapshot()
+    return AccountBinding.create(
+        account_id_hash=snapshot.account.account_id_hash,
+        account_type=snapshot.account.account_type,
+        broker_snapshot_sha256="a" * 64,
+        account_state_sha256="b" * 64,
+        uquant_commit="1" * 40,
+        uquant_code_fingerprint="c" * 64,
+        data_hash="d" * 64,
+        data_as_of="2026-01-05",
+        data_symbols=("sz300308",),
+        created_at=NOW,
+    )
+
+
 def _difference(**kwargs: object) -> str:
-    function = cast(Any, getattr(account_preflight, "account_difference_sha256"))
+    function = cast(Any, vars(account_preflight)["account_difference_sha256"])
     return cast(str, function(**kwargs))
 
 
@@ -70,10 +86,7 @@ def test_exact_reviewed_cash_difference_can_pass_preflight(tmp_path) -> None:
             snapshot=changed,
             account=account,
             operational_ledger=facts.operational_ledger,
-            binding=__import__(
-                "tests.unit.reconciliation.test_account_preflight",
-                fromlist=["_binding"],
-            )._binding(),
+            binding=_binding(),
             cash_tolerance=Money(Decimal("0.01")),
             reviewed_adjustments=repository,
         )
@@ -127,10 +140,7 @@ def test_review_must_match_exact_snapshot_and_difference(tmp_path) -> None:
             snapshot=changed,
             account=account,
             operational_ledger=facts.operational_ledger,
-            binding=__import__(
-                "tests.unit.reconciliation.test_account_preflight",
-                fromlist=["_binding"],
-            )._binding(),
+            binding=_binding(),
             cash_tolerance=Money(Decimal("0.01")),
             reviewed_adjustments=repository,
         )
@@ -194,10 +204,7 @@ def test_reviewed_position_share_change_still_requires_reviewed_account_state(tm
             snapshot=changed,
             account=account,
             operational_ledger=operational,
-            binding=__import__(
-                "tests.unit.reconciliation.test_account_preflight",
-                fromlist=["_binding"],
-            )._binding(),
+            binding=_binding(),
             cash_tolerance=Money(Decimal("0.01")),
             reviewed_adjustments=repository,
         )
