@@ -541,9 +541,7 @@ class OrderAggregate:
                     f"illegal order transition {self.state.value} via CancelNotAccepted"
                 )
             target = (
-                OrderState.PARTIALLY_FILLED
-                if self.filled_shares.is_positive
-                else OrderState.ACKNOWLEDGED
+                OrderState.PARTIALLY_FILLED if self.filled_shares.is_positive else OrderState.ACKNOWLEDGED
             )
             return self._updated(event, state=target)
         if isinstance(event, CancelConfirmed):
