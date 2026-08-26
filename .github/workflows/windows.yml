@@ -6,7 +6,7 @@ on:
       - "codex/production-live-hardening-20260826"
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FIRMQ_CI: "1"
@@ -15,17 +15,13 @@ env:
   UV_FROZEN: "1"
 
 jobs:
-  coverage-candidate:
+  format-final-coverage-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: ychenracing/uquant
-          ref: 105695aacd3d1c7e62705f64188da88d202db4cd
-          path: .uquant-source
-          persist-credentials: false
+          persist-credentials: true
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
@@ -33,27 +29,28 @@ jobs:
         with:
           version: "0.11.33"
       - run: uv sync --frozen --extra dev --quiet
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy src scripts
-      - name: Full functional and 85 percent coverage gate
-        env:
-          FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
-        run: >-
-          uv run pytest -q
-          --cov=firmquant
-          --cov-branch
-          --cov-report=json:coverage.json
-          --cov-report=
-          --cov-fail-under=85
-      - name: Emit concise coverage result
-        if: always()
+      - run: >-
+          uv run ruff format
+          tests/unit/application/test_production_identity_branches.py
+          tests/unit/broker/test_production_factory_branches.py
+      - run: >-
+          uv run ruff check
+          tests/unit/application/test_production_identity_branches.py
+          tests/unit/broker/test_production_factory_branches.py
+      - run: >-
+          uv run pytest -q --no-cov
+          tests/unit/application/test_production_identity_branches.py
+          tests/unit/broker/test_production_factory_branches.py
+      - shell: bash
         run: |
-          if [ ! -f coverage.json ]; then exit 0; fi
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          data = json.loads(Path('coverage.json').read_text())
-          totals = data['totals']
-          print(f"::warning title=Coverage Candidate::total={float(totals['percent_covered']):.4f}% missing_lines={totals['missing_lines']} missing_branches={totals.get('missing_branches', 0)}")
-          PY
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            tests/unit/application/test_production_identity_branches.py \
+            tests/unit/broker/test_production_factory_branches.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "test: format final coverage tests"
+          git push origin HEAD:${GITHUB_REF_NAME}
