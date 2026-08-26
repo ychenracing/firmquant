@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -30,14 +31,66 @@ from firmquant.domain.broker_facts import (
 from firmquant.domain.errors import DomainTypeError, DomainValidationError
 from firmquant.domain.values import Money, Price, Shares, Symbol
 
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
 
 class BrokerEventType(StrEnum):
     ORDER = "ORDER"
     FILL = "FILL"
     QUOTE = "QUOTE"
+    ORDER_ERROR = "ORDER_ERROR"
+    CANCEL_ERROR = "CANCEL_ERROR"
+    DISCONNECTED = "DISCONNECTED"
 
 
-type NormalizedBrokerEventFact = BrokerOrderFact | BrokerFillFact | QuoteFact
+@dataclass(frozen=True, slots=True)
+class BrokerOperationalFact:
+    """Sanitized non-economic callback fact that can still require a production halt."""
+
+    event_type: BrokerEventType
+    broker_order_id: str | None
+    client_order_id: str | None
+    error_code: int | None
+    message_sha256: str | None
+    session_date: date
+    event_time: datetime
+    received_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.event_type not in {
+            BrokerEventType.ORDER_ERROR,
+            BrokerEventType.CANCEL_ERROR,
+            BrokerEventType.DISCONNECTED,
+        }:
+            raise DomainValidationError("operational fact has an economic event type")
+        if self.broker_order_id is not None:
+            _text(self.broker_order_id, label="operational broker order id")
+        if self.client_order_id is not None:
+            _text(self.client_order_id, label="operational client order id")
+        if self.event_type is BrokerEventType.DISCONNECTED:
+            if any(
+                value is not None
+                for value in (
+                    self.broker_order_id,
+                    self.client_order_id,
+                    self.error_code,
+                    self.message_sha256,
+                )
+            ):
+                raise DomainValidationError("disconnect fact cannot invent order/error identity")
+        else:
+            if isinstance(self.error_code, bool) or not isinstance(self.error_code, int):
+                raise DomainTypeError("operational error code must be an integer")
+            if not isinstance(self.message_sha256, str) or _SHA256.fullmatch(self.message_sha256) is None:
+                raise DomainValidationError("operational message digest must be lowercase SHA-256")
+        _require_date(self.session_date, label="operational session date")
+        _require_aware(self.event_time, label="operational event time")
+        _require_aware(self.received_at, label="operational received time")
+
+
+type NormalizedBrokerEventFact = (
+    BrokerOrderFact | BrokerFillFact | QuoteFact | BrokerOperationalFact
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +228,16 @@ def _datetime(value: object, *, label: str) -> datetime:
     if result.tzinfo is None or result.utcoffset() is None:
         raise DomainValidationError(f"{label} must be timezone-aware")
     return result
+
+
+def _require_aware(value: datetime, *, label: str) -> None:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise DomainValidationError(f"{label} must be timezone-aware")
+
+
+def _require_date(value: date, *, label: str) -> None:
+    if isinstance(value, datetime) or not isinstance(value, date):
+        raise DomainTypeError(f"{label} must be a calendar date")
 
 
 def _canonical_json_value(value: object, *, label: str) -> object:
@@ -412,9 +475,76 @@ def normalize_fill(
     )
 
 
+def _normalize_operational(
+    event_type: BrokerEventType,
+    payload: Mapping[str, object],
+    *,
+    received_at: datetime,
+) -> BrokerOperationalFact:
+    if event_type is BrokerEventType.DISCONNECTED:
+        canonical = _schema(
+            payload,
+            label="broker disconnect",
+            required=frozenset({"session_date", "event_time"}),
+        )
+        return BrokerOperationalFact(
+            event_type=event_type,
+            broker_order_id=None,
+            client_order_id=None,
+            error_code=None,
+            message_sha256=None,
+            session_date=_date(canonical["session_date"], label="disconnect session date"),
+            event_time=_datetime(canonical["event_time"], label="disconnect event time"),
+            received_at=received_at,
+        )
+    canonical = _schema(
+        payload,
+        label="broker operational error",
+        required=frozenset(
+            {
+                "broker_order_id",
+                "client_order_id",
+                "error_code",
+                "message_sha256",
+                "session_date",
+                "event_time",
+            }
+        ),
+    )
+    error_code = canonical["error_code"]
+    if isinstance(error_code, bool) or not isinstance(error_code, int):
+        raise DomainTypeError("operational error code must be an integer")
+    message_sha256 = _text(canonical["message_sha256"], label="operational message digest")
+    if _SHA256.fullmatch(message_sha256) is None:
+        raise DomainValidationError("operational message digest must be lowercase SHA-256")
+    return BrokerOperationalFact(
+        event_type=event_type,
+        broker_order_id=_optional_text(
+            canonical["broker_order_id"],
+            label="operational broker order id",
+        ),
+        client_order_id=_optional_text(
+            canonical["client_order_id"],
+            label="operational client order id",
+        ),
+        error_code=error_code,
+        message_sha256=message_sha256,
+        session_date=_date(canonical["session_date"], label="operational session date"),
+        event_time=_datetime(canonical["event_time"], label="operational event time"),
+        received_at=received_at,
+    )
+
+
 def _safe_payload(fact: NormalizedBrokerEventFact) -> Mapping[str, object]:
-    if isinstance(fact, BrokerOrderFact):
+    if isinstance(fact, BrokerOperationalFact):
         payload: dict[str, object] = {
+            "broker_order_id": fact.broker_order_id,
+            "client_order_id": fact.client_order_id,
+            "error_code": fact.error_code,
+            "message_sha256": fact.message_sha256,
+        }
+    elif isinstance(fact, BrokerOrderFact):
+        payload = {
             "broker_order_id": fact.broker_order_id,
             "client_order_id": fact.client_order_id,
             "symbol": fact.symbol.canonical,
@@ -478,10 +608,14 @@ def normalize_broker_event(raw: Mapping[str, object], *, received_at: datetime) 
         fill = normalize_fill(payload, received_at=received, raw_payload_sha256=digest)
         fact = fill
         sequence = fill.event_sequence
-    else:
+    elif event_type is BrokerEventType.QUOTE:
         quote = normalize_quote(payload, received_at=received)
         fact = quote
         sequence = quote.sequence
+    else:
+        operational = _normalize_operational(event_type, payload, received_at=received)
+        fact = operational
+        sequence = 0
     return BrokerEventEnvelope(
         broker_event_id=broker_event_id,
         event_type=event_type,
@@ -498,6 +632,7 @@ def normalize_broker_event(raw: Mapping[str, object], *, received_at: datetime) 
 __all__ = (
     "BrokerEventEnvelope",
     "BrokerEventType",
+    "BrokerOperationalFact",
     "NormalizedBrokerEventFact",
     "canonical_raw_payload_sha256",
     "normalize_account",
