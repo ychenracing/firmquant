@@ -1,4 +1,4 @@
-name: Temporary cancel-state patch
+name: Temporary write-state patch
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   patch:
-    if: ${{ !startsWith(github.event.head_commit.message, 'fix(auto): cancel state') }}
+    if: ${{ !startsWith(github.event.head_commit.message, 'fix(auto): write state') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -24,7 +24,7 @@ jobs:
         with:
           version: "0.11.33"
       - run: uv sync --frozen --extra dev
-      - name: Patch order state machine
+      - name: Patch durable order state machine
         shell: bash
         run: |
           python - <<'PY'
@@ -37,15 +37,29 @@ jobs:
               "    CancelConfirmed,\n    CancelNotAccepted,\n    CancelRequested,\n",
           )
           text = text.replace(
+              "    SubmitOutcomeUnknown,\n    SubmitStarted,\n",
+              "    SubmitNotAccepted,\n    SubmitOutcomeUnknown,\n    SubmitStarted,\n",
+          )
+          text = text.replace(
+              "        OrderState.SUBMITTING: frozenset(\n            {\n                OrderState.ACKNOWLEDGED,",
+              "        OrderState.SUBMITTING: frozenset(\n            {\n                OrderState.ARMED,\n                OrderState.ACKNOWLEDGED,",
+          )
+          text = text.replace(
               "        OrderState.CANCEL_REQUESTED: frozenset(\n            {\n                OrderState.FILLED,\n                OrderState.CANCELLED,\n                OrderState.UNKNOWN,\n            }\n        ),",
               "        OrderState.CANCEL_REQUESTED: frozenset(\n            {\n                OrderState.ACKNOWLEDGED,\n                OrderState.PARTIALLY_FILLED,\n                OrderState.FILLED,\n                OrderState.CANCELLED,\n                OrderState.UNKNOWN,\n            }\n        ),",
           )
-          needle = "        if isinstance(event, CancelConfirmed):\n"
-          addition = '''        if isinstance(event, CancelNotAccepted):\n            if self.state is not OrderState.CANCEL_REQUESTED:\n                raise DomainTransitionError(\n                    f"illegal order transition {self.state.value} via CancelNotAccepted"\n                )\n            target = (\n                OrderState.PARTIALLY_FILLED\n                if self.filled_shares.is_positive\n                else OrderState.ACKNOWLEDGED\n            )\n            return self._updated(event, state=target)\n'''
-          if addition not in text:
-              if needle not in text:
+          submit_needle = "        if isinstance(event, SubmitOutcomeUnknown):\n"
+          submit_addition = '''        if isinstance(event, SubmitNotAccepted):\n            if self.state is not OrderState.SUBMITTING:\n                raise DomainTransitionError(\n                    f"illegal order transition {self.state.value} via SubmitNotAccepted"\n                )\n            return self._updated(event, state=OrderState.ARMED)\n'''
+          if submit_addition not in text:
+              if submit_needle not in text:
+                  raise SystemExit("SubmitOutcomeUnknown insertion point not found")
+              text = text.replace(submit_needle, submit_addition + submit_needle, 1)
+          cancel_needle = "        if isinstance(event, CancelConfirmed):\n"
+          cancel_addition = '''        if isinstance(event, CancelNotAccepted):\n            if self.state is not OrderState.CANCEL_REQUESTED:\n                raise DomainTransitionError(\n                    f"illegal order transition {self.state.value} via CancelNotAccepted"\n                )\n            target = (\n                OrderState.PARTIALLY_FILLED\n                if self.filled_shares.is_positive\n                else OrderState.ACKNOWLEDGED\n            )\n            return self._updated(event, state=target)\n'''
+          if cancel_addition not in text:
+              if cancel_needle not in text:
                   raise SystemExit("CancelConfirmed insertion point not found")
-              text = text.replace(needle, addition + needle, 1)
+              text = text.replace(cancel_needle, cancel_addition + cancel_needle, 1)
           path.write_text(text, encoding="utf-8", newline="\n")
           PY
           uv run ruff check --fix src/firmquant/domain/orders.py tests/unit/domain/test_cancel_not_accepted.py
@@ -55,5 +69,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/firmquant/domain/orders.py tests/unit/domain/test_cancel_not_accepted.py
-          git commit -m "fix(auto): cancel state handles definite rejection"
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "fix(auto): write state handles definite rejection"
           git push origin HEAD:${GITHUB_REF_NAME}
