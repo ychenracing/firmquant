@@ -26,6 +26,10 @@ class ProductionBrokerConfigurationError(RuntimeError):
     """Local XtQuant deployment prerequisites are missing or contradictory."""
 
 
+def _default_importer(module_name: str) -> object:
+    return import_module(module_name)
+
+
 def _resolved_directory(path: Path, *, label: str) -> Path:
     candidate = Path(path)
     if candidate.is_symlink() or not candidate.is_dir():
@@ -41,7 +45,7 @@ def build_production_xtquant_gateway(
     settings: Settings,
     database: Database,
     clock: Callable[[], datetime],
-    importer: ModuleImporter = import_module,
+    importer: ModuleImporter = _default_importer,
 ) -> BrokerGateway:
     """Construct the only production XtQuant gateway with stable economic identity."""
 
