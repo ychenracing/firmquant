@@ -1,0 +1,60 @@
+name: format-reviewed-preflight
+
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+    paths:
+      - .github/workflows/_format_reviewed_preflight.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: codex/account-authority-reconciliation
+          fetch-depth: 0
+      - name: Apply formatter-equivalent patch
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path("src/firmquant/reconciliation/account_preflight.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    if coverage in {
+              AdjustmentCoverage.POSITION_TOTAL_SHARES,
+              AdjustmentCoverage.POSITION_SELLABLE_SHARES,
+          } and symbol is None:
+              raise DomainValidationError("position account difference requires symbol")
+          if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:
+              raise DomainValidationError("account-level difference must not carry a symbol")
+          '''
+          new = '''    if (
+              coverage
+              in {
+                  AdjustmentCoverage.POSITION_TOTAL_SHARES,
+                  AdjustmentCoverage.POSITION_SELLABLE_SHARES,
+              }
+              and symbol is None
+          ):
+              raise DomainValidationError("position account difference requires symbol")
+          if (
+              coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS}
+              and symbol is not None
+          ):
+              raise DomainValidationError("account-level difference must not carry a symbol")
+          '''
+          if text.count(old) != 1:
+              raise SystemExit("format target drifted")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          Path(".github/workflows/_format_reviewed_preflight.yml").unlink()
+      - name: Commit and self-delete
+        run: |
+          git config user.name firmquant-agent
+          git config user.email firmquant-agent@users.noreply.github.com
+          git add -A
+          git commit -m "style: format reviewed account preflight"
+          git push origin HEAD:codex/account-authority-reconciliation
