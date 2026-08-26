@@ -196,7 +196,7 @@ def _merge(
 def _data_store(root: Path) -> _UquantDataStore:
     try:
         module = importlib.import_module("uquant.data")
-        factory = module.DataStore  # type: ignore[attr-defined]
+        factory = module.DataStore
         if not callable(factory):
             raise TypeError
         return cast(_UquantDataStore, factory(root))
