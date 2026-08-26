@@ -1,0 +1,40 @@
+name: Agent patch
+
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+    paths:
+      - .github/workflows/agent-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: codex/account-authority-reconciliation
+          fetch-depth: 0
+      - name: Apply exact patch and remove helper
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/firmquant/strategy/account_bootstrap.py')
+          text = path.read_text(encoding='utf-8')
+          old = '        if len(self.data_hash) != 64 or any(character not in "0123456789abcdef" for character in self.data_hash):\n'
+          new = '''        if len(self.data_hash) != 64 or any(\n            character not in "0123456789abcdef" for character in self.data_hash\n        ):\n'''
+          if text.count(old) != 1:
+              raise SystemExit('expected bootstrap format anchor exactly once')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          Path('.github/workflows/agent-patch.yml').unlink()
+          PY
+          git config user.name "firmquant-agent"
+          git config user.email "firmquant-agent@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: format account bootstrap contract"
+          git push origin HEAD:codex/account-authority-reconciliation
