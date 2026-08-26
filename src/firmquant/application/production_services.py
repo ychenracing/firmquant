@@ -6,24 +6,20 @@ import hashlib
 import importlib
 import importlib.util
 import json
-import os
 import signal
 import sys
+import time as time_module
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from firmquant.application.event_pump import DomainEventPump
-from firmquant.application.production_daemon import (
-    ProductionCycleResult,
-    ProductionDaemon,
-    ProductionHeartbeat,
-)
+from firmquant.application.production_daemon import ProductionCycleResult, ProductionDaemon, ProductionHeartbeat
 from firmquant.application.production_events import ProductionEventJournal
 from firmquant.application.production_identity import (
     configuration_sha256,
@@ -35,16 +31,11 @@ from firmquant.application.promotion import ShadowPromotionEvidence
 from firmquant.application.promotion_store import PromotionStore
 from firmquant.broker.gateway import BrokerGateway, BrokerOrderCommand
 from firmquant.broker.production_factory import build_production_xtquant_gateway
-from firmquant.broker.production_smoke import ProductionSmokeStore, run_readonly_production_smoke
+from firmquant.broker.production_smoke import run_readonly_production_smoke
 from firmquant.broker.production_snapshot import ProductionSnapshotCollector
 from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
 from firmquant.config import Mode, Settings
-from firmquant.domain.broker_facts import (
-    AccountType,
-    BrokerPositionFact,
-    MarketSessionStatus,
-    Side,
-)
+from firmquant.domain.broker_facts import BrokerPositionFact, BrokerSnapshot, MarketSessionStatus
 from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.execution.live_controller import ExecutionWindowPolicy, LiveExecutionController
@@ -68,19 +59,17 @@ from firmquant.reconciliation.models import (
     ExpectedPosition,
     ReconciliationFacts,
     ReconciliationKind,
+    ReconciliationReceipt,
     StrategyAccountView,
 )
 from firmquant.reconciliation.service import ReconciliationService
 from firmquant.risk.arm import ArmBinding, ArmLease, ArmService
-from firmquant.risk.capability import (
-    WriteAuthorizationContext,
-    WriteCapabilityFactory,
-    WriteOperation,
-)
-from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCommand
+from firmquant.risk.capability import WriteAuthorizationContext, WriteCapabilityFactory, WriteOperation
+from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCommand, RiskLimits
 from firmquant.risk.runtime import risk_limits_from_settings
 from firmquant.scheduling.sessions import WorkflowReceiptStore
 from firmquant.security.secrets import EnvironmentSecretProvider
+from firmquant.strategy.account_sync import AccountStateContract
 from firmquant.strategy.adapter import DecisionRequest, StrategyAdapter
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.runtime_account import RuntimeAccountRepository
@@ -100,6 +89,15 @@ class ProductionServicesUnavailable(RuntimeError):
 
 class DailyUpdater(Protocol):
     def update(self, symbols: tuple[str, ...], *, through: date) -> DailyDataUpdateReceipt: ...
+
+
+@runtime_checkable
+class _AccountPayload(Protocol):
+    def to_dict(self) -> dict[str, object]: ...
+
+
+class _UquantExecutionConfig(Protocol):
+    max_volume_participation: float
 
 
 @dataclass(slots=True)
@@ -131,23 +129,25 @@ class _ExecutionAuthorities:
 
 
 def _hash_event(prefix: str, payload: object) -> str:
-    return prefix + ":" + hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    return prefix + ":" + hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
 
-def _decimal_fraction(value: Decimal, denominator: Decimal) -> Decimal:
+def _fraction(value: Decimal, denominator: Decimal) -> Decimal:
     if denominator <= 0:
         return Decimal(0)
-    result = max(Decimal(0), value / denominator)
-    return min(result, Decimal(1))
+    return min(Decimal(1), max(Decimal(0), value / denominator))
 
 
 def _load_engine(source_checkout: Path, data_directory: Path) -> object:
     engine_path = (source_checkout / "uquant" / "engine.py").resolve(strict=True)
     module_name = "firmquant_verified_uquant_engine"
     current = sys.modules.get(module_name)
-    if current is not None and Path(str(getattr(current, "__file__", ""))).resolve() != engine_path:
-        raise ProductionServicesUnavailable("UQUANT_ENGINE_MODULE_IDENTITY_COLLISION")
-    if current is None:
+    if current is not None:
+        current_path = Path(str(vars(current).get("__file__", ""))).resolve()
+        if current_path != engine_path:
+            raise ProductionServicesUnavailable("UQUANT_ENGINE_MODULE_IDENTITY_COLLISION")
+        module = cast(ModuleType, current)
+    else:
         spec = importlib.util.spec_from_file_location(module_name, engine_path)
         if spec is None or spec.loader is None:
             raise ProductionServicesUnavailable("UQUANT_ENGINE_LOAD_FAILED")
@@ -158,41 +158,38 @@ def _load_engine(source_checkout: Path, data_directory: Path) -> object:
         except Exception:
             sys.modules.pop(module_name, None)
             raise
-    else:
-        module = cast(ModuleType, current)
-    engine_type = getattr(module, "ProductionEngine", None)
-    config = getattr(module, "DEFAULT_CONFIG", None)
+    engine_type = vars(module).get("ProductionEngine")
+    config = vars(module).get("DEFAULT_CONFIG")
     if not callable(engine_type) or config is None:
         raise ProductionServicesUnavailable("UQUANT_ENGINE_CONTRACT_UNAVAILABLE")
     return engine_type(data_directory, config)
 
 
 def _account_payload(account: object) -> dict[str, object]:
-    method = getattr(account, "to_dict", None)
-    if not callable(method):
+    if not isinstance(account, _AccountPayload):
         raise ProductionServicesUnavailable("UQUANT_ACCOUNT_CONTRACT_UNAVAILABLE")
-    payload = method()
+    payload = account.to_dict()
     if not isinstance(payload, dict):
         raise ProductionServicesUnavailable("UQUANT_ACCOUNT_PAYLOAD_INVALID")
     return payload
 
 
-def _strategy_account_view(
+def _strategy_view(
     account: object,
-    *,
-    snapshot_positions: tuple[BrokerPositionFact, ...],
-    account_store: RuntimeAccountRepository,
+    positions: tuple[BrokerPositionFact, ...],
+    repository: RuntimeAccountRepository,
 ) -> StrategyAccountView:
     payload = _account_payload(account)
     raw_cash = payload.get("cash")
+    raw_positions = payload.get("positions")
+    raw_orders = payload.get("order_ledger")
     if isinstance(raw_cash, bool) or not isinstance(raw_cash, (int, float)):
         raise ProductionServicesUnavailable("UQUANT_ACCOUNT_CASH_INVALID")
+    if not isinstance(raw_positions, dict) or not isinstance(raw_orders, list):
+        raise ProductionServicesUnavailable("UQUANT_ACCOUNT_STATE_INVALID")
     cash = Money(Decimal(str(raw_cash)))
-    raw_positions = payload.get("positions")
-    if not isinstance(raw_positions, dict):
-        raise ProductionServicesUnavailable("UQUANT_ACCOUNT_POSITIONS_INVALID")
-    broker_by_symbol = {item.symbol.canonical: item for item in snapshot_positions}
-    positions: list[ExpectedPosition] = []
+    broker_positions = {item.symbol.canonical: item for item in positions}
+    expected: list[ExpectedPosition] = []
     marked = Decimal(0)
     for raw_symbol, raw_position in sorted(raw_positions.items()):
         if not isinstance(raw_symbol, str) or not isinstance(raw_position, dict):
@@ -201,31 +198,22 @@ def _strategy_account_view(
         if isinstance(raw_shares, bool) or not isinstance(raw_shares, int) or raw_shares <= 0:
             raise ProductionServicesUnavailable("UQUANT_ACCOUNT_POSITION_INVALID")
         symbol = Symbol.parse(raw_symbol)
-        broker = broker_by_symbol.get(symbol.canonical)
-        sellable = Shares(0) if broker is None else broker.sellable_shares
-        if broker is not None and broker.total_shares.value == raw_shares:
-            marked += broker.market_value.value
-        positions.append(
-            ExpectedPosition(
-                symbol=symbol,
-                total_shares=Shares(raw_shares),
-                sellable_shares=sellable,
-            )
-        )
-    raw_orders = payload.get("order_ledger")
-    if not isinstance(raw_orders, list):
-        raise ProductionServicesUnavailable("UQUANT_ACCOUNT_ORDER_LEDGER_INVALID")
-    known_ids: set[str] = set()
+        broker_position = broker_positions.get(symbol.canonical)
+        sellable = Shares(0) if broker_position is None else broker_position.sellable_shares
+        if broker_position is not None and broker_position.total_shares.value == raw_shares:
+            marked += broker_position.market_value.value
+        expected.append(ExpectedPosition(symbol, Shares(raw_shares), sellable))
+    order_ids: set[str] = set()
     for item in raw_orders:
         if not isinstance(item, dict) or not isinstance(item.get("order_id"), str):
             raise ProductionServicesUnavailable("UQUANT_ACCOUNT_ORDER_LEDGER_INVALID")
-        known_ids.add(str(item["order_id"]))
+        order_ids.add(str(item["order_id"]))
     return StrategyAccountView(
         available_cash=cash,
         total_assets=Money(cash.value + marked),
-        positions=tuple(positions),
-        known_uquant_order_ids=frozenset(known_ids),
-        economic_state_sha256=account_store.store.hash_state(account),
+        positions=tuple(expected),
+        known_uquant_order_ids=frozenset(order_ids),
+        economic_state_sha256=repository.store.hash_state(account),
     )
 
 
@@ -240,7 +228,9 @@ def _data_identity_matches(account: object, data_directory: Path) -> bool:
         return False
     try:
         module = importlib.import_module("uquant.data")
-        factory = getattr(module, "DataStore")
+        factory = vars(module).get("DataStore")
+        if not callable(factory):
+            return False
         manifest = factory(data_directory).manifest(tuple(symbols), as_of=as_of)
     except Exception:
         return False
@@ -251,12 +241,13 @@ def _data_identity_matches(account: object, data_directory: Path) -> bool:
     )
 
 
-def _config_identity_matches(database: Database, config_sha256: str) -> bool:
-    row = database.query_one(
-        "SELECT config_sha256 FROM arm_leases WHERE revoked_at IS NULL "
-        "ORDER BY issued_at DESC, lease_id DESC LIMIT 1"
-    )
-    return row is None or str(row["config_sha256"]) == config_sha256
+def _uquant_participation() -> Decimal:
+    module = importlib.import_module("uquant.config")
+    config = vars(module).get("DEFAULT_CONFIG")
+    if config is None:
+        raise ProductionServicesUnavailable("UQUANT_CONFIG_UNAVAILABLE")
+    typed = cast(_UquantExecutionConfig, config)
+    return Decimal(str(typed.max_volume_participation))
 
 
 def _fee_schedule(manifest: XtQuantSafetyManifest) -> FeeSchedule:
@@ -270,24 +261,24 @@ def _fee_schedule(manifest: XtQuantSafetyManifest) -> FeeSchedule:
 
 
 def _decision_symbols(decision: DecisionSnapshot) -> tuple[Symbol, ...]:
-    payload = decision.uquant_payload
-    raw_orders = payload.get("orders")
+    raw_orders = decision.uquant_payload.get("orders")
     if not isinstance(raw_orders, list):
         raise ProductionServicesUnavailable("DECISION_ORDER_PAYLOAD_INVALID")
-    result: set[Symbol] = set()
+    symbols: set[Symbol] = set()
     for item in raw_orders:
         if not isinstance(item, dict) or not isinstance(item.get("symbol"), str):
             raise ProductionServicesUnavailable("DECISION_ORDER_PAYLOAD_INVALID")
-        result.add(Symbol.parse(str(item["symbol"])))
-    return tuple(sorted(result, key=lambda item: item.canonical))
+        symbols.add(Symbol.parse(str(item["symbol"])))
+    return tuple(sorted(symbols, key=lambda value: value.canonical))
 
 
 class ProductionServiceHooks:
-    """Single production orchestration path owned by the daemon's writer thread."""
+    """Single production orchestration path owned by the daemon writer thread."""
 
     def __init__(
         self,
         *,
+        config_path: Path,
         settings: Settings,
         writer: WriterLease,
         broker: BrokerGateway,
@@ -301,24 +292,25 @@ class ProductionServiceHooks:
         safety_manifest: XtQuantSafetyManifest,
         clock: Callable[[], datetime],
     ) -> None:
+        self._config_path = config_path
         self._settings = settings
         self._writer = writer
         self._database = writer.database
         self._broker = broker
         self._calendar = calendar
-        self._account_repository = account_repository
+        self._accounts = account_repository
         self._data_updater = data_updater
-        self._strategy_adapter = strategy_adapter
-        self._universe_policy = universe_policy
-        self._event_journal = event_journal
+        self._strategy = strategy_adapter
+        self._universe = universe_policy
+        self._journal = event_journal
         self._identity = identity
-        self._safety_manifest = safety_manifest
+        self._safety = safety_manifest
         self._clock = clock
         self._snapshots = BrokerSnapshotStore(self._database)
         self._decisions = DecisionSnapshotRepository(self._database)
         self._ledger = MonotonicExecutionLedgerRepository(self._database)
         self._receipts = WorkflowReceiptStore(writer_lease=writer)
-        self._reconciliation = ReconciliationService(
+        self._reconciler = ReconciliationService(
             database=self._database,
             cash_tolerance=Money(Decimal("0.01")),
             clock=clock,
@@ -326,7 +318,6 @@ class ProductionServiceHooks:
         self._status = self._receipts.load_runtime(settings.mode)
         self._startup_reconciliation_id: str | None = None
         self._real_order_calls = 0
-        self._latest_heartbeat: ProductionHeartbeat | None = None
 
     @property
     def status(self) -> RuntimeStatus:
@@ -334,7 +325,7 @@ class ProductionServiceHooks:
 
     def _now(self) -> datetime:
         value = self._clock()
-        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        if value.tzinfo is None or value.utcoffset() is None:
             raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
         return value
 
@@ -345,7 +336,6 @@ class ProductionServiceHooks:
         reason: str,
         blockers: tuple[str, ...] = (),
     ) -> None:
-        now = self._now()
         previous = self._status
         current = previous.transition(target, reason=reason, blockers=blockers)
         if current != previous:
@@ -353,11 +343,11 @@ class ProductionServiceHooks:
                 mode=self._settings.mode,
                 previous=previous,
                 current=current,
-                created_at=now,
+                created_at=self._now(),
             )
         self._status = current
 
-    def _capture(self):
+    def _capture(self) -> BrokerSnapshot:
         snapshot = ProductionSnapshotCollector(
             broker=self._broker,
             clock=self._clock,
@@ -366,19 +356,20 @@ class ProductionServiceHooks:
         self._snapshots.persist(snapshot)
         return snapshot
 
-    def _reconcile(self, kind: ReconciliationKind):
-        snapshot = self._capture()
+    def _reconcile(self, kind: ReconciliationKind) -> tuple[ReconciliationReceipt, BrokerSnapshot, object]:
+        snapshot = ProductionSnapshotCollector(
+            broker=self._broker,
+            clock=self._clock,
+            max_attempts=3,
+        ).capture()
         expected_id, expected_type = self._snapshots.previous_account_identity(snapshot)
-        account, _sync = self._account_repository.sync_broker_snapshot(snapshot)
+        self._snapshots.persist(snapshot)
+        account, _ = self._accounts.sync_broker_snapshot(snapshot)
         identity = StrategyIdentity.locked()
         payload = _account_payload(account)
         facts = ReconciliationFacts(
             broker_snapshot=snapshot,
-            strategy_account=_strategy_account_view(
-                account,
-                snapshot_positions=snapshot.positions,
-                account_store=self._account_repository,
-            ),
+            strategy_account=_strategy_view(account, snapshot.positions, self._accounts),
             operational_ledger=build_operational_ledger_view(
                 self._database,
                 broker_session=snapshot.session_date,
@@ -390,16 +381,13 @@ class ProductionServiceHooks:
                 payload.get("code_hash") in {"", identity.economic_code_fingerprint}
             ),
             data_identity_matches=_data_identity_matches(account, self._settings.paths.data_directory),
-            config_identity_matches=_config_identity_matches(
-                self._database,
-                self._identity.config_sha256,
+            config_identity_matches=(
+                configuration_sha256(self._config_path) == self._identity.config_sha256
             ),
         )
-        receipt = self._reconciliation.run(kind, facts)
+        receipt = self._reconciler.run(kind, facts)
         if not receipt.passed:
-            raise ProductionServicesUnavailable(
-                "RECONCILIATION_FAILED:" + ",".join(receipt.blockers)
-            )
+            raise ProductionServicesUnavailable("RECONCILIATION_FAILED:" + ",".join(receipt.blockers))
         return receipt, snapshot, account
 
     def _require_promotion(self, account_hash: str) -> None:
@@ -427,8 +415,8 @@ class ProductionServiceHooks:
             self._transition(RuntimeState.RECONCILING, reason="production startup recovery")
         recovery = ProductionRecoveryService(
             database=self._database,
-            account_store=self._account_repository.store,
-            account_path=self._account_repository.path,
+            account_store=self._accounts.store,
+            account_path=self._accounts.path,
             gateway=self._broker,
             clock=self._clock,
         ).recover()
@@ -444,7 +432,7 @@ class ProductionServiceHooks:
         run_readonly_production_smoke(
             broker=self._broker,
             database=self._database,
-            probe_symbol=self._safety_manifest.probe_symbol,
+            probe_symbol=self._safety.probe_symbol,
             firmquant_commit=self._identity.firmquant_commit,
             uquant_commit=self._identity.uquant_commit,
             config_sha256=self._identity.config_sha256,
@@ -453,7 +441,7 @@ class ProductionServiceHooks:
         )
         self._require_promotion(account.account_id_hash)
         try:
-            receipt, _snapshot, _account = self._reconcile(ReconciliationKind.STARTUP)
+            receipt, _, _ = self._reconcile(ReconciliationKind.STARTUP)
         except Exception as error:
             self._transition(
                 RuntimeState.HALTED,
@@ -470,87 +458,87 @@ class ProductionServiceHooks:
 
         if not isinstance(event, BrokerEventEnvelope):
             raise ProductionServicesUnavailable("BROKER_EVENT_TYPE_INVALID")
-        self._event_journal.append(event)
-        halt_reason = self._event_journal.pending_halt_reason
-        if halt_reason is not None:
-            self.halt(halt_reason)
-            raise ProductionServicesUnavailable(halt_reason)
+        self._journal.append(event)
+        if self._journal.pending_halt_reason is not None:
+            reason = self._journal.pending_halt_reason
+            self.halt(reason)
+            raise ProductionServicesUnavailable(reason)
 
-    def _audit_completed(self, event_id: str) -> bool:
+    def _audited(self, event_id: str) -> bool:
         return self._database.query_one(
             "SELECT 1 FROM audit_events WHERE audit_event_id = ?",
             (event_id,),
         ) is not None
 
-    def _audit(
-        self,
-        *,
-        event_id: str,
-        category: str,
-        payload: Mapping[str, object],
-        created_at: datetime,
-    ) -> None:
+    def _audit(self, event_id: str, category: str, payload: Mapping[str, object]) -> None:
+        if self._audited(event_id):
+            return
         with self._database.transaction():
-            if self._database.query_one(
-                "SELECT 1 FROM audit_events WHERE audit_event_id = ?",
-                (event_id,),
-            ) is None:
-                AuditLedger(self._database).append(
-                    audit_event_id=event_id,
-                    category=category,
-                    actor="production-services",
-                    payload=dict(payload),
-                    created_at=created_at,
-                )
+            AuditLedger(self._database).append(
+                audit_event_id=event_id,
+                category=category,
+                actor="production-services",
+                payload=dict(payload),
+                created_at=self._now(),
+            )
+
+    def _latest_passed_reconciliation(self, kind: ReconciliationKind) -> str:
+        row = self._database.query_one(
+            "SELECT reconciliation_id FROM reconciliation_runs WHERE kind = ? AND passed = 1 "
+            "ORDER BY completed_at DESC, reconciliation_id DESC LIMIT 1",
+            (kind.value,),
+        )
+        if row is None:
+            raise ProductionServicesUnavailable("RECONCILIATION_RECEIPT_MISSING")
+        return str(row["reconciliation_id"])
 
     def _post_close_decision(self, session: date) -> int:
         if self._decisions.for_session(session):
             return 0
-        symbols = tuple(sorted(set(self._universe_policy.deployment_symbols) | set(_REFERENCE_SYMBOLS)))
+        symbols = tuple(sorted(set(self._universe.deployment_symbols) | set(_REFERENCE_SYMBOLS)))
         update = self._data_updater.update(symbols, through=session)
-        reconciliation, snapshot, account = self._reconcile(ReconciliationKind.EOD)
-        request = DecisionRequest(
-            strategy_session=session,
-            symbols=self._universe_policy.deployment_symbols,
-            account=account,
-            firmquant_commit=self._identity.firmquant_commit,
-            data_manifest_sha256=update.manifest_sha256,
-            broker_snapshot_sha256=snapshot.raw_payload_sha256,
-            created_at=self._now(),
+        snapshot = self._capture()
+        account = self._accounts.load()
+        reconciliation_id = self._latest_passed_reconciliation(ReconciliationKind.EOD)
+        decision = self._strategy.decide_once(
+            DecisionRequest(
+                strategy_session=session,
+                symbols=self._universe.deployment_symbols,
+                account=account,
+                firmquant_commit=self._identity.firmquant_commit,
+                data_manifest_sha256=update.manifest_sha256,
+                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+                created_at=self._now(),
+            )
         )
-        decision = self._strategy_adapter.decide_once(request)
-        persisted = self._account_repository.persist_prepared(
-            account,
+        persisted = self._accounts.persist_prepared(
+            cast(AccountStateContract, account),
             expected_before_sha256=decision.account_before_sha256,
             operation_kind="DECISION_COMMIT",
             evidence_sha256=decision.payload_sha256,
         )
         if persisted != decision.account_after_sha256:
             raise ProductionServicesUnavailable("DECISION_ACCOUNT_COMMIT_MISMATCH")
-        event_id = "production-decision:" + decision.decision_id
         self._audit(
-            event_id=event_id,
-            category="PRODUCTION_DECISION",
-            payload={
+            "production-decision:" + decision.decision_id,
+            "PRODUCTION_DECISION",
+            {
                 "schema": "firmquant.production-decision.v1",
                 "decision_id": decision.decision_id,
                 "session": session,
                 "data_manifest_sha256": update.manifest_sha256,
-                "reconciliation_id": reconciliation.reconciliation_id,
+                "reconciliation_id": reconciliation_id,
             },
-            created_at=self._now(),
         )
         return 1
 
     def _execution_facts(self, decision: DecisionSnapshot) -> ExecutionBrokerSnapshot:
         snapshot = self._capture()
         symbols = _decision_symbols(decision)
-        instruments = tuple(self._broker.query_instrument(symbol) for symbol in symbols)
-        quotes = tuple(self._broker.query_quote(symbol) for symbol in symbols)
         return ExecutionBrokerSnapshot(
             broker_snapshot=snapshot,
-            instruments=instruments,
-            quotes=quotes,
+            instruments=tuple(self._broker.query_instrument(symbol) for symbol in symbols),
+            quotes=tuple(self._broker.query_quote(symbol) for symbol in symbols),
             market_status=self._broker.query_market_status(),
         )
 
@@ -583,117 +571,109 @@ class ProductionServiceHooks:
                 uquant_commit=self._identity.uquant_commit,
                 config_sha256=self._identity.config_sha256,
             )
-            service = ArmService(
-                mac_key=EnvironmentSecretProvider().get_secret("ARM_MAC_KEY")
-            )
+            service = ArmService(mac_key=EnvironmentSecretProvider().get_secret("ARM_MAC_KEY"))
             service.verify(lease, binding=binding, now=self._now())
         except Exception as error:
             raise ProductionServicesUnavailable("ACTIVE_ARM_LEASE_INVALID") from error
-        required_window = max(
+        required = max(
             self._settings.execution.sell_window_seconds,
             self._settings.execution.buy_window_seconds,
         ) + self._settings.execution.poll_interval_seconds + 1
-        if lease.expires_at - self._now() <= timedelta(seconds=required_window):
+        if lease.expires_at - self._now() <= timedelta(seconds=required):
             raise ProductionServicesUnavailable("ARM_LEASE_TOO_CLOSE_TO_EXPIRY")
         return service, lease, binding
 
-    def _latest_reconciliation_healthy(self) -> bool:
-        row = self._database.query_one(
-            "SELECT passed FROM reconciliation_runs ORDER BY completed_at DESC, reconciliation_id DESC LIMIT 1"
+    def _known_client_ids(self) -> frozenset[str]:
+        return frozenset(
+            str(row["uquant_order_id"])
+            for row in self._database.query_all("SELECT uquant_order_id FROM execution_intents")
         )
-        return row is not None and row["passed"] == 1
 
-    def _risk_context(
-        self,
-        *,
-        command: BrokerOrderCommand,
-        planned: PlannedOrder,
-        authorities: _ExecutionAuthorities,
-    ) -> ExecutionRiskContext:
-        account = self._broker.query_account()
-        positions = self._broker.query_positions()
-        position = next((item for item in positions if item.symbol == command.symbol), None)
-        instrument = self._broker.query_instrument(command.symbol)
-        quote = self._broker.query_quote(command.symbol)
-        health = self._broker.health()
-        decision_payload = authorities.decision.uquant_payload
-        risk = decision_payload.get("risk")
-        sentinel = json.loads(authorities.decision.payload_json).get("sentinel")
-        if not isinstance(risk, dict) or not isinstance(sentinel, dict):
-            raise ProductionServicesUnavailable("DECISION_RISK_PAYLOAD_INVALID")
-        target_gross = Decimal(str(decision_payload.get("target_gross", 0)))
-        target_gross_cap = Decimal(str(risk.get("target_gross_cap", 0)))
-        freeze = sentinel.get("freeze_new_risk")
-        if not isinstance(freeze, bool):
-            raise ProductionServicesUnavailable("DECISION_SENTINEL_PAYLOAD_INVALID")
-        actual_gross = sum((item.market_value.value for item in positions), Decimal(0))
-        symbol_notional = Decimal(0) if position is None else position.market_value.value
+    def _external_order_count(self) -> int:
+        known = self._known_client_ids()
+        return sum(
+            1
+            for order in self._broker.query_orders()
+            if order.client_order_id is None or order.client_order_id not in known
+        )
+
+    def _system_cancel_allowed(self, broker_order_id: str) -> bool:
+        row = self._database.query_one(
+            "SELECT ownership FROM broker_orders WHERE broker_order_id = ?",
+            (broker_order_id,),
+        )
+        return row is not None and row["ownership"] == "SYSTEM"
+
+    def _notionals(self, session: date) -> tuple[Money, Money]:
         rows = self._database.query_all(
-            "SELECT requested_shares, filled_shares FROM execution_intents WHERE strategy_session = ?",
-            (planned.strategy_session.isoformat(),),
+            "SELECT requested_shares, filled_shares, limit_price FROM broker_orders "
+            "WHERE session_date = ? AND ownership = 'SYSTEM'",
+            (session.isoformat(),),
         )
-        submitted = sum(
-            (Decimal(int(row["requested_shares"])) * command.limit_price.value for row in rows),
-            Decimal(0),
-        )
-        filled = sum(
-            (Decimal(int(row["filled_shares"])) * command.limit_price.value for row in rows),
-            Decimal(0),
-        )
-        open_orders = int(
-            self._database.scalar(
-                "SELECT count(*) FROM execution_intents WHERE state IN ('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED')"
-            )
-            or 0
-        )
-        unresolved = int(
-            self._database.scalar(
-                "SELECT count(*) FROM execution_intents WHERE state IN ('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-            )
-            or 0
-        )
-        attempts = int(
-            self._database.scalar(
-                "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
-                (authorities.facts.broker_snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
-            )
-            or 0
-        )
-        account_payload = _account_payload(self._account_repository.load())
-        capital_peak = Decimal(str(account_payload.get("capital_peak", account.total_assets.value)))
-        capital_drawdown = _decimal_fraction(
-            max(Decimal(0), capital_peak - account.total_assets.value),
-            capital_peak,
-        )
-        earliest = self._database.query_one(
-            "SELECT c.total_assets FROM broker_snapshots b JOIN cash_snapshots c USING(snapshot_id) "
-            "WHERE b.session_date = ? ORDER BY b.captured_at LIMIT 1",
-            (planned.execution_session.isoformat(),),
-        )
-        opening_assets = account.total_assets.value if earliest is None else Decimal(str(earliest["total_assets"]))
-        intraday_loss = _decimal_fraction(
-            max(Decimal(0), opening_assets - account.total_assets.value),
-            opening_assets,
-        )
+        submitted = Decimal(0)
+        filled = Decimal(0)
+        for row in rows:
+            if row["limit_price"] is None:
+                raise ProductionServicesUnavailable("BROKER_ORDER_PRICE_MISSING")
+            price = Decimal(str(row["limit_price"]))
+            submitted += Decimal(int(row["requested_shares"])) * price
+            filled += Decimal(int(row["filled_shares"])) * price
+        return Money(submitted), Money(filled)
+
+    def _account_risk_fractions(self, snapshot: BrokerSnapshot) -> tuple[Decimal, Decimal, Decimal]:
+        current = snapshot.account.total_assets.value
         previous = self._database.query_one(
             "SELECT c.total_assets FROM broker_snapshots b JOIN cash_snapshots c USING(snapshot_id) "
             "WHERE b.snapshot_id != ? ORDER BY b.captured_at DESC LIMIT 1",
-            (authorities.facts.broker_snapshot.snapshot_id,),
+            (snapshot.snapshot_id,),
         )
-        previous_assets = account.total_assets.value if previous is None else Decimal(str(previous["total_assets"]))
-        equity_change = _decimal_fraction(
-            abs(account.total_assets.value - previous_assets),
-            previous_assets,
+        previous_assets = current if previous is None else Decimal(str(previous["total_assets"]))
+        equity_change = _fraction(abs(current - previous_assets), previous_assets)
+        opening = self._database.query_one(
+            "SELECT c.total_assets FROM broker_snapshots b JOIN cash_snapshots c USING(snapshot_id) "
+            "WHERE b.session_date = ? ORDER BY b.captured_at LIMIT 1",
+            (snapshot.session_date.isoformat(),),
         )
-        external = 0
-        known_client_ids = {
-            str(row["uquant_order_id"])
-            for row in self._database.query_all("SELECT uquant_order_id FROM execution_intents")
-        }
-        for broker_order in self._broker.query_orders():
-            if broker_order.client_order_id is None or broker_order.client_order_id not in known_client_ids:
-                external += 1
-        config_matches = configuration_sha256(self._config_path) == self._identity.config_sha256
+        opening_assets = current if opening is None else Decimal(str(opening["total_assets"]))
+        intraday_loss = _fraction(max(Decimal(0), opening_assets - current), opening_assets)
+        payload = _account_payload(self._accounts.load())
+        peak = Decimal(str(payload.get("capital_peak", current)))
+        drawdown = _fraction(max(Decimal(0), peak - current), peak)
+        return equity_change, intraday_loss, drawdown
+
+    def _risk_context(
+        self,
+        command: BrokerOrderCommand,
+        planned: PlannedOrder,
+        authorities: _ExecutionAuthorities,
+        snapshot: BrokerSnapshot,
+        limits: RiskLimits,
+    ) -> ExecutionRiskContext:
+        account = snapshot.account
+        positions = snapshot.positions
+        position = next((item for item in positions if item.symbol == command.symbol), None)
+        decision = authorities.decision.uquant_payload
+        risk = decision.get("risk")
+        envelope = json.loads(authorities.decision.payload_json)
+        sentinel = envelope.get("sentinel") if isinstance(envelope, dict) else None
+        if not isinstance(risk, dict) or not isinstance(sentinel, dict):
+            raise ProductionServicesUnavailable("DECISION_RISK_PAYLOAD_INVALID")
+        freeze = sentinel.get("freeze_new_risk")
+        if not isinstance(freeze, bool):
+            raise ProductionServicesUnavailable("DECISION_SENTINEL_PAYLOAD_INVALID")
+        submitted, filled = self._notionals(planned.execution_session)
+        equity_change, intraday_loss, drawdown = self._account_risk_fractions(snapshot)
+        attempts = int(
+            self._database.scalar(
+                "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
+                (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
+            )
+            or 0
+        )
+        health = self._broker.health()
+        account_state = self._accounts.load()
+        actual_gross = sum((item.market_value.value for item in positions), Decimal(0))
+        symbol_notional = Decimal(0) if position is None else position.market_value.value
         return ExecutionRiskContext(
             mode=self._settings.mode,
             runtime_state=self._status.state,
@@ -702,75 +682,86 @@ class ProductionServiceHooks:
             available_cash=account.available_cash,
             total_assets=account.total_assets,
             position=position,
-            instrument=instrument,
-            quote=quote,
+            instrument=self._broker.query_instrument(command.symbol),
+            quote=self._broker.query_quote(command.symbol),
             market_status=self._broker.query_market_status(),
-            canonical_universe=frozenset(Symbol.parse(item) for item in self._universe_policy.canonical_symbols),
-            deployment_allowlist=frozenset(Symbol.parse(item) for item in self._universe_policy.deployment_symbols),
+            canonical_universe=frozenset(Symbol.parse(item) for item in self._universe.canonical_symbols),
+            deployment_allowlist=frozenset(Symbol.parse(item) for item in self._universe.deployment_symbols),
             uquant_target_shares=planned.target_shares,
             uquant_target_weight=planned.target_weight,
-            uquant_target_gross=target_gross,
-            uquant_target_gross_cap=target_gross_cap,
+            uquant_target_gross=Decimal(str(decision.get("target_gross", 0))),
+            uquant_target_gross_cap=Decimal(str(risk.get("target_gross_cap", 0))),
             freeze_new_risk=freeze,
             actual_symbol_notional=Money(symbol_notional),
             actual_gross_notional=Money(actual_gross),
-            daily_submitted_notional=Money(submitted),
-            daily_filled_notional=Money(filled),
-            open_order_count=open_orders,
-            consecutive_rejections=0,
+            daily_submitted_notional=submitted,
+            daily_filled_notional=filled,
+            open_order_count=int(
+                self._database.scalar(
+                    "SELECT count(*) FROM execution_intents WHERE state IN "
+                    "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED')"
+                )
+                or 0
+            ),
+            consecutive_rejections=int(
+                self._database.scalar(
+                    "SELECT count(*) FROM execution_intents WHERE state = 'REJECTED' "
+                    "AND strategy_session = ?",
+                    (planned.strategy_session.isoformat(),),
+                )
+                or 0
+            ),
             broker_connected=health.connected,
-            disconnect_duration=timedelta(0) if health.connected else timedelta.max,
+            disconnect_duration=timedelta(0) if health.connected else limits.max_disconnect_duration + timedelta(seconds=1),
             existing_order_age=None,
             replacement_count=0,
             submit_count_window=attempts,
             cancel_count_window=attempts,
-            uquant_max_volume_participation=Decimal(str(importlib.import_module("uquant.config").DEFAULT_CONFIG.max_volume_participation)),
+            uquant_max_volume_participation=_uquant_participation(),
             equity_change_fraction=equity_change,
             intraday_loss_fraction=intraday_loss,
-            capital_drawdown_fraction=capital_drawdown,
-            reconciliation_healthy=self._latest_reconciliation_healthy(),
-            external_active_order_count=external,
+            capital_drawdown_fraction=drawdown,
+            reconciliation_healthy=self._latest_passed_reconciliation(ReconciliationKind.INTRADAY) != "",
+            external_active_order_count=self._external_order_count(),
             unexplained_position_change=False,
             corporate_action_suspected=False,
             clock_drift=timedelta(0),
-            data_identity_matches=_data_identity_matches(
-                self._account_repository.load(),
-                self._settings.paths.data_directory,
+            data_identity_matches=_data_identity_matches(account_state, self._settings.paths.data_directory),
+            config_identity_matches=(configuration_sha256(self._config_path) == self._identity.config_sha256),
+            unresolved_order_count=int(
+                self._database.scalar(
+                    "SELECT count(*) FROM execution_intents WHERE state IN "
+                    "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
+                )
+                or 0
             ),
-            config_identity_matches=config_matches,
-            unresolved_order_count=unresolved,
             kill_switch_tripped="KILL_SWITCH" in self._status.blockers,
             auction_allowed=False,
-            limits=risk_limits_from_settings(self._settings),
+            limits=limits,
         )
 
     def _capability(self, authorities: _ExecutionAuthorities):
         account_hash = self._broker.query_account().account_id_hash
         arm_service, lease, binding = self._load_arm(account_hash)
-        fee_schedule = _fee_schedule(self._safety_manifest)
+        limits = risk_limits_from_settings(self._settings)
+        fee_schedule = _fee_schedule(self._safety)
         gate = ExecutionRiskGate()
 
-        def context_provider(
-            operation: WriteOperation,
-            subject: object | None,
-        ) -> WriteAuthorizationContext:
+        def context_provider(operation: WriteOperation, subject: object | None) -> WriteAuthorizationContext:
             now = self._now()
-            health = self._broker.health()
+            snapshot = self._capture()
             planned: PlannedOrder | None = None
             gate_decision = None
-            quote_time = authorities.facts.broker_snapshot.captured_at
+            quote_time = snapshot.captured_at
             symbol_allowed = True
             command_within = True
+            cancel_approved = True
             if isinstance(subject, BrokerOrderCommand):
                 planned = authorities.planned.get(subject.client_order_id)
                 if planned is None:
                     command_within = False
                 else:
-                    risk_context = self._risk_context(
-                        command=subject,
-                        planned=planned,
-                        authorities=authorities,
-                    )
+                    risk_context = self._risk_context(subject, planned, authorities, snapshot, limits)
                     gate_decision = gate.evaluate(
                         RiskCommand(
                             command=subject,
@@ -784,28 +775,33 @@ class ProductionServiceHooks:
                         risk_context,
                     )
                     quote_time = self._broker.query_quote(subject.symbol).received_at
-                    symbol_allowed = self._universe_policy.allowed(
-                        subject.symbol.canonical,
-                        planned.execution_session,
-                    )
-                    command_within = (
-                        subject.requested_shares.value <= planned.uquant_authorized_shares.value
-                    )
-            unresolved = int(
-                self._database.scalar(
-                    "SELECT count(*) FROM execution_intents WHERE state IN ('CANCEL_REQUESTED','UNKNOWN')"
+                    symbol_allowed = self._universe.allowed(subject.symbol.canonical, planned.execution_session)
+                    command_within = subject.requested_shares.value <= planned.uquant_authorized_shares.value
+            elif operation is WriteOperation.CANCEL and isinstance(subject, str):
+                cancel_approved = self._system_cancel_allowed(subject)
+                broker_order = next(
+                    (item for item in snapshot.orders if item.broker_order_id == subject),
+                    None,
                 )
-                or 0
-            )
-            submitting = int(
-                self._database.scalar(
-                    "SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'"
-                )
-                or 0
-            )
+                if broker_order is None:
+                    cancel_approved = False
+                else:
+                    symbol_allowed = self._universe.allowed(
+                        broker_order.symbol.canonical,
+                        snapshot.session_date,
+                    )
+                    quote_time = self._broker.query_quote(broker_order.symbol).received_at
+            known = self._known_client_ids()
             external = any(
-                order.client_order_id is None
-                for order in self._broker.query_orders()
+                item.client_order_id is None or item.client_order_id not in known
+                for item in snapshot.orders
+            )
+            attempts = int(
+                self._database.scalar(
+                    "SELECT count(*) FROM broker_order_attempts WHERE started_at >= ?",
+                    (snapshot.captured_at.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),),
+                )
+                or 0
             )
             return WriteAuthorizationContext(
                 settings=self._settings,
@@ -813,9 +809,9 @@ class ProductionServiceHooks:
                 binding=binding,
                 now=now,
                 runtime_state=self._status.state,
-                broker_health=health,
+                broker_health=self._broker.health(),
                 startup_reconciliation_passed=self._startup_reconciliation_id is not None,
-                broker_snapshot_received_at=authorities.facts.broker_snapshot.captured_at,
+                broker_snapshot_received_at=snapshot.captured_at,
                 max_broker_snapshot_age=timedelta(seconds=self._settings.execution.max_quote_age_seconds),
                 quote_received_at=quote_time,
                 max_quote_age=timedelta(seconds=self._settings.execution.max_quote_age_seconds),
@@ -826,27 +822,36 @@ class ProductionServiceHooks:
                     and StrategyIdentity.locked().uquant_commit == self._identity.uquant_commit
                 ),
                 kill_switch_tripped="KILL_SWITCH" in self._status.blockers,
-                unresolved_order_count=unresolved,
-                submitting_unresolved_count=submitting,
-                reconciliation_mismatch=not self._latest_reconciliation_healthy(),
+                unresolved_order_count=int(
+                    self._database.scalar(
+                        "SELECT count(*) FROM execution_intents WHERE state IN ('CANCEL_REQUESTED','UNKNOWN')"
+                    )
+                    or 0
+                ),
+                submitting_unresolved_count=int(
+                    self._database.scalar(
+                        "SELECT count(*) FROM execution_intents WHERE state = 'SUBMITTING'"
+                    )
+                    or 0
+                ),
+                reconciliation_mismatch=False,
                 external_activity_detected=external,
                 gate_decision=gate_decision,
-                cancel_risk_approved=True,
+                cancel_risk_approved=cancel_approved,
                 symbol_in_canonical_universe=symbol_allowed,
                 symbol_in_deployment_allowlist=symbol_allowed,
                 command_within_uquant_intent=command_within,
                 cash_and_positions_safe=True,
-                frequency_within_limits=True,
+                frequency_within_limits=(
+                    attempts < self._settings.execution.max_submit_count_window
+                    and attempts < self._settings.execution.max_cancel_count_window
+                ),
             )
 
         return WriteCapabilityFactory(arm_service=arm_service).create(
             gateway=self._broker,
             context_provider=context_provider,
         )
-
-    @property
-    def _config_path(self) -> Path:
-        return self._settings.paths.state_directory.parent / "firmquant.toml"
 
     def _shadow_execute(self, plan: ExecutionPlan, decision: DecisionSnapshot) -> None:
         account_hash = self._broker.query_account().account_id_hash
@@ -857,50 +862,47 @@ class ProductionServiceHooks:
             config_sha256=self._identity.promotion_config_sha256,
             account_hash=account_hash,
         )
-        unresolved = int(
-            self._database.scalar(
-                "SELECT count(*) FROM execution_intents WHERE state IN ('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-            )
-            or 0
-        )
-        external = sum(1 for order in self._broker.query_orders() if order.client_order_id is None)
-        duplicate_orders = int(
-            self._database.scalar(
-                "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
-                "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
-            )
-            or 0
-        )
-        duplicate_fills = int(
-            self._database.scalar(
-                "SELECT count(*) FROM (SELECT broker_fill_id FROM fills GROUP BY broker_fill_id HAVING count(*) > 1)"
-            )
-            or 0
-        )
-        prior_sessions = 0 if prior is None else prior.observed_sessions
-        prior_orders = 0 if prior is None else prior.hypothetical_orders
-        prior_error = Decimal(0) if prior is None else prior.max_target_tracking_error
-        current_error = Decimal(1) if plan.blockers else Decimal(0)
         store.append(
             ShadowPromotionEvidence(
                 firmquant_commit=self._identity.firmquant_commit,
                 uquant_commit=self._identity.uquant_commit,
                 config_sha256=self._identity.promotion_config_sha256,
                 account_hash=account_hash,
-                observed_sessions=prior_sessions + 1,
-                hypothetical_orders=prior_orders + len(plan.orders),
-                unresolved_orders=unresolved,
-                external_orders=external,
-                duplicate_economic_orders=duplicate_orders,
-                duplicate_fills=duplicate_fills,
-                max_target_tracking_error=max(prior_error, current_error),
+                observed_sessions=1 if prior is None else prior.observed_sessions + 1,
+                hypothetical_orders=len(plan.orders) if prior is None else prior.hypothetical_orders + len(plan.orders),
+                unresolved_orders=int(
+                    self._database.scalar(
+                        "SELECT count(*) FROM execution_intents WHERE state IN "
+                        "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
+                    )
+                    or 0
+                ),
+                external_orders=self._external_order_count(),
+                duplicate_economic_orders=int(
+                    self._database.scalar(
+                        "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
+                        "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
+                    )
+                    or 0
+                ),
+                duplicate_fills=int(
+                    self._database.scalar(
+                        "SELECT count(*) FROM (SELECT broker_fill_id FROM fills "
+                        "GROUP BY broker_fill_id HAVING count(*) > 1)"
+                    )
+                    or 0
+                ),
+                max_target_tracking_error=max(
+                    Decimal(0) if prior is None else prior.max_target_tracking_error,
+                    Decimal(1) if plan.blockers else Decimal(0),
+                ),
                 created_at=self._now(),
             )
         )
         self._audit(
-            event_id="shadow-execution:" + decision.decision_id + ":" + plan.execution_session.isoformat(),
-            category="SHADOW_EXECUTION",
-            payload={
+            "shadow-execution:" + decision.decision_id + ":" + plan.execution_session.isoformat(),
+            "SHADOW_EXECUTION",
+            {
                 "schema": "firmquant.shadow-execution.v1",
                 "decision_id": decision.decision_id,
                 "execution_session": plan.execution_session,
@@ -908,7 +910,6 @@ class ProductionServiceHooks:
                 "blocker_count": len(plan.blockers),
                 "real_order_calls": 0,
             },
-            created_at=self._now(),
         )
 
     def _execute(self, session: date) -> int:
@@ -923,9 +924,9 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable("MULTIPLE_FROZEN_DECISIONS")
         decision = decisions[0]
         event_id = "production-execution:" + decision.decision_id + ":" + session.isoformat()
-        if self._audit_completed(event_id):
+        if self._audited(event_id):
             return 0
-        reconciliation, _snapshot, _account = self._reconcile(ReconciliationKind.INTRADAY)
+        reconciliation, _, _ = self._reconcile(ReconciliationKind.INTRADAY)
         facts = self._execution_facts(decision)
         if facts.broker_snapshot.session_date != session or facts.market_status is not MarketSessionStatus.OPEN:
             raise ProductionServicesUnavailable("EXECUTION_MARKET_FACT_INVALID")
@@ -933,9 +934,9 @@ class ProductionServiceHooks:
         if self._settings.mode is Mode.SHADOW:
             self._shadow_execute(plan, decision)
             self._audit(
-                event_id=event_id,
-                category="PRODUCTION_EXECUTION",
-                payload={
+                event_id,
+                "PRODUCTION_EXECUTION",
+                {
                     "schema": "firmquant.production-execution.v1",
                     "decision_id": decision.decision_id,
                     "execution_session": session,
@@ -943,7 +944,6 @@ class ProductionServiceHooks:
                     "reconciliation_id": reconciliation.reconciliation_id,
                     "real_order_calls": 0,
                 },
-                created_at=self._now(),
             )
             return 1
         self._require_promotion(facts.broker_snapshot.account.account_id_hash)
@@ -953,18 +953,15 @@ class ProductionServiceHooks:
             decision=decision,
             planned={item.uquant_order_id: item for item in plan.orders},
         )
-        capability = self._capability(authorities)
         controller = LiveExecutionController(
-            capability=capability,
+            capability=self._capability(authorities),
             ledger=self._ledger,
-            fee_schedule=_fee_schedule(self._safety_manifest),
+            fee_schedule=_fee_schedule(self._safety),
             clock=self._clock,
             window_policy=ExecutionWindowPolicy(
                 sell_window=timedelta(seconds=self._settings.execution.sell_window_seconds),
                 buy_window=timedelta(seconds=self._settings.execution.buy_window_seconds),
-                minimum_order_lifetime=timedelta(
-                    seconds=self._settings.execution.min_order_lifetime_seconds
-                ),
+                minimum_order_lifetime=timedelta(seconds=self._settings.execution.min_order_lifetime_seconds),
                 poll_interval=timedelta(seconds=self._settings.execution.poll_interval_seconds),
             ),
         )
@@ -972,58 +969,54 @@ class ProductionServiceHooks:
         self._real_order_calls += result.submit_calls + result.cancel_calls
         if result.unresolved_unknown or result.negative_cash:
             raise ProductionServicesUnavailable("LIVE_EXECUTION_SAFETY_FAILURE")
-        output = canonical_sha256(
-            {
-                "plan_id": result.plan_id,
-                "outcomes": [
-                    {
-                        "uquant_order_id": item.uquant_order_id,
-                        "execution_id": item.execution_id,
-                        "broker_order_id": item.broker_order_id,
-                        "reason_code": item.reason_code,
-                        "final_state": item.final_state,
-                        "filled_shares": item.filled_shares,
-                    }
-                    for item in result.outcomes
-                ],
-                "submit_calls": result.submit_calls,
-                "cancel_calls": result.cancel_calls,
-            }
-        )
         self._audit(
-            event_id=event_id,
-            category="PRODUCTION_EXECUTION",
-            payload={
+            event_id,
+            "PRODUCTION_EXECUTION",
+            {
                 "schema": "firmquant.production-execution.v1",
                 "decision_id": decision.decision_id,
                 "execution_session": session,
                 "mode": self._settings.mode,
                 "reconciliation_id": reconciliation.reconciliation_id,
-                "result_sha256": output,
+                "result_sha256": canonical_sha256(
+                    {
+                        "plan_id": result.plan_id,
+                        "outcomes": [
+                            {
+                                "uquant_order_id": item.uquant_order_id,
+                                "execution_id": item.execution_id,
+                                "broker_order_id": item.broker_order_id,
+                                "reason_code": item.reason_code,
+                                "final_state": item.final_state,
+                                "filled_shares": item.filled_shares,
+                            }
+                            for item in result.outcomes
+                        ],
+                    }
+                ),
                 "submit_calls": result.submit_calls,
                 "cancel_calls": result.cancel_calls,
             },
-            created_at=self._now(),
         )
         return 1
 
     def _eod(self, session: date) -> int:
         event_id = "production-eod:" + session.isoformat()
-        if self._audit_completed(event_id):
+        if self._audited(event_id):
             return 0
-        receipt, _snapshot, _account = self._reconcile(ReconciliationKind.EOD)
+        receipt, _, _ = self._reconcile(ReconciliationKind.EOD)
         report = DatabaseDailyReportBuilder(self._database, clock=self._clock).build(session)
         rendered = DailyReportRenderer().write(report, self._settings.paths.report_directory)
         backup = backup_state(
             self._database,
             self._settings.paths.backup_directory,
-            account_state_path=self._account_repository.path,
+            account_state_path=self._accounts.path,
             created_at=self._now(),
         )
         self._audit(
-            event_id=event_id,
-            category="PRODUCTION_EOD",
-            payload={
+            event_id,
+            "PRODUCTION_EOD",
+            {
                 "schema": "firmquant.production-eod.v1",
                 "session": session,
                 "reconciliation_id": receipt.reconciliation_id,
@@ -1031,7 +1024,6 @@ class ProductionServiceHooks:
                 "backup_id": backup.backup_id,
                 "backup_manifest_sha256": backup.manifest_sha256,
             },
-            created_at=self._now(),
         )
         return 1
 
@@ -1046,10 +1038,10 @@ class ProductionServiceHooks:
             self.halt("CALENDAR_COVERAGE_EXPIRED")
             raise ProductionServicesUnavailable("CALENDAR_COVERAGE_EXPIRED") from error
         if not trading:
-            return ProductionCycleResult(decisions=0, executions=0, eod=0)
-        status = self._broker.query_market_status()
+            return ProductionCycleResult(0, 0, 0)
+        market_status = self._broker.query_market_status()
         decisions = executions = eod = 0
-        if status is MarketSessionStatus.OPEN:
+        if market_status is MarketSessionStatus.OPEN:
             self._transition(RuntimeState.EXECUTING, reason="next-session execution")
             try:
                 executions = self._execute(session)
@@ -1057,7 +1049,7 @@ class ProductionServiceHooks:
                 self.halt("EXECUTION_STEP_FAILED")
                 raise
             self._transition(RuntimeState.READY, reason="execution step completed")
-        elif status is MarketSessionStatus.CLOSED and shanghai.time() >= _POST_CLOSE:
+        elif market_status is MarketSessionStatus.CLOSED and shanghai.time() >= _POST_CLOSE:
             self._transition(RuntimeState.RECONCILING, reason="end-of-day reconciliation")
             try:
                 eod = self._eod(session)
@@ -1072,12 +1064,11 @@ class ProductionServiceHooks:
                 self.halt("POST_CLOSE_DECISION_FAILED")
                 raise
             self._transition(RuntimeState.READY, reason="post-close strategy decision completed")
-        return ProductionCycleResult(decisions=decisions, executions=executions, eod=eod)
+        return ProductionCycleResult(decisions, executions, eod)
 
     def heartbeat(self, heartbeat: ProductionHeartbeat) -> None:
         if not isinstance(heartbeat, ProductionHeartbeat):
             raise TypeError("production heartbeat must be typed")
-        self._latest_heartbeat = heartbeat
 
     def halt(self, reason_code: str) -> None:
         reason = reason_code if isinstance(reason_code, str) and reason_code else "PRODUCTION_HALTED"
@@ -1091,15 +1082,14 @@ class ProductionServiceHooks:
             blockers=(reason,),
         )
         self._audit(
-            event_id=_hash_event("production-halt", {"reason": reason, "at": self._now()}),
-            category="RUNTIME",
-            payload={
+            _hash_event("production-halt", {"reason": reason, "at": self._now()}),
+            "RUNTIME",
+            {
                 "schema": "firmquant.production-halt.v1",
                 "mode": self._settings.mode,
                 "state": RuntimeState.HALTED,
                 "reason": reason,
             },
-            created_at=self._now(),
         )
 
     def real_order_calls(self) -> int:
@@ -1145,17 +1135,15 @@ def build_production_runtime(
     if source_checkout is None or manifest_path is None:
         raise ProductionServicesUnavailable("PRODUCTION_IDENTITY_PATHS_MISSING")
     source_checkout = source_checkout.resolve(strict=True)
-    safety_manifest = XtQuantSafetyManifest.load(manifest_path)
-    identity = StrategyIdentity.locked()
-    identity.verify()
-    firmquant_commit = current_clean_firmquant_commit()
-    config_digest = configuration_sha256(config_path)
+    safety = XtQuantSafetyManifest.load(manifest_path)
+    strategy_identity = StrategyIdentity.locked()
+    strategy_identity.verify()
     runtime_identity = _RuntimeIdentity(
-        firmquant_commit=firmquant_commit,
-        uquant_commit=identity.uquant_commit,
-        config_sha256=config_digest,
+        firmquant_commit=current_clean_firmquant_commit(),
+        uquant_commit=strategy_identity.uquant_commit,
+        config_sha256=configuration_sha256(config_path),
         promotion_config_sha256=promotion_config_sha256(settings),
-        safety_manifest_sha256=safety_manifest.sha256,
+        safety_manifest_sha256=safety.sha256,
     )
     calendar = load_trading_calendar_manifest(settings.paths.data_directory / _CALENDAR_FILE)
     broker = build_production_xtquant_gateway(
@@ -1171,50 +1159,47 @@ def build_production_runtime(
         root=settings.paths.data_directory,
         provider=OfficialXtQuantDailyHistoryProvider(
             xtdata=xtdata,
-            volume_multipliers=safety_manifest.volume_multipliers,
+            volume_multipliers=safety.volume_multipliers,
         ),
     )
-    universe_policy = UniversePolicy.from_uquant(configured_symbols=None)
-    engine = _load_engine(source_checkout, settings.paths.data_directory)
-    strategy_adapter = StrategyAdapter(
-        engine=engine,
-        database=writer.database,
-        source_checkout=source_checkout,
-        universe_policy=universe_policy,
-    )
+    universe = UniversePolicy.from_uquant(configured_symbols=None)
     account_repository = RuntimeAccountRepository(
         database=writer.database,
         path=settings.paths.state_directory / _ACCOUNT_FILE,
         clock=clock,
     )
-    event_pump = DomainEventPump(capacity=4096, clock=clock)
+    strategy = StrategyAdapter(
+        engine=_load_engine(source_checkout, settings.paths.data_directory),
+        database=writer.database,
+        source_checkout=source_checkout,
+        universe_policy=universe,
+    )
+    pump = DomainEventPump(capacity=4096, clock=clock)
     hooks = ProductionServiceHooks(
+        config_path=config_path.resolve(),
         settings=settings,
         writer=writer,
         broker=broker,
         calendar=calendar,
         account_repository=account_repository,
         data_updater=data_updater,
-        strategy_adapter=strategy_adapter,
-        universe_policy=universe_policy,
+        strategy_adapter=strategy,
+        universe_policy=universe,
         event_journal=ProductionEventJournal(writer.database),
         identity=runtime_identity,
-        safety_manifest=safety_manifest,
+        safety_manifest=safety,
         clock=clock,
     )
-    # Preserve the exact config path used to form the runtime identity.
-    object.__setattr__(hooks, "_config_path_value", config_path.resolve())
-    hooks._config_path = config_path.resolve()  # type: ignore[misc,assignment]
     stop = _StopFlag()
     _install_stop_handlers(stop)
     return ProductionDaemon(
         mode=settings.mode,
         writer=writer,
         broker=broker,
-        pump=event_pump,
+        pump=pump,
         hooks=hooks,
         clock=clock,
-        sleep=lambda seconds: __import__("time").sleep(seconds),
+        sleep=time_module.sleep,
         stop_requested=stop,
         poll_interval=timedelta(seconds=1),
         renew_interval=timedelta(seconds=10),
