@@ -1,4 +1,4 @@
-name: Temporary mypy diagnostic
+name: Temporary mypy remediation
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  diagnose:
-    if: ${{ !startsWith(github.event.head_commit.message, 'diag(auto):') }}
+  remediate:
+    if: ${{ !startsWith(github.event.head_commit.message, 'fix(auto):') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -22,16 +22,30 @@ jobs:
         with:
           version: "0.11.33"
       - run: uv sync --frozen --extra dev
-      - name: Capture strict mypy output
+      - name: Apply the two strict-mypy remediations
         shell: bash
         run: |
-          set +e
-          uv run mypy src tests > .mypy-diagnostic.txt 2>&1
-          status=$?
-          set -e
-          printf '\nmypy_exit_code=%s\n' "$status" >> .mypy-diagnostic.txt
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/firmquant/broker/xtquant_production.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace("from typing import cast\n", "")
+          text = text.replace(
+              "return value if is_client_order_tag(value) else None",
+              "return value if isinstance(value, str) and is_client_order_tag(value) else None",
+          )
+          text = text.replace(
+              "sink = cast(BrokerEventSink | None, self._sink)",
+              "sink = self._sink",
+          )
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          uv run ruff format src/firmquant/broker/xtquant_production.py
+          uv run ruff check src/firmquant/broker/xtquant_production.py
+          uv run mypy src scripts
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .mypy-diagnostic.txt
-          git commit -m "diag(auto): capture mypy output"
+          git add src/firmquant/broker/xtquant_production.py
+          git commit -m "fix(auto): satisfy strict mypy for production broker"
           git push origin HEAD:${GITHUB_REF_NAME}
