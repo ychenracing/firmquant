@@ -301,11 +301,7 @@ class ManifestXtQuantSafetyProvider(XtQuantSafetyFactProvider):
             return Money(value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP))
 
         commission = rounded(max(self._manifest.minimum_commission, gross * self._manifest.commission_rate))
-        stamp = rounded(
-            gross * self._manifest.stamp_duty_rate
-            if order_type == stock_sell
-            else Decimal(0)
-        )
+        stamp = rounded(gross * self._manifest.stamp_duty_rate if order_type == stock_sell else Decimal(0))
         transfer = rounded(gross * self._manifest.transfer_fee_rate)
         return XtQuantFeeBreakdown(
             commission=commission,
