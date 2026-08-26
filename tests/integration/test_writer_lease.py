@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from firmquant.persistence.database import Database
-from firmquant.persistence.writer_lease import WriterLease, WriterLeaseBusy
+from firmquant.persistence.writer_lease import (
+    WriterLease,
+    WriterLeaseBusy,
+    WriterLeaseLost,
+)
 
 
 def test_second_writer_is_rejected_and_release_allows_takeover(tmp_path: Path) -> None:
@@ -39,9 +43,27 @@ def test_writer_lease_renewal_advances_expiry_and_generation_is_stable(tmp_path:
         original_expiry = lease.expires_at
         current = now + timedelta(seconds=10)
         lease.renew()
+        lease.assert_current()
 
         assert lease.expires_at > original_expiry
         assert lease.generation == 1
+    finally:
+        lease.release()
+
+
+def test_expired_writer_lease_cannot_authorize_workflow_writes(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 25, 1, tzinfo=UTC)
+    current = now
+    lease = WriterLease.acquire(
+        tmp_path / "firmquant.sqlite3",
+        owner="one",
+        ttl=timedelta(seconds=5),
+        clock=lambda: current,
+    )
+    try:
+        current = now + timedelta(seconds=5)
+        with pytest.raises(WriterLeaseLost, match="expired"):
+            lease.assert_current()
     finally:
         lease.release()
 

@@ -50,9 +50,7 @@ def _acquire_file_lock(handle: BinaryIO) -> str:
             msvcrt_module.locking(handle.fileno(), msvcrt_module.LK_NBLCK, 1)
             return "msvcrt"
         fcntl_module = cast(_FcntlContract, _module("fcntl"))
-        fcntl_module.flock(
-            handle.fileno(), fcntl_module.LOCK_EX | fcntl_module.LOCK_NB
-        )
+        fcntl_module.flock(handle.fileno(), fcntl_module.LOCK_EX | fcntl_module.LOCK_NB)
         return "fcntl"
     except OSError as exc:
         raise WriterLeaseBusy("account writer lease is already held by another instance") from exc
@@ -212,6 +210,31 @@ class WriterLease:
     @property
     def active(self) -> bool:
         return self._active
+
+    def assert_current(self) -> None:
+        """Prove this exact, unexpired generation still owns database writes."""
+
+        if not self._active:
+            raise WriterLeaseLost("writer lease is no longer active")
+        now = _aware_now(self._clock)
+        row = self.database.query_one(
+            """
+            SELECT owner_id, host_hash, process_id, generation, expires_at
+            FROM writer_leases WHERE singleton_id = 1
+            """
+        )
+        if row is None or (
+            str(row["owner_id"]) != self.owner
+            or str(row["host_hash"]) != self.host_hash
+            or int(row["process_id"]) != self.process_id
+            or int(row["generation"]) != self.generation
+        ):
+            raise WriterLeaseLost("writer lease generation or owner changed")
+        observed_expiry = datetime.fromisoformat(str(row["expires_at"]))
+        if observed_expiry.tzinfo is None or observed_expiry.utcoffset() is None:
+            raise WriterLeaseLost("stored writer lease expiry is not timezone-aware")
+        if now >= observed_expiry:
+            raise WriterLeaseLost("writer lease expired")
 
     def renew(self) -> None:
         if not self._active:
