@@ -1,0 +1,46 @@
+name: Temporary pytest diagnostic
+
+on:
+  push:
+    branches:
+      - codex/production-live-hardening-20260826
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: ${{ !startsWith(github.event.head_commit.message, 'diag(auto):') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ychenracing/uquant
+          ref: 105695aacd3d1c7e62705f64188da88d202db4cd
+          path: .uquant-source
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.11.33"
+      - run: uv sync --frozen --extra dev
+      - name: Capture failing tests
+        env:
+          FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
+        shell: bash
+        run: |
+          set +e
+          uv run pytest -q --tb=short > .pytest-diagnostic.txt 2>&1
+          status=$?
+          set -e
+          tail -n 250 .pytest-diagnostic.txt > .pytest-tail.txt
+          printf '\npytest_exit_code=%s\n' "$status" >> .pytest-tail.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .pytest-tail.txt
+          git commit -m "diag(auto): capture pytest failures"
+          git push origin HEAD:${GITHUB_REF_NAME}
