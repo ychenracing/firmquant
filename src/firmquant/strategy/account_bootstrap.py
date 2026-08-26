@@ -126,12 +126,17 @@ class AccountBootstrapService:
             code="DATABASE_STATE_INVALID",
         ):
             raise AccountBootstrapDenied("ACTIVE_ARM_LEASE_PRESENT")
-        for table in ("decision_snapshots", "execution_intents", "broker_orders", "fills"):
-            if self._count(
-                self._database.scalar(f"SELECT count(*) FROM {table}"),
-                code="DATABASE_STATE_INVALID",
-            ):
-                raise AccountBootstrapDenied("ACCOUNT_ECONOMIC_HISTORY_PRESENT")
+        economic_history = sum(
+            self._count(self._database.scalar(query), code="DATABASE_STATE_INVALID")
+            for query in (
+                "SELECT count(*) FROM decision_snapshots",
+                "SELECT count(*) FROM execution_intents",
+                "SELECT count(*) FROM broker_orders",
+                "SELECT count(*) FROM fills",
+            )
+        )
+        if economic_history:
+            raise AccountBootstrapDenied("ACCOUNT_ECONOMIC_HISTORY_PRESENT")
         if self._count(
             self._database.scalar(
                 "SELECT count(*) FROM account_operations WHERE stage != 'RECEIPT_COMMITTED'"
