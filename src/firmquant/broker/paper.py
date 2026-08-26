@@ -373,6 +373,17 @@ class PaperBroker:
             "paper state advanced but callback delivery failed; reconcile before retry"
         ) from error
 
+    def _order_session(self, command: BrokerOrderCommand) -> date:
+        quote = self._quotes.get(command.symbol)
+        instrument = self._instruments.get(command.symbol)
+        if quote is not None:
+            return quote.session_date
+        if instrument is not None:
+            return instrument.session_date
+        raise BrokerFactUnavailable(
+            f"paper cannot assert an order session without market facts: {command.symbol}"
+        )
+
     def _order_payload(
         self,
         *,
@@ -382,17 +393,9 @@ class PaperBroker:
         filled_shares: int,
         sequence: int,
         event_time: datetime,
+        session_date: date | None = None,
     ) -> dict[str, object]:
-        quote = self._quotes.get(command.symbol)
-        instrument = self._instruments.get(command.symbol)
-        if quote is not None:
-            session_date = quote.session_date
-        elif instrument is not None:
-            session_date = instrument.session_date
-        else:
-            raise BrokerFactUnavailable(
-                f"paper cannot assert an order session without market facts: {command.symbol}"
-            )
+        resolved_session = self._order_session(command) if session_date is None else session_date
         return {
             "broker_order_id": broker_order_id,
             "client_order_id": command.client_order_id,
@@ -403,7 +406,7 @@ class PaperBroker:
             "requested_shares": command.requested_shares.value,
             "filled_shares": filled_shares,
             "limit_price": command.limit_price.canonical,
-            "session_date": session_date.isoformat(),
+            "session_date": resolved_session.isoformat(),
             "event_time": event_time.isoformat(),
             "event_sequence": sequence,
         }
@@ -416,6 +419,7 @@ class PaperBroker:
         status: BrokerOrderStatus,
         filled_shares: int,
         reason_code: str,
+        session_date: date | None = None,
     ) -> BrokerOrderFact:
         now = self._clock()
         payload = self._order_payload(
@@ -425,6 +429,7 @@ class PaperBroker:
             filled_shares=filled_shares,
             sequence=self._next_sequence(),
             event_time=now,
+            session_date=session_date,
         )
         fact = normalize_order(payload, received_at=now)
         self._orders[broker_order_id] = fact
@@ -498,6 +503,7 @@ class PaperBroker:
             if self._command_fingerprints[existing_id] != fingerprint:
                 raise DomainValidationError("paper idempotency key identity collision")
             return self._orders[existing_id]
+        session_date = self._order_session(command)
         broker_order_id = _stable_id("paper-order-", command.idempotency_key)
         self._idempotency_orders[command.idempotency_key] = broker_order_id
         self._commands[broker_order_id] = command
@@ -511,6 +517,7 @@ class PaperBroker:
                 status=BrokerOrderStatus.REJECTED,
                 filled_shares=0,
                 reason_code=rejection,
+                session_date=session_date,
             )
             self._raise_callback_error()
             return rejected_order
@@ -520,6 +527,7 @@ class PaperBroker:
             status=BrokerOrderStatus.ACKNOWLEDGED,
             filled_shares=0,
             reason_code="ACKNOWLEDGED",
+            session_date=session_date,
         )
         match_result = self.match(broker_order_id)
         self._raise_callback_error()

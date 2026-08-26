@@ -225,8 +225,19 @@ def test_submission_requires_all_authoritative_market_facts() -> None:
     broker._instruments.clear()  # type: ignore[attr-defined]
     broker._quotes.clear()  # type: ignore[attr-defined]
     broker.connect()
-    with pytest.raises(BrokerFactUnavailable, match="without market facts"):
-        broker.submit_order(order_command(identity="missing-all-market-facts"))
+    missing_facts_command = order_command(identity="missing-all-market-facts")
+    state_before = broker.state_sha256
+    sequence_before = broker._event_sequence  # type: ignore[attr-defined]
+    for _ in range(2):
+        with pytest.raises(BrokerFactUnavailable, match="without market facts"):
+            broker.submit_order(missing_facts_command)
+    assert broker.query_orders() == ()
+    assert broker.state_sha256 == state_before
+    assert broker._event_sequence == sequence_before  # type: ignore[attr-defined]
+    assert broker._idempotency_orders == {}  # type: ignore[attr-defined]
+    assert broker._commands == {}  # type: ignore[attr-defined]
+    assert broker._command_fingerprints == {}  # type: ignore[attr-defined]
+    assert broker._match_counts == {}  # type: ignore[attr-defined]
 
     assert (
         _submit_reason(

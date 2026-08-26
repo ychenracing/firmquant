@@ -50,6 +50,8 @@ jobs:
         run: uv run ruff format --check .
       - name: Strict mypy
         run: uv run mypy src scripts
+      - name: Repository secret scan
+        run: uv run python scripts/secret_scan.py
       - name: Checkout locked uquant source for Linux coverage
         if: runner.os == 'Linux'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -70,8 +72,6 @@ jobs:
         run: uv run python -m compileall -q src scripts tests
       - name: Documentation and CLI contract
         run: uv run python scripts/check_docs.py
-      - name: Repository secret scan
-        run: uv run python scripts/secret_scan.py
 
   uquant-parity:
     name: Exact uquant source parity
