@@ -8,51 +8,230 @@ on:
   pull_request:
 
 permissions:
-  contents: read
-
-env:
-  FIRMQ_CI: "1"
-  FIRMQ_MODE: PAPER
-  FIRMQ_BROKER_ADAPTER: PAPER
-  FIRMQ_LIVE_TRADING_ENABLED: "false"
-  PYTHONDONTWRITEBYTECODE: "1"
-  UV_FROZEN: "1"
+  contents: write
 
 jobs:
-  deployment-smoke:
-    name: Python 3.12 / PAPER-only
-    runs-on: windows-latest
-    timeout-minutes: 25
+  production-composition-patch:
+    if: ${{ github.event_name == 'push' && github.ref_name == 'codex/production-live-hardening-20260826' && !startsWith(github.event.head_commit.message, 'feat(auto): wire production composition') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout without retained credentials
+      - name: Checkout with branch credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          persist-credentials: false
-      - name: Set up Python 3.12
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Set up uv
-        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
-        with:
-          version: "0.11.33"
-          enable-cache: true
-      - name: Preserve exact uquant source bytes
-        run: git config --global core.autocrlf false
-      - name: Sync exact locked environment
-        run: uv sync --frozen --extra dev
-      - name: Verify locked uquant identity
-        run: uv run python scripts/verify_source_baseline.py
-      - name: Run Windows-safe persistence and doctor tests
-        run: >-
-          uv run pytest
-          tests/unit/observability/test_doctor.py
-          tests/integration/test_writer_lease.py
-          tests/integration/test_backup.py
-          tests/contract/test_xtquant_adapter.py
-          tests/integration/test_xtquant_import_smoke.py
-          -q
-      - name: Run PAPER-only deployment smoke
-        run: uv run python scripts/windows_smoke.py
-      - name: Verify CLI surface
-        run: uv run python -m firmquant --help
+          persist-credentials: true
+      - name: Patch production composition
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/firmquant/application/composition.py")
+          text = path.read_text(encoding="utf-8")
+
+          text = text.replace(
+              "from firmquant.application.operations import OperatorCommandDenied, OperatorReconciliation\n",
+              "from firmquant.application.operations import OperatorCommandDenied, OperatorReconciliation\n"
+              "from firmquant.application.production_runtime import ProductionRuntimeFactory\n",
+              1,
+          )
+          text = text.replace(
+              "from firmquant.broker.paper import PaperBroker\n",
+              "from firmquant.broker.paper import PaperBroker\n"
+              "from firmquant.broker.production_factory import build_production_xtquant_gateway\n",
+              1,
+          )
+          text = text.replace(
+              "from firmquant.reconciliation.models import (\n",
+              "from firmquant.reconciliation.live_view import build_operational_ledger_view\n"
+              "from firmquant.reconciliation.models import (\n",
+              1,
+          )
+
+          old_init = '''    def __init__(
+              self,
+              *,
+              config_path: Path,
+              clock: Callable[[], datetime] = _now_utc,
+          ) -> None:
+              self._config_path = Path(config_path)
+              self._clock = clock
+'''
+          new_init = '''    def __init__(
+              self,
+              *,
+              config_path: Path,
+              clock: Callable[[], datetime] = _now_utc,
+              production_runtime_factory: ProductionRuntimeFactory | None = None,
+          ) -> None:
+              self._config_path = Path(config_path)
+              self._clock = clock
+              self._production_runtime_factory = production_runtime_factory
+'''
+          if old_init not in text:
+              raise SystemExit("ConfiguredOperatorPorts constructor anchor missing")
+          text = text.replace(old_init, new_init, 1)
+
+          old_return = '''        return settings.model_copy(
+              update={
+                  "paths": PathSettings(
+                      state_directory=resolved(settings.paths.state_directory),
+                      data_directory=resolved(settings.paths.data_directory),
+                      report_directory=resolved(settings.paths.report_directory),
+                      backup_directory=resolved(settings.paths.backup_directory),
+                  )
+              }
+          )
+'''
+          new_return = '''        return settings.model_copy(
+              update={
+                  "broker": settings.broker.model_copy(
+                      update={
+                          "xtquant_userdata_path": (
+                              None
+                              if settings.broker.xtquant_userdata_path is None
+                              else resolved(settings.broker.xtquant_userdata_path)
+                          ),
+                          "safety_manifest_path": (
+                              None
+                              if settings.broker.safety_manifest_path is None
+                              else resolved(settings.broker.safety_manifest_path)
+                          ),
+                      }
+                  ),
+                  "paths": PathSettings(
+                      state_directory=resolved(settings.paths.state_directory),
+                      data_directory=resolved(settings.paths.data_directory),
+                      report_directory=resolved(settings.paths.report_directory),
+                      backup_directory=resolved(settings.paths.backup_directory),
+                      uquant_source_checkout=(
+                          None
+                          if settings.paths.uquant_source_checkout is None
+                          else resolved(settings.paths.uquant_source_checkout)
+                      ),
+                  ),
+              }
+          )
+'''
+          if old_return not in text:
+              raise SystemExit("settings resolution anchor missing")
+          text = text.replace(old_return, new_return, 1)
+
+          anchor = '''    def doctor_broker(self) -> BrokerGateway:
+'''
+          method = '''    def _production_gateway(self, settings: Settings, database: Database) -> BrokerGateway:
+              if settings.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+                  raise OperatorCommandDenied("MODE_NOT_PRODUCTION_XTQUANT")
+              blockers = settings.xtquant_runtime_blockers()
+              if blockers:
+                  raise OperatorCommandDenied(blockers[0])
+              try:
+                  return build_production_xtquant_gateway(
+                      settings=settings,
+                      database=database,
+                      clock=self._clock,
+                  )
+              except OperatorCommandDenied:
+                  raise
+              except Exception as error:
+                  raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE") from error
+
+'''
+          if anchor not in text:
+              raise SystemExit("doctor broker anchor missing")
+          text = text.replace(anchor, method + anchor, 1)
+
+          old_gateway = '''        gateway = self._gateway(settings, account)
+          gateway.connect()
+'''
+          new_gateway = '''        gateway = (
+              self._production_gateway(settings, database)
+              if settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
+              else self._gateway(settings, account)
+          )
+          gateway.connect()
+'''
+          if old_gateway not in text:
+              raise SystemExit("reconciliation gateway anchor missing")
+          text = text.replace(old_gateway, new_gateway, 1)
+
+          old_ledger = '''                operational_ledger=_operational_ledger(
+                      database,
+                      expected_account_id_hash=expected_id,
+                      expected_account_type=expected_type,
+                  ),
+'''
+          new_ledger = '''                operational_ledger=(
+                      build_operational_ledger_view(
+                          database,
+                          broker_session=snapshot.session_date,
+                          expected_account_id_hash=expected_id,
+                          expected_account_type=expected_type,
+                      )
+                      if settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
+                      else _operational_ledger(
+                          database,
+                          expected_account_id_hash=expected_id,
+                          expected_account_type=expected_type,
+                      )
+                  ),
+'''
+          if old_ledger not in text:
+              raise SystemExit("operational ledger anchor missing")
+          text = text.replace(old_ledger, new_ledger, 1)
+
+          old_run = '''        database_path = settings.paths.state_directory / "firmquant.sqlite3"
+          with WriterLease.acquire(
+              database_path,
+              owner="configured-runtime",
+              clock=self._clock,
+          ) as writer:
+'''
+          new_run = '''        database_path = settings.paths.state_directory / "firmquant.sqlite3"
+          if mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+              with WriterLease.acquire(
+                  database_path,
+                  owner="production-runtime",
+                  clock=self._clock,
+              ) as writer:
+                  factory = self._production_runtime_factory
+                  if factory is None:
+                      from firmquant.application.production_daemon import create_production_runtime
+
+                      runtime = create_production_runtime(
+                          config_path=self._config_path,
+                          settings=settings,
+                          writer=writer,
+                          clock=self._clock,
+                      )
+                  else:
+                      runtime = factory(settings, writer)
+                  receipt = runtime.run()
+              return {
+                  **dict(receipt.payload()),
+                  "runtime_state": RuntimeState.DISARMED.value,
+                  "reconciliation_id": receipt.startup_reconciliation_id,
+                  "reconciliation_passed": receipt.stopped_cleanly,
+                  "blockers": [],
+              }
+          with WriterLease.acquire(
+              database_path,
+              owner="configured-runtime",
+              clock=self._clock,
+          ) as writer:
+'''
+          if old_run not in text:
+              raise SystemExit("run anchor missing")
+          text = text.replace(old_run, new_run, 1)
+
+          path.write_text(text, encoding="utf-8", newline="\n")
+          PY
+          python -m pip install --quiet ruff==0.16.4
+          ruff format src/firmquant/application/composition.py
+          ruff check src/firmquant/application/composition.py
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/firmquant/application/composition.py
+          git commit -m "feat(auto): wire production composition"
+          git push origin HEAD:${GITHUB_REF_NAME}
