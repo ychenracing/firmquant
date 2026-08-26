@@ -16,7 +16,7 @@ from firmquant.strategy.account_prepare import PreparedAccountSync
 from firmquant.strategy.account_sync import AccountStateContract
 
 from .account_preflight import AccountPreflightResult, evaluate_account_preflight
-from .models import OperationalLedgerView, ReconciliationFacts, ReconciliationKind
+from .models import OperationalLedgerView, ReconciliationFacts, ReconciliationKind, ReconciliationReceipt
 
 
 class _AccountStore(Protocol):
@@ -24,7 +24,8 @@ class _AccountStore(Protocol):
 
 
 class _AccountRepository(Protocol):
-    store: _AccountStore
+    @property
+    def store(self) -> _AccountStore: ...
 
     def load(self) -> AccountStateContract: ...
 
@@ -33,18 +34,12 @@ class _AccountRepository(Protocol):
     def commit_broker_snapshot(self, prepared: PreparedAccountSync) -> str: ...
 
 
-class _ReconciliationReceipt(Protocol):
-    reconciliation_id: str
-    passed: bool
-    blockers: tuple[str, ...]
-
-
 class _Reconciler(Protocol):
     def run(
         self,
         kind: ReconciliationKind,
         facts: ReconciliationFacts,
-    ) -> _ReconciliationReceipt: ...
+    ) -> ReconciliationReceipt: ...
 
 
 class AccountReconciliationBlocked(RuntimeError):
@@ -64,7 +59,7 @@ class AccountReconciliationBlocked(RuntimeError):
 class AccountReconciliationResult:
     """Outcome of one authoritative broker/account reconciliation cycle."""
 
-    receipt: _ReconciliationReceipt
+    receipt: ReconciliationReceipt
     account: AccountStateContract
     preflight: AccountPreflightResult
     account_before_sha256: str
