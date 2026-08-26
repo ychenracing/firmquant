@@ -3,20 +3,28 @@
 This module compares the broker snapshot with the current uquant AccountState
 *before* broker facts are allowed to mutate the strategy account. Only
 firmquant-owned, durably mapped and ingested broker fills may explain an
-account delta. Everything else remains an external fact and blocks adoption.
+account delta. Exact reviewed cash differences may be adopted; reviewed
+position differences still require an explicit reviewed AccountState so that
+firmquant never invents strategy lifecycle or lot semantics.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Protocol, cast
 
 from firmquant.domain.broker_facts import BrokerOrderFact, BrokerSnapshot, FillStatus, Side
 from firmquant.domain.errors import DomainTypeError, DomainValidationError
-from firmquant.domain.values import Money
-from firmquant.persistence.account_authority import AccountBinding
+from firmquant.domain.values import Money, Symbol
+from firmquant.persistence.account_authority import (
+    AccountBinding,
+    AdjustmentCoverage,
+    ReviewedAccountAdjustmentRepository,
+)
+from firmquant.persistence.repositories import canonical_sha256
 
 from .models import OperationalLedgerView, OperationalOrderView
 
@@ -46,11 +54,12 @@ class _AccountState(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AccountPreflightResult:
-    """Pure pre-sync verdict; no field carries adoption authority."""
+    """Pure pre-sync verdict; reviewed evidence never invents account semantics."""
 
     passed: bool
     blockers: tuple[str, ...]
     explained_fill_ids: tuple[str, ...]
+    reviewed_adjustment_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.passed, bool):
@@ -59,8 +68,72 @@ class AccountPreflightResult:
             raise DomainValidationError("account preflight blockers must be sorted and unique")
         if tuple(sorted(set(self.explained_fill_ids))) != self.explained_fill_ids:
             raise DomainValidationError("account preflight fill ids must be sorted and unique")
+        if tuple(sorted(set(self.reviewed_adjustment_ids))) != self.reviewed_adjustment_ids:
+            raise DomainValidationError("account preflight reviewed adjustment ids must be sorted and unique")
         if self.passed != (not self.blockers):
             raise DomainValidationError("account preflight pass result contradicts blockers")
+
+
+def _sha256(value: str, *, label: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise DomainValidationError(f"{label} must be lowercase SHA-256")
+
+
+def _difference_value(value: Decimal | int, *, label: str) -> Decimal | int:
+    if isinstance(value, bool) or not isinstance(value, (Decimal, int)):
+        raise DomainTypeError(f"{label} must be Decimal or int")
+    if isinstance(value, Decimal) and not value.is_finite():
+        raise DomainValidationError(f"{label} must be finite")
+    if value < 0:
+        raise DomainValidationError(f"{label} must be nonnegative")
+    return value
+
+
+def account_difference_sha256(
+    *,
+    account_id_hash: str,
+    symbol: Symbol | None,
+    session: date,
+    coverage: AdjustmentCoverage,
+    broker_snapshot_sha256: str,
+    expected: Decimal | int,
+    observed: Decimal | int,
+) -> str:
+    """Return the exact deterministic identity of one reviewed account delta."""
+
+    _sha256(account_id_hash, label="account difference account identity")
+    _sha256(broker_snapshot_sha256, label="account difference broker snapshot")
+    if type(session) is not date:
+        raise DomainTypeError("account difference session must be date")
+    if not isinstance(coverage, AdjustmentCoverage):
+        raise DomainTypeError("account difference coverage must be typed")
+    if symbol is not None and not isinstance(symbol, Symbol):
+        raise DomainTypeError("account difference symbol must be Symbol or None")
+    if coverage in {
+        AdjustmentCoverage.POSITION_TOTAL_SHARES,
+        AdjustmentCoverage.POSITION_SELLABLE_SHARES,
+    } and symbol is None:
+        raise DomainValidationError("position account difference requires symbol")
+    if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:
+        raise DomainValidationError("account-level difference must not carry a symbol")
+    expected_value = _difference_value(expected, label="account difference expected value")
+    observed_value = _difference_value(observed, label="account difference observed value")
+    return canonical_sha256(
+        {
+            "schema": "firmquant.account-difference.v1",
+            "account_id_hash": account_id_hash,
+            "symbol": symbol,
+            "session": session,
+            "coverage": coverage,
+            "broker_snapshot_sha256": broker_snapshot_sha256,
+            "expected": expected_value,
+            "observed": observed_value,
+        }
+    )
 
 
 def _account_cash(account: _AccountState) -> Decimal:
@@ -155,6 +228,38 @@ def _mapped_orders(
     return local_by_broker, broker_by_id
 
 
+def _matching_review_ids(
+    repository: ReviewedAccountAdjustmentRepository | None,
+    *,
+    account_id_hash: str,
+    symbol: Symbol | None,
+    session: date,
+    coverage: AdjustmentCoverage,
+    broker_snapshot_sha256: str,
+    expected: Decimal | int,
+    observed: Decimal | int,
+) -> tuple[str, ...]:
+    if repository is None:
+        return ()
+    difference_sha256 = account_difference_sha256(
+        account_id_hash=account_id_hash,
+        symbol=symbol,
+        session=session,
+        coverage=coverage,
+        broker_snapshot_sha256=broker_snapshot_sha256,
+        expected=expected,
+        observed=observed,
+    )
+    return repository.matching_ids(
+        account_id_hash=account_id_hash,
+        symbol=symbol,
+        session=session,
+        coverage=coverage,
+        broker_snapshot_sha256=broker_snapshot_sha256,
+        difference_sha256=difference_sha256,
+    )
+
+
 def evaluate_account_preflight(
     *,
     snapshot: BrokerSnapshot,
@@ -162,12 +267,14 @@ def evaluate_account_preflight(
     operational_ledger: OperationalLedgerView,
     binding: AccountBinding,
     cash_tolerance: Money,
+    reviewed_adjustments: ReviewedAccountAdjustmentRepository | None = None,
 ) -> AccountPreflightResult:
-    """Explain broker deltas only from already-owned system execution facts.
+    """Explain broker deltas only from owned execution facts or exact reviewed evidence.
 
     The function is intentionally pure: it never invokes uquant broker sync and
-    never mutates the supplied AccountState. A broker delta that cannot be
-    reproduced from the current account plus known firmquant fills is a blocker.
+    never mutates the supplied AccountState. Cash may be authorized by an exact
+    reviewed difference. Position/sellability reviews are recorded as evidence
+    but still require an explicit reviewed AccountState before adoption.
     """
 
     if not isinstance(snapshot, BrokerSnapshot):
@@ -178,17 +285,22 @@ def evaluate_account_preflight(
         raise DomainTypeError("account preflight binding must be AccountBinding")
     if not isinstance(cash_tolerance, Money):
         raise DomainTypeError("account preflight cash tolerance must be Money")
+    if reviewed_adjustments is not None and not isinstance(
+        reviewed_adjustments, ReviewedAccountAdjustmentRepository
+    ):
+        raise DomainTypeError("account preflight reviewed adjustments must be repository or None")
 
     state = cast(_AccountState, account)
     blockers: set[str] = set()
     explained_fill_ids: set[str] = set()
+    reviewed_adjustment_ids: set[str] = set()
     _compare_account_identity(snapshot, operational_ledger, binding, blockers)
 
     local_by_broker, broker_by_id = _mapped_orders(snapshot, operational_ledger, blockers)
     account_orders = _known_account_orders(state)
     account_fill_ids = _known_account_fill_ids(state)
-    session = snapshot.session_date.isoformat()
-    expected_positions = _current_positions(state, session=session)
+    session_text = snapshot.session_date.isoformat()
+    expected_positions = _current_positions(state, session=session_text)
     expected_cash = _account_cash(state)
 
     ordered_fills = sorted(
@@ -242,10 +354,24 @@ def evaluate_account_preflight(
                 if position[0] == 0:
                     expected_positions.pop(fill.symbol.canonical, None)
 
+    observed_cash = snapshot.account.available_cash.value
     if expected_cash < 0:
         blockers.add("SYSTEM_FILL_CONTRADICTS_ACCOUNT_STATE")
-    elif abs(snapshot.account.available_cash.value - expected_cash) > cash_tolerance.value:
-        blockers.add("UNEXPLAINED_CASH_CHANGE")
+    elif abs(observed_cash - expected_cash) > cash_tolerance.value:
+        cash_reviews = _matching_review_ids(
+            reviewed_adjustments,
+            account_id_hash=snapshot.account.account_id_hash,
+            symbol=None,
+            session=snapshot.session_date,
+            coverage=AdjustmentCoverage.AVAILABLE_CASH,
+            broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            expected=expected_cash,
+            observed=observed_cash,
+        )
+        if cash_reviews:
+            reviewed_adjustment_ids.update(cash_reviews)
+        else:
+            blockers.add("UNEXPLAINED_CASH_CHANGE")
 
     broker_positions = {
         position.symbol.canonical: (position.total_shares.value, position.sellable_shares.value)
@@ -254,15 +380,53 @@ def evaluate_account_preflight(
     expected_position_values = {
         symbol: (values[0], values[1]) for symbol, values in expected_positions.items() if values[0] > 0
     }
-    if broker_positions != expected_position_values:
-        blockers.update({"CORPORATE_ACTION_SUSPECTED", "UNEXPLAINED_POSITION_CHANGE"})
+    for raw_symbol in sorted(set(expected_position_values) | set(broker_positions)):
+        expected_total, expected_sellable = expected_position_values.get(raw_symbol, (0, 0))
+        observed_total, observed_sellable = broker_positions.get(raw_symbol, (0, 0))
+        symbol = Symbol.parse(raw_symbol)
+        if expected_total != observed_total:
+            position_reviews = _matching_review_ids(
+                reviewed_adjustments,
+                account_id_hash=snapshot.account.account_id_hash,
+                symbol=symbol,
+                session=snapshot.session_date,
+                coverage=AdjustmentCoverage.POSITION_TOTAL_SHARES,
+                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+                expected=expected_total,
+                observed=observed_total,
+            )
+            if position_reviews:
+                reviewed_adjustment_ids.update(position_reviews)
+                blockers.add("REVIEWED_ACCOUNT_STATE_REQUIRED")
+            blockers.update({"CORPORATE_ACTION_SUSPECTED", "UNEXPLAINED_POSITION_CHANGE"})
+            continue
+        if expected_sellable != observed_sellable:
+            sellable_reviews = _matching_review_ids(
+                reviewed_adjustments,
+                account_id_hash=snapshot.account.account_id_hash,
+                symbol=symbol,
+                session=snapshot.session_date,
+                coverage=AdjustmentCoverage.POSITION_SELLABLE_SHARES,
+                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+                expected=expected_sellable,
+                observed=observed_sellable,
+            )
+            if sellable_reviews:
+                reviewed_adjustment_ids.update(sellable_reviews)
+                blockers.add("REVIEWED_ACCOUNT_STATE_REQUIRED")
+            blockers.update({"CORPORATE_ACTION_SUSPECTED", "UNEXPLAINED_POSITION_CHANGE"})
 
     blocker_values = tuple(sorted(blockers))
     return AccountPreflightResult(
         passed=not blocker_values,
         blockers=blocker_values,
         explained_fill_ids=tuple(sorted(explained_fill_ids)),
+        reviewed_adjustment_ids=tuple(sorted(reviewed_adjustment_ids)),
     )
 
 
-__all__ = ("AccountPreflightResult", "evaluate_account_preflight")
+__all__ = (
+    "AccountPreflightResult",
+    "account_difference_sha256",
+    "evaluate_account_preflight",
+)
