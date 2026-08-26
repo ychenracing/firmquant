@@ -159,21 +159,21 @@ def _validate_series(bars: tuple[DailyBar, ...], *, label: str, allow_empty: boo
 
 def _render(bars: tuple[DailyBar, ...]) -> str:
     lines = ["date,open,high,low,close,volume,amount\n"]
-    for item in bars:
-        lines.append(
-            ",".join(
-                (
-                    item.session.isoformat(),
-                    format(item.open, "f"),
-                    format(item.high, "f"),
-                    format(item.low, "f"),
-                    format(item.close, "f"),
-                    str(item.volume),
-                    format(item.amount, "f"),
-                )
+    lines.extend(
+        ",".join(
+            (
+                item.session.isoformat(),
+                format(item.open, "f"),
+                format(item.high, "f"),
+                format(item.low, "f"),
+                format(item.close, "f"),
+                str(item.volume),
+                format(item.amount, "f"),
             )
-            + "\n"
         )
+        + "\n"
+        for item in bars
+    )
     return "".join(lines)
 
 
@@ -196,7 +196,7 @@ def _merge(existing: tuple[DailyBar, ...], incoming: tuple[DailyBar, ...], *, sy
 def _data_store(root: Path) -> _UquantDataStore:
     try:
         module = importlib.import_module("uquant.data")
-        factory = getattr(module, "DataStore")
+        factory = module.DataStore  # type: ignore[attr-defined]
         if not callable(factory):
             raise TypeError
         return cast(_UquantDataStore, factory(root))
