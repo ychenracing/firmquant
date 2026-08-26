@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -134,7 +135,7 @@ class ProductionSnapshotCollector:
         self,
         *,
         broker: ProductionSnapshotReadPort,
-        clock,
+        clock: Callable[[], datetime],
         max_attempts: int = 3,
     ) -> None:
         if not isinstance(broker, ProductionSnapshotReadPort):
@@ -169,11 +170,7 @@ class ProductionSnapshotCollector:
             if _quantity_signature(first) != _quantity_signature(second):
                 continue
             captured_at = self._clock()
-            if (
-                not isinstance(captured_at, datetime)
-                or captured_at.tzinfo is None
-                or captured_at.utcoffset() is None
-            ):
+            if captured_at.tzinfo is None or captured_at.utcoffset() is None:
                 raise ProductionSnapshotUnstable("production snapshot clock is not timezone-aware")
             payload = _snapshot_payload(second, captured_at=captured_at)
             raw_payload_sha256 = hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
