@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
@@ -30,7 +31,7 @@ class _LoadAccount(Protocol):
 def _load_account(path: Path) -> AccountStateContract:
     try:
         module = importlib.import_module("uquant.account")
-        loader = cast(_LoadAccount, module.load_account)  # type: ignore[attr-defined]
+        loader = cast(_LoadAccount, module.load_account)
         account = loader(path, require_hashes=True, allow_legacy_schema=False)
     except Exception as error:
         raise RuntimeError("uquant production account state cannot be loaded") from error
@@ -42,7 +43,13 @@ def _load_account(path: Path) -> AccountStateContract:
 class RuntimeAccountRepository:
     """Load, broker-sync, and atomically persist exactly one uquant AccountState."""
 
-    def __init__(self, *, database: Database, path: Path, clock) -> None:
+    def __init__(
+        self,
+        *,
+        database: Database,
+        path: Path,
+        clock: Callable[[], datetime],
+    ) -> None:
         if not isinstance(database, Database):
             raise TypeError("runtime account repository requires Database")
         if not isinstance(path, Path):
@@ -74,7 +81,7 @@ class RuntimeAccountRepository:
         evidence_sha256: str,
     ) -> str:
         now = self._clock()
-        if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+        if now.tzinfo is None or now.utcoffset() is None:
             raise RuntimeError("runtime account clock must be timezone-aware")
         operation = AccountOperation.begin(
             database=self._database,
