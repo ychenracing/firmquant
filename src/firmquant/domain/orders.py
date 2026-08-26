@@ -26,6 +26,7 @@ from .events import (
     OrderValidated,
     SubmitNotAccepted,
     SubmitNotAccepted,
+    SubmitNotAccepted,
     SubmitOutcomeUnknown,
     SubmitStarted,
     SupportedOrderEvent,
