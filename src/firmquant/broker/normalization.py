@@ -88,9 +88,7 @@ class BrokerOperationalFact:
         _require_aware(self.received_at, label="operational received time")
 
 
-type NormalizedBrokerEventFact = (
-    BrokerOrderFact | BrokerFillFact | QuoteFact | BrokerOperationalFact
-)
+type NormalizedBrokerEventFact = BrokerOrderFact | BrokerFillFact | QuoteFact | BrokerOperationalFact
 
 
 @dataclass(frozen=True, slots=True)
