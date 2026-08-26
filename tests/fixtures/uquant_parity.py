@@ -96,10 +96,17 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         repeated_account_unchanged = economic_state_sha256(adapted_account) == repeated_before
 
         recovery_required = False
+        unapplied = AccountState.empty(2_000_000.0)
+        recovery_request = replace(request, account=unapplied)
         try:
-            adapter.decide_once(replace(request, account=AccountState.empty(2_000_000.0)))
+            adapter.decide_once(recovery_request)
         except DecisionRecoveryRequired:
             recovery_required = True
+        recovered = adapter.recover_existing_decision(recovery_request, snapshot)
+        recovered_account_matches = (
+            economic_state_sha256(unapplied) == snapshot.account_after_sha256 == direct_account_sha256
+            and recovered.decision_id == snapshot.decision_id
+        )
 
         conflict_recorded = False
         try:
@@ -130,6 +137,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             "repeated_decision_id_equal": repeated.decision_id == snapshot.decision_id,
             "repeated_account_unchanged": repeated_account_unchanged,
             "recovery_required_for_unapplied_account": recovery_required,
+            "recovered_unapplied_account": recovered_account_matches,
             "conflict_recorded": conflict_recorded,
             "stored_payload_equal": (
                 stored is not None and stored["payload_sha256"] == snapshot.payload_sha256
