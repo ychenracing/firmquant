@@ -22,7 +22,7 @@ jobs:
         with:
           version: "0.11.33"
       - run: uv sync --frozen --extra dev
-      - name: Apply the two strict-mypy remediations
+      - name: Apply strict-mypy remediation
         shell: bash
         run: |
           python - <<'PY'
@@ -31,6 +31,7 @@ jobs:
           path = Path("src/firmquant/broker/xtquant_production.py")
           text = path.read_text(encoding="utf-8")
           text = text.replace("from typing import cast\n", "")
+          text = text.replace("    BrokerEventSink,\n", "")
           text = text.replace(
               "return value if is_client_order_tag(value) else None",
               "return value if isinstance(value, str) and is_client_order_tag(value) else None",
