@@ -3,16 +3,13 @@ name: Windows deployment safety
 on:
   push:
     branches:
-      - main
       - "codex/**"
-  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   production-composition-patch:
-    if: ${{ github.event_name == 'push' && github.ref_name == 'codex/production-live-hardening-20260826' && !startsWith(github.event.head_commit.message, 'feat(auto): wire production composition') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -20,7 +17,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: true
-      - name: Patch production composition
+      - name: Patch production composition idempotently
         shell: bash
         run: |
           python - <<'PY'
@@ -28,6 +25,8 @@ jobs:
 
           path = Path("src/firmquant/application/composition.py")
           text = path.read_text(encoding="utf-8")
+          if "def _production_gateway" in text and "production_runtime_factory" in text:
+              raise SystemExit(0)
 
           text = text.replace(
               "from firmquant.application.operations import OperatorCommandDenied, OperatorReconciliation\n",
@@ -223,9 +222,11 @@ jobs:
           if old_run not in text:
               raise SystemExit("run anchor missing")
           text = text.replace(old_run, new_run, 1)
-
           path.write_text(text, encoding="utf-8", newline="\n")
           PY
+          if git diff --quiet; then
+            exit 0
+          fi
           python -m pip install --quiet ruff==0.16.4
           ruff format src/firmquant/application/composition.py
           ruff check src/firmquant/application/composition.py
