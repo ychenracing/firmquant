@@ -12,10 +12,10 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CalendarValidationError(ValueError):
-    """Raised when a calendar manifest is malformed."""
+    """Raised when a calendar manifest or query is not authoritatively valid."""
 
 
-class CalendarCoverageError(RuntimeError):
+class CalendarCoverageError(CalendarValidationError):
     """Raised rather than guessing outside verified calendar coverage."""
 
 
