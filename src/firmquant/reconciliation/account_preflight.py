@@ -113,12 +113,19 @@ def account_difference_sha256(
         raise DomainTypeError("account difference coverage must be typed")
     if symbol is not None and not isinstance(symbol, Symbol):
         raise DomainTypeError("account difference symbol must be Symbol or None")
-    if coverage in {
-        AdjustmentCoverage.POSITION_TOTAL_SHARES,
-        AdjustmentCoverage.POSITION_SELLABLE_SHARES,
-    } and symbol is None:
+    if (
+        coverage
+        in {
+            AdjustmentCoverage.POSITION_TOTAL_SHARES,
+            AdjustmentCoverage.POSITION_SELLABLE_SHARES,
+        }
+        and symbol is None
+    ):
         raise DomainValidationError("position account difference requires symbol")
-    if coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS} and symbol is not None:
+    if (
+        coverage in {AdjustmentCoverage.AVAILABLE_CASH, AdjustmentCoverage.TOTAL_ASSETS}
+        and symbol is not None
+    ):
         raise DomainValidationError("account-level difference must not carry a symbol")
     expected_value = _difference_value(expected, label="account difference expected value")
     observed_value = _difference_value(observed, label="account difference observed value")
