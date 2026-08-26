@@ -55,11 +55,11 @@ def load_trading_calendar_manifest(path: Path) -> AuthoritativeTradingCalendar:
     if sessions != tuple(sorted(set(sessions))):
         raise ValueError("trading calendar sessions must be sorted and unique")
     return AuthoritativeTradingCalendar(
-        sessions=sessions,
-        source_name=source_name,
+        source=source_name,
         source_sha256=source_sha256,
-        covered_start=covered_start,
-        covered_end=covered_end,
+        covered_from=covered_start,
+        covered_through=covered_end,
+        trading_sessions=sessions,
     )
 
 
