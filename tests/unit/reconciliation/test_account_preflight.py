@@ -3,10 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from decimal import Decimal
 
-from firmquant.reconciliation.account_preflight import evaluate_account_preflight
-
 from firmquant.domain.values import Money, Shares
 from firmquant.persistence.account_authority import AccountBinding
+from firmquant.reconciliation.account_preflight import evaluate_account_preflight
 from firmquant.strategy.account_sync import sync_account
 from tests.fixtures.broker_snapshots import completed_buy_snapshot, open_buy_account
 from tests.fixtures.reconciliation_cases import NOW, healthy_reconciliation_facts
