@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol, cast
 
-from firmquant.domain.broker_facts import BrokerSnapshot, FillStatus, Side
+from firmquant.domain.broker_facts import BrokerOrderFact, BrokerSnapshot, FillStatus, Side
 from firmquant.domain.errors import DomainTypeError, DomainValidationError
 from firmquant.domain.values import Money
 from firmquant.persistence.account_authority import AccountBinding
 
-from .models import OperationalLedgerView
+from .models import OperationalLedgerView, OperationalOrderView
 
 
 class _AccountOrder(Protocol):
@@ -137,7 +137,7 @@ def _mapped_orders(
     snapshot: BrokerSnapshot,
     operational_ledger: OperationalLedgerView,
     blockers: set[str],
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[dict[str, OperationalOrderView], dict[str, BrokerOrderFact]]:
     local_by_broker = {order.broker_order_id: order for order in operational_ledger.orders}
     broker_by_id = {order.broker_order_id: order for order in snapshot.orders}
     for broker_order in snapshot.orders:
@@ -214,8 +214,10 @@ def evaluate_account_preflight(
             blockers.add("BROKER_FILL_IDENTITY_MISMATCH")
             continue
         uquant_order = account_orders.get(local.uquant_order_id)
-        if uquant_order is None or uquant_order.symbol != fill.symbol.canonical or (
-            uquant_order.side != fill.side.value
+        if (
+            uquant_order is None
+            or uquant_order.symbol != fill.symbol.canonical
+            or (uquant_order.side != fill.side.value)
         ):
             blockers.add("BROKER_FILL_WITHOUT_UQUANT_INTENT")
             continue
