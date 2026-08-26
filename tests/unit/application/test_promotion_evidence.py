@@ -9,7 +9,7 @@ from firmquant.application.promotion import ShadowPromotionEvidence
 def _evidence(*, sessions: int = 20, orders: int = 50) -> ShadowPromotionEvidence:
     return ShadowPromotionEvidence(
         firmquant_commit="f" * 40,
-        uquant_commit="u" * 40,
+        uquant_commit="b" * 40,
         config_sha256="c" * 64,
         account_hash="a" * 64,
         observed_sessions=sessions,
@@ -28,7 +28,7 @@ def test_shadow_promotion_requires_identity_bound_multi_session_evidence() -> No
 
     assert evidence.qualifies(
         firmquant_commit="f" * 40,
-        uquant_commit="u" * 40,
+        uquant_commit="b" * 40,
         config_sha256="c" * 64,
         account_hash="a" * 64,
         min_sessions=20,
@@ -42,7 +42,7 @@ def test_shadow_promotion_rejects_stale_identity_or_insufficient_observation() -
 
     assert not evidence.qualifies(
         firmquant_commit="f" * 40,
-        uquant_commit="u" * 40,
+        uquant_commit="b" * 40,
         config_sha256="c" * 64,
         account_hash="a" * 64,
         min_sessions=20,
@@ -51,7 +51,7 @@ def test_shadow_promotion_rejects_stale_identity_or_insufficient_observation() -
     )
     assert not _evidence().qualifies(
         firmquant_commit="0" * 40,
-        uquant_commit="u" * 40,
+        uquant_commit="b" * 40,
         config_sha256="c" * 64,
         account_hash="a" * 64,
         min_sessions=20,
