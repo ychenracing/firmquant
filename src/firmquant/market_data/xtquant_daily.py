@@ -177,7 +177,9 @@ def _render(bars: tuple[DailyBar, ...]) -> str:
     return "".join(lines)
 
 
-def _merge(existing: tuple[DailyBar, ...], incoming: tuple[DailyBar, ...], *, symbol: str) -> tuple[tuple[DailyBar, ...], int]:
+def _merge(
+    existing: tuple[DailyBar, ...], incoming: tuple[DailyBar, ...], *, symbol: str
+) -> tuple[tuple[DailyBar, ...], int]:
     _validate_series(incoming, label=symbol)
     incoming_by_session = {item.session: item for item in incoming}
     for prior in existing:
@@ -187,9 +189,7 @@ def _merge(existing: tuple[DailyBar, ...], incoming: tuple[DailyBar, ...], *, sy
                 f"SOURCE_EPOCH_RESEAL_REQUIRED:{symbol}:{prior.session.isoformat()}"
             )
     last_existing = existing[-1].session if existing else None
-    appended = tuple(
-        item for item in incoming if last_existing is None or item.session > last_existing
-    )
+    appended = tuple(item for item in incoming if last_existing is None or item.session > last_existing)
     return (*existing, *appended), len(appended)
 
 
