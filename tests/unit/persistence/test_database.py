@@ -8,6 +8,7 @@ import pytest
 from firmquant.persistence.database import (
     Database,
     DatabaseCorrupt,
+    DatabaseUnavailable,
     TransactionRequired,
 )
 
@@ -36,10 +37,7 @@ def test_explicit_transaction_rolls_back_ddl_and_data(db: Database) -> None:
         raise RuntimeError("injected failure")
 
     assert (
-        db.scalar(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'rollback_probe'"
-        )
-        == 0
+        db.scalar("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'rollback_probe'") == 0
     )
 
 
@@ -71,3 +69,30 @@ def test_closed_database_cannot_be_reused(tmp_path: Path) -> None:
 
     with pytest.raises(sqlite3.ProgrammingError):
         database.scalar("SELECT 1")
+
+
+def test_read_only_connection_verifies_existing_ledger_and_rejects_writes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "firmquant.sqlite3"
+    writer = Database.open(path)
+    writer.close()
+
+    reader = Database.open_read_only(path)
+    try:
+        assert reader.scalar("PRAGMA query_only") == 1
+        assert reader.scalar("PRAGMA foreign_keys") == 1
+        assert reader.scalar("SELECT count(*) FROM schema_migrations") == 2
+        with pytest.raises(sqlite3.OperationalError, match="readonly"), reader.transaction():
+            reader.write("DELETE FROM schema_migrations")
+    finally:
+        reader.close()
+
+
+def test_read_only_connection_never_creates_a_missing_database(tmp_path: Path) -> None:
+    path = tmp_path / "missing.sqlite3"
+
+    with pytest.raises(DatabaseUnavailable, match="read-only"):
+        Database.open_read_only(path)
+
+    assert not path.exists()

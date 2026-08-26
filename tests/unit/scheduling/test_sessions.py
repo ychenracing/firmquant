@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from firmquant.application.workflows import WorkflowOutcome
+from firmquant.config import Mode
+from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.writer_lease import WriterLease
 from firmquant.scheduling.sessions import (
@@ -216,3 +218,68 @@ def test_completed_outcome_cannot_be_silently_rewritten(writer_lease: WriterLeas
         )
 
     assert AuditLedger(writer_lease.database).verify().count == 2
+
+
+def test_persisting_halted_runtime_revokes_active_arm_lease_atomically(
+    writer_lease: WriterLease,
+) -> None:
+    store = WorkflowReceiptStore(writer_lease=writer_lease)
+    database = writer_lease.database
+    with database.transaction():
+        database.write(
+            """
+            INSERT INTO arm_leases(
+                lease_id, mode, host_hash, account_hash, firmquant_commit,
+                uquant_commit, config_sha256, identity_payload_sha256,
+                issued_at, expires_at, revoked_at, revoke_reason, lease_mac
+            ) VALUES (?, 'LIVE', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            """,
+            (
+                "arm_" + "1" * 32,
+                "a" * 64,
+                "b" * 64,
+                "c" * 40,
+                "d" * 40,
+                "e" * 64,
+                "f" * 64,
+                NOW.isoformat(),
+                datetime(2026, 8, 25, 2, 30, tzinfo=UTC).isoformat(),
+                "0" * 64,
+            ),
+        )
+    previous = RuntimeStatus.initial().transition(
+        RuntimeState.STARTING,
+        reason="startup requested",
+    )
+    store.save_runtime(
+        mode=Mode.LIVE,
+        previous=RuntimeStatus.initial(),
+        current=previous,
+        created_at=NOW,
+    )
+    halted = previous.transition(
+        RuntimeState.HALTED,
+        reason="startup failed closed",
+        blockers=("STARTUP_RECONCILIATION_FAILED",),
+    )
+
+    store.save_runtime(
+        mode=Mode.LIVE,
+        previous=previous,
+        current=halted,
+        created_at=NOW,
+    )
+
+    row = database.query_one(
+        "SELECT revoked_at, revoke_reason FROM arm_leases WHERE lease_id = ?",
+        ("arm_" + "1" * 32,),
+    )
+    assert row is not None
+    assert row["revoked_at"] == NOW.isoformat()
+    assert row["revoke_reason"] == "runtime entered HALTED"
+    assert (
+        database.scalar(
+            "SELECT count(*) FROM audit_events WHERE category = 'ARM' AND actor = 'session-coordinator'"
+        )
+        == 1
+    )

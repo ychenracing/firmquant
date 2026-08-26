@@ -16,6 +16,8 @@ from firmquant.observability.health import (
     Doctor,
     DoctorConfigurationError,
 )
+from firmquant.persistence.database import Database
+from firmquant.persistence.writer_lease import WriterLease
 from firmquant.security.secrets import SecretBytes
 
 NOW = datetime(2026, 8, 25, 8, 30, tzinfo=UTC)
@@ -149,6 +151,12 @@ def test_local_doctor_proves_paper_is_live_locked_and_uses_only_read_probes(
             backup_directory=backup_directory,
         )
     )
+    with WriterLease.acquire(
+        state_directory / "firmquant.sqlite3",
+        owner="doctor-paper-fixture",
+        clock=lambda: NOW,
+    ):
+        pass
     secret_provider = FakeSecretProvider()
     broker = ReadOnlyPaperProbe()
     doctor = Doctor.for_local_environment(
@@ -222,3 +230,37 @@ def test_broker_probe_disconnects_when_post_connect_health_read_fails(
     assert result.details == {"error_type": "RuntimeError"}
     assert broker.disconnect_calls == 1
     assert broker.connected is False
+
+
+def test_database_and_single_instance_diagnostics_never_open_a_write_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "firmquant.sqlite3"
+    with WriterLease.acquire(
+        database_path,
+        owner="doctor-readonly-fixture",
+        clock=lambda: NOW,
+    ):
+        pass
+    paths = PathSettings(
+        state_directory=tmp_path,
+        data_directory=tmp_path,
+        report_directory=tmp_path,
+        backup_directory=tmp_path,
+    )
+    doctor = Doctor.for_local_environment(
+        Settings(paths=paths),
+        database_path=database_path,
+        broker=ReadOnlyPaperProbe(),
+        clock=lambda: NOW,
+        clock_drift_seconds=Decimal("0"),
+    )
+
+    def forbid_write_open(*_args: object, **_kwargs: object) -> Database:
+        raise AssertionError("doctor attempted a write-capable database open")
+
+    monkeypatch.setattr(Database, "open", forbid_write_open)
+
+    assert doctor.run_named("database").passed is True
+    assert doctor.run_named("single-instance-lock").passed is True

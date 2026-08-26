@@ -455,6 +455,25 @@ class WorkflowReceiptStore:
                 )
                 if cursor.rowcount != 1:
                     raise WorkflowConflict("runtime transition compare-and-set failed")
+            if current.state is RuntimeState.HALTED:
+                revoked = self._database.write(
+                    "UPDATE arm_leases SET revoked_at = ?, revoke_reason = ? WHERE revoked_at IS NULL",
+                    (created_at.isoformat(), "runtime entered HALTED"),
+                )
+                if revoked.rowcount:
+                    self._audit.append(
+                        audit_event_id=f"runtime-halt-arm-revoke:{mode.value}:{current.revision}",
+                        category="ARM",
+                        actor="session-coordinator",
+                        payload={
+                            "schema": "firmquant.arm-operation.v1",
+                            "action": "REVOKE_ON_HALT",
+                            "mode": mode.value,
+                            "runtime_revision": current.revision,
+                            "revoked_lease_count": revoked.rowcount,
+                        },
+                        created_at=created_at,
+                    )
             self._audit.append(
                 audit_event_id=f"runtime:{mode.value}:{current.revision}",
                 category="RUNTIME",

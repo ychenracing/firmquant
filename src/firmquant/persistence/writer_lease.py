@@ -66,6 +66,31 @@ def _release_file_lock(handle: BinaryIO, mechanism: str) -> None:
         fcntl_module.flock(handle.fileno(), fcntl_module.LOCK_UN)
 
 
+def writer_lock_available(database_path: Path) -> bool:
+    """Probe the existing OS writer lock without creating files or touching SQLite."""
+
+    path = Path(database_path)
+    lock_path = path.with_suffix(path.suffix + ".writer.lock")
+    if lock_path.is_symlink() or not lock_path.is_file():
+        return False
+    try:
+        if lock_path.stat().st_size < 1:
+            return False
+        handle = lock_path.open("r+b")
+    except OSError:
+        return False
+    mechanism: str | None = None
+    try:
+        mechanism = _acquire_file_lock(handle)
+        return True
+    except WriterLeaseBusy:
+        return False
+    finally:
+        if mechanism is not None:
+            _release_file_lock(handle, mechanism)
+        handle.close()
+
+
 def _aware_now(clock: Callable[[], datetime]) -> datetime:
     value = clock()
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
@@ -291,4 +316,9 @@ class WriterLease:
         self.release()
 
 
-__all__ = ("WriterLease", "WriterLeaseBusy", "WriterLeaseLost")
+__all__ = (
+    "WriterLease",
+    "WriterLeaseBusy",
+    "WriterLeaseLost",
+    "writer_lock_available",
+)

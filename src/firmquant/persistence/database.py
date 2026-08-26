@@ -97,6 +97,59 @@ class Database:
             raise
         return database
 
+    @classmethod
+    def open_read_only(cls, path: Path, *, busy_timeout_ms: int = 5_000) -> Database:
+        """Open and verify an existing ledger without migration or write authority."""
+
+        if isinstance(busy_timeout_ms, bool) or not isinstance(busy_timeout_ms, int):
+            raise TypeError("busy timeout must be an integer")
+        if busy_timeout_ms <= 0:
+            raise ValueError("busy timeout must be positive")
+        database_path = Path(path)
+        if database_path.is_symlink():
+            raise DatabaseUnavailable("read-only database path must not be a symbolic link")
+        if not database_path.is_file():
+            raise DatabaseUnavailable("read-only database does not exist")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                database_path.resolve(strict=True).as_uri() + "?mode=ro",
+                timeout=busy_timeout_ms / 1_000,
+                isolation_level=None,
+                check_same_thread=True,
+                uri=True,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA trusted_schema = OFF")
+            connection.execute("PRAGMA recursive_triggers = ON")
+            connection.execute("PRAGMA temp_store = MEMORY")
+            check = connection.execute("PRAGMA quick_check").fetchone()
+            if check is None or check[0] != "ok":
+                raise DatabaseCorrupt("read-only database integrity check did not return ok")
+            foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_errors:
+                raise DatabaseCorrupt("read-only database foreign-key integrity check failed")
+        except DatabaseCorrupt:
+            if connection is not None:
+                connection.close()
+            raise
+        except sqlite3.DatabaseError as exc:
+            if connection is not None:
+                connection.close()
+            if "malformed" in str(exc).lower() or "not a database" in str(exc).lower():
+                raise DatabaseCorrupt("read-only database integrity check failed") from exc
+            raise DatabaseUnavailable("cannot open read-only SQLite database") from exc
+        except OSError as exc:
+            if connection is not None:
+                connection.close()
+            raise DatabaseUnavailable("cannot open read-only SQLite database") from exc
+        if connection is None:
+            raise DatabaseUnavailable("read-only SQLite connection was not created")
+        return cls(database_path, connection)
+
     @property
     def path(self) -> Path:
         return self._path

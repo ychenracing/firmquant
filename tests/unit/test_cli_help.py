@@ -71,7 +71,10 @@ def test_help_reconfigures_redirected_legacy_stream_to_utf8(
 
 
 @pytest.mark.parametrize("mode", ["paper", "shadow", "canary", "live"])
-def test_unimplemented_run_modes_fail_closed(mode: str, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_without_configuration_fails_closed(
+    mode: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     assert main(["run", "--mode", mode]) == 2
 
-    assert "尚未启用" in capsys.readouterr().err
+    assert "CONFIGURATION_UNAVAILABLE" in capsys.readouterr().err

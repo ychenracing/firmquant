@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
@@ -24,7 +24,7 @@ from firmquant.config import BrokerAdapter, Mode, Settings
 from firmquant.domain.broker_facts import AccountType, BrokerAccountFact
 from firmquant.persistence.database import Database
 from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
-from firmquant.persistence.writer_lease import WriterLease
+from firmquant.persistence.writer_lease import writer_lock_available
 from firmquant.security.secrets import SecretBytes, SecretProvider
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.universe import UniversePolicy
@@ -364,7 +364,7 @@ class Doctor:
             )
 
         def database() -> CheckEvidence:
-            opened = Database.open(ledger_path)
+            opened = Database.open_read_only(ledger_path)
             try:
                 opened.integrity_check()
                 journal = opened.scalar("PRAGMA journal_mode")
@@ -390,17 +390,31 @@ class Doctor:
             )
 
         def single_instance() -> CheckEvidence:
-            with WriterLease.acquire(
-                ledger_path,
-                owner="doctor-probe",
-                ttl=timedelta(seconds=5),
-                clock=clock,
-            ) as lease:
-                generation = lease.generation
+            observed_at = clock()
+            if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+                raise ValueError("doctor clock is not timezone-aware")
+            opened = Database.open_read_only(ledger_path)
+            try:
+                row = opened.query_one(
+                    "SELECT expires_at, generation FROM writer_leases WHERE singleton_id = 1"
+                )
+            finally:
+                opened.close()
+            durable_available = True
+            generation = 0
+            if row is not None:
+                expires_at = datetime.fromisoformat(str(row["expires_at"]))
+                if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+                    raise ValueError("stored writer lease expiry is not timezone-aware")
+                durable_available = expires_at <= observed_at
+                generation = int(row["generation"])
+            os_lock_available = writer_lock_available(ledger_path)
+            passed = durable_available and os_lock_available
             return _evidence(
-                True,
-                "WRITER_LEASE_AVAILABLE",
-                acquired=True,
+                passed,
+                "WRITER_LEASE_AVAILABLE" if passed else "WRITER_LEASE_BUSY",
+                durable_available=durable_available,
+                os_lock_available=os_lock_available,
                 generation=generation,
             )
 
