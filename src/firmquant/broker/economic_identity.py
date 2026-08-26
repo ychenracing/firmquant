@@ -61,9 +61,7 @@ class EconomicIdentityBroker:
         try:
             return resolve_uquant_order_id(value, known)
         except ValueError as error:
-            raise BrokerFactUnavailable(
-                "firmquant broker tag has no provable economic identity"
-            ) from error
+            raise BrokerFactUnavailable("firmquant broker tag has no provable economic identity") from error
 
     def _order(self, fact: BrokerOrderFact) -> BrokerOrderFact:
         economic_id = self._economic_id(fact.client_order_id)

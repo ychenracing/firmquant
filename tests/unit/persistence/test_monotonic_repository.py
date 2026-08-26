@@ -32,17 +32,17 @@ def test_broker_order_cumulative_fill_and_terminal_status_never_regress(tmp_path
         )
 
         with database.transaction():
-            repository._record_broker_order(  # noqa: SLF001 - persistence invariant test
+            repository._record_broker_order(
                 acknowledged,
                 execution_id=case.aggregate.intent.execution_id,
             )
-            repository._record_broker_order(  # noqa: SLF001 - persistence invariant test
+            repository._record_broker_order(
                 partial,
                 execution_id=case.aggregate.intent.execution_id,
             )
 
         with database.transaction(), pytest.raises(PersistenceConflict, match="regressed"):
-            repository._record_broker_order(  # noqa: SLF001 - persistence invariant test
+            repository._record_broker_order(
                 regressed,
                 execution_id=case.aggregate.intent.execution_id,
             )

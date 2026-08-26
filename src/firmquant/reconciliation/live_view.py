@@ -62,9 +62,7 @@ def build_operational_ledger_view(
             )
         )
 
-    fill_rows = database.query_all(
-        "SELECT broker_fill_id, session_date FROM fills ORDER BY broker_fill_id"
-    )
+    fill_rows = database.query_all("SELECT broker_fill_id, session_date FROM fills ORDER BY broker_fill_id")
     known_fills = frozenset(
         str(row["broker_fill_id"])
         for row in fill_rows
