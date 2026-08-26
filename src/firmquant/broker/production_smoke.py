@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -45,23 +46,23 @@ class ProductionSmokeReceipt:
     def __post_init__(self) -> None:
         _digest(self.firmquant_commit, _GIT_SHA, label="firmquant commit")
         _digest(self.uquant_commit, _GIT_SHA, label="uquant commit")
-        for label, value in (
+        for digest_label, digest_value in (
             ("configuration digest", self.config_sha256),
             ("account hash", self.account_hash),
             ("safety manifest digest", self.safety_manifest_sha256),
         ):
-            _digest(value, _SHA256, label=label)
+            _digest(digest_value, _SHA256, label=digest_label)
         _aware(self.observed_at, label="smoke observation")
         if type(self.read_healthy) is not bool:
             raise TypeError("smoke read health must be bool")
-        for label, value in (
+        for count_label, count_value in (
             ("position count", self.position_count),
             ("order count", self.order_count),
             ("fill count", self.fill_count),
             ("real order calls", self.real_order_calls),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"smoke {label} must be nonnegative integer")
+            if isinstance(count_value, bool) or not isinstance(count_value, int) or count_value < 0:
+                raise ValueError(f"smoke {count_label} must be nonnegative integer")
         if self.real_order_calls != 0:
             raise ValueError("production smoke must never perform broker writes")
 
@@ -175,7 +176,7 @@ def run_readonly_production_smoke(
     uquant_commit: str,
     config_sha256: str,
     safety_manifest_sha256: str,
-    clock,
+    clock: Callable[[], datetime],
 ) -> ProductionSmokeReceipt:
     """Read all live authority surfaces once. This function has no write call sites."""
 
