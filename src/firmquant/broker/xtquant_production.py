@@ -12,7 +12,6 @@ import hmac
 from collections.abc import Mapping
 from datetime import datetime
 from types import MappingProxyType
-from typing import cast
 
 from firmquant.domain.broker_facts import (
     BrokerFillFact,
@@ -26,7 +25,6 @@ from firmquant.execution.write_outcome import BrokerWriteNotAccepted, BrokerWrit
 
 from .client_identity import client_order_tag, is_client_order_tag
 from .gateway import (
-    BrokerEventSink,
     BrokerOrderCommand,
     BrokerWriteForbidden,
     _broker_write_is_authorized,
@@ -140,7 +138,7 @@ def _fill_sequence(event_time: datetime) -> int:
 
 def _client_tag(raw: object) -> str | None:
     value = _optional_field(raw, "order_remark")
-    return value if is_client_order_tag(value) else None
+    return value if isinstance(value, str) and is_client_order_tag(value) else None
 
 
 class ProductionXtQuantBroker(XtQuantBroker):
@@ -429,7 +427,7 @@ class ProductionXtQuantBroker(XtQuantBroker):
             }
             canonical_raw_payload_sha256(event)
             with self._lock:
-                sink = cast(BrokerEventSink | None, self._sink)
+                sink = self._sink
         except Exception:
             with self._lock:
                 self._diagnostic = "CALLBACK_SCHEMA_INVALID"
