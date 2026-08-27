@@ -1,4 +1,4 @@
-"""Monotonic production persistence over the generic execution ledger repository."""
+"""Monotonic production persistence for broker order and fill truth."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def _stable_event_id(prefix: str, *parts: object) -> str:
     return prefix + "-" + hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _fill_identity_payload(fill: BrokerFillFact, execution_id: str) -> dict[str, object]:
+def _fill_identity(fill: BrokerFillFact, execution_id: str) -> dict[str, object]:
     return {
         "broker_fill_id": fill.broker_fill_id,
         "broker_order_id": fill.broker_order_id,
@@ -93,7 +93,7 @@ def _fill_identity_payload(fill: BrokerFillFact, execution_id: str) -> dict[str,
 def _fill_evidence_id(fill: BrokerFillFact, execution_id: str) -> str:
     return "fill-evidence-" + canonical_sha256(
         {
-            "identity": _fill_identity_payload(fill, execution_id),
+            "identity": _fill_identity(fill, execution_id),
             "event_time": fill.event_time,
             "received_at": fill.received_at,
             "raw_payload_sha256": fill.raw_payload_sha256,
@@ -102,7 +102,7 @@ def _fill_evidence_id(fill: BrokerFillFact, execution_id: str) -> str:
 
 
 class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
-    """Reject broker snapshots that regress order, fill, or execution sequence truth."""
+    """Operational ledger that fails closed on regressing or ambiguous broker truth."""
 
     def _record_broker_order(self, fact: BrokerOrderFact, *, execution_id: str) -> None:
         existing = self.database.query_one(
@@ -113,7 +113,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             super()._record_broker_order(fact, execution_id=execution_id)
             return
 
-        fixed = (
+        expected_identity = (
             execution_id,
             "SYSTEM",
             fact.client_order_id,
@@ -123,7 +123,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             fact.limit_price.canonical,
             fact.session_date.isoformat(),
         )
-        observed_fixed = (
+        stored_identity = (
             existing["execution_id"],
             existing["ownership"],
             existing["client_order_id"],
@@ -133,9 +133,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             existing["limit_price"],
             existing["session_date"],
         )
-        if observed_fixed != fixed:
+        if stored_identity != expected_identity:
             raise PersistenceConflict("broker order identity changed")
-
         try:
             previous_status = BrokerOrderStatus(str(existing["status"]))
             previous_filled = int(existing["filled_shares"])
@@ -155,10 +154,10 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         previous_sequence = existing["last_event_sequence"]
         if previous_sequence is not None and int(previous_sequence) > fact.event_sequence:
             raise PersistenceConflict("broker order event sequence regressed")
-
         self.database.write(
             """
-            UPDATE broker_orders SET status = ?, filled_shares = ?, last_event_sequence = ?,
+            UPDATE broker_orders
+            SET status = ?, filled_shares = ?, last_event_sequence = ?,
                 event_time = ?, received_at = ?, raw_payload_sha256 = ?
             WHERE broker_order_id = ?
             """,
@@ -186,7 +185,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         )
 
     def _record_fill_evidence(self, fill: BrokerFillFact, *, execution_id: str) -> None:
-        identity = _fill_identity_payload(fill, execution_id)
+        identity = _fill_identity(fill, execution_id)
         BrokerEventRepository(self.database).append(
             broker_event_id=_fill_evidence_id(fill, execution_id),
             event_type="FILL_EVIDENCE",
@@ -203,15 +202,13 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             raise PersistenceConflict("only confirmed fills may enter the operational ledger")
         if fill.event_sequence <= 0:
             raise PersistenceConflict("broker fill execution sequence must be positive")
-
-        identity = _fill_identity_payload(fill, execution_id)
-        identity_sha256 = canonical_sha256(identity)
+        identity_sha256 = canonical_sha256(_fill_identity(fill, execution_id))
         existing = self.database.query_one(
             "SELECT * FROM fills WHERE broker_fill_id = ?",
             (fill.broker_fill_id,),
         )
         if existing is not None:
-            observed = (
+            stored_economics = (
                 existing["identity_kind"],
                 existing["broker_order_id"],
                 existing["execution_id"],
@@ -224,7 +221,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 existing["transfer_fee"],
                 existing["session_date"],
             )
-            expected = (
+            observed_economics = (
                 "BROKER",
                 fill.broker_order_id,
                 execution_id,
@@ -237,7 +234,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 fill.transfer_fee.canonical,
                 fill.session_date.isoformat(),
             )
-            if observed != expected:
+            if stored_economics != observed_economics:
                 raise PersistenceConflict("broker fill identity collision")
             evidence = self._fill_evidence_rows(fill.broker_fill_id)
             if not evidence:
@@ -269,7 +266,6 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             and fill.event_sequence <= int(latest["max_sequence"])
         ):
             raise PersistenceConflict("broker fill execution sequence regressed")
-
         self._record_fill_evidence(fill, execution_id=execution_id)
         super()._record_fill(fill, execution_id=execution_id)
 
@@ -291,6 +287,25 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         ):
             raise PersistenceConflict("PARTIALLY_FILLED broker order has contradictory cumulative shares")
 
+    def _durable_command_payload(self, attempt: BrokerAttempt) -> dict[str, object]:
+        row = self.database.query_one(
+            """
+            SELECT command_kind, payload_json
+            FROM order_commands
+            WHERE attempt_id = ?
+            """,
+            (attempt.attempt_id,),
+        )
+        if row is None or str(row["command_kind"]) != attempt.command_kind:
+            raise PersistenceConflict("durable broker command is missing or inconsistent")
+        try:
+            payload = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError) as error:
+            raise PersistenceConflict("stored broker command payload is malformed") from error
+        if not isinstance(payload, dict):
+            raise PersistenceConflict("stored broker command payload is not an object")
+        return payload
+
     def _validate_attempt_fact(
         self,
         aggregate: OrderAggregate,
@@ -302,10 +317,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         self._validate_fact(aggregate, fact)
         if attempt.execution_id != aggregate.intent.execution_id or attempt.command_kind != command_kind:
             raise PersistenceConflict("broker attempt does not belong to the execution command")
-        try:
-            payload = json.loads(attempt.command_payload_json)
-        except (TypeError, ValueError) as error:
-            raise PersistenceConflict("stored broker attempt payload is malformed") from error
+        payload = self._durable_command_payload(attempt)
         if command_kind == "SUBMIT":
             expected = {
                 "execution_id": aggregate.intent.execution_id,
@@ -317,8 +329,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 "limit_price": fact.limit_price.canonical,
                 "strategy_session": fact.session_date.isoformat(),
             }
-            observed = {key: payload.get(key) for key in expected}
-            if observed != expected:
+            if {key: payload.get(key) for key in expected} != expected:
                 raise PersistenceConflict("broker submit result contradicts durable command")
         elif payload.get("broker_order_id") != fact.broker_order_id:
             raise PersistenceConflict("broker cancel result contradicts durable command")
@@ -343,8 +354,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             existing = deduplicated.get(fill.broker_fill_id)
             if existing is not None:
                 if canonical_sha256(
-                    _fill_identity_payload(existing, aggregate.intent.execution_id)
-                ) != canonical_sha256(_fill_identity_payload(fill, aggregate.intent.execution_id)):
+                    _fill_identity(existing, aggregate.intent.execution_id)
+                ) != canonical_sha256(_fill_identity(fill, aggregate.intent.execution_id)):
                     raise PersistenceConflict("broker fill identity collision")
                 continue
             deduplicated[fill.broker_fill_id] = fill
@@ -355,8 +366,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             )
         )
 
+    @staticmethod
     def _proven_cumulative_shares(
-        self,
         aggregate: OrderAggregate,
         fills: tuple[BrokerFillFact, ...],
     ) -> int:
@@ -410,49 +421,33 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         *,
         received_at: datetime,
     ) -> OrderAggregate:
-        expected_terminal = _TERMINAL_STATE.get(fact.status)
-        if expected_terminal is not None and current.state is expected_terminal:
+        expected = _TERMINAL_STATE.get(fact.status)
+        if expected is not None and current.state is expected:
             return current
         if fact.status is BrokerOrderStatus.REJECTED:
-            return self.transition(
-                current,
-                BrokerRejected(
-                    event_id=_stable_event_id(
-                        "recovery-rejected",
-                        fact.broker_order_id,
-                        fact.event_sequence,
-                    ),
-                    reason_code="BROKER_REJECTED",
+            event = BrokerRejected(
+                event_id=_stable_event_id(
+                    "recovery-rejected", fact.broker_order_id, fact.event_sequence
                 ),
-                occurred_at=received_at,
+                reason_code="BROKER_REJECTED",
             )
-        if fact.status is BrokerOrderStatus.EXPIRED:
-            return self.transition(
-                current,
-                OrderExpired(
-                    event_id=_stable_event_id(
-                        "recovery-expired",
-                        fact.broker_order_id,
-                        fact.event_sequence,
-                    ),
-                    reason_code="BROKER_EXPIRED",
+        elif fact.status is BrokerOrderStatus.EXPIRED:
+            event = OrderExpired(
+                event_id=_stable_event_id(
+                    "recovery-expired", fact.broker_order_id, fact.event_sequence
                 ),
-                occurred_at=received_at,
+                reason_code="BROKER_EXPIRED",
             )
-        if fact.status is BrokerOrderStatus.CANCELLED:
-            return self.transition(
-                current,
-                CancelConfirmed(
-                    event_id=_stable_event_id(
-                        "recovery-cancelled",
-                        fact.broker_order_id,
-                        fact.event_sequence,
-                    ),
-                    broker_order_id=fact.broker_order_id,
+        elif fact.status is BrokerOrderStatus.CANCELLED:
+            event = CancelConfirmed(
+                event_id=_stable_event_id(
+                    "recovery-cancelled", fact.broker_order_id, fact.event_sequence
                 ),
-                occurred_at=received_at,
+                broker_order_id=fact.broker_order_id,
             )
-        return current
+        else:
+            return current
+        return self.transition(current, event, occurred_at=received_at)
 
     def reconcile_broker_fact(
         self,
@@ -462,29 +457,22 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         *,
         received_at: datetime,
     ) -> OrderAggregate:
-        """Apply complete queried broker truth without dropping terminal or late fills."""
+        """Apply one complete authoritative broker observation without losing late fills."""
 
         self._validate_fact(aggregate, fact)
-        ordered_fills = self._ordered_fills(aggregate, fact, fills)
-        proven = self._proven_cumulative_shares(aggregate, ordered_fills)
-        if proven != fact.filled_shares.value:
+        ordered = self._ordered_fills(aggregate, fact, fills)
+        if self._proven_cumulative_shares(aggregate, ordered) != fact.filled_shares.value:
             raise PersistenceConflict("queried broker fills do not prove cumulative shares")
-
         self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
         current = self._apply_broker_economics(
-            aggregate,
-            fact,
-            ordered_fills,
-            received_at=received_at,
+            aggregate, fact, ordered, received_at=received_at
         )
         if fact.status is BrokerOrderStatus.UNKNOWN:
             current = self.transition(
                 current,
                 SubmitOutcomeUnknown(
                     event_id=_stable_event_id(
-                        "recovery-unknown",
-                        fact.broker_order_id,
-                        fact.event_sequence,
+                        "recovery-unknown", fact.broker_order_id, fact.event_sequence
                     ),
                     diagnostic_code="BROKER_STATUS_UNKNOWN",
                 ),
@@ -496,26 +484,29 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             raise PersistenceConflict("recovered aggregate differs from broker cumulative fill")
         return current
 
-    def record_submit_result(
+    def _record_returned_result(
         self,
         aggregate: OrderAggregate,
         attempt: BrokerAttempt,
         fact: BrokerOrderFact,
         fills: tuple[BrokerFillFact, ...],
         *,
+        command_kind: str,
+        response_kind: str,
         received_at: datetime,
     ) -> OrderAggregate:
-        self._validate_attempt_fact(aggregate, attempt, fact, command_kind="SUBMIT")
-        ordered_fills = self._ordered_fills(aggregate, fact, fills)
-        proven = self._proven_cumulative_shares(aggregate, ordered_fills)
+        self._validate_attempt_fact(
+            aggregate, attempt, fact, command_kind=command_kind
+        )
+        ordered = self._ordered_fills(aggregate, fact, fills)
+        proven = self._proven_cumulative_shares(aggregate, ordered)
         if proven > fact.filled_shares.value:
-            raise PersistenceConflict("submit result cumulative fill contradicts confirmed fills")
-        self._complete_attempt(attempt, fact, response_kind="SUBMIT_RETURN", received_at=received_at)
+            raise PersistenceConflict("broker cumulative fill contradicts confirmed fills")
+        self._complete_attempt(
+            attempt, fact, response_kind=response_kind, received_at=received_at
+        )
         current = self._apply_broker_economics(
-            aggregate,
-            fact,
-            ordered_fills,
-            received_at=received_at,
+            aggregate, fact, ordered, received_at=received_at
         )
         if proven < fact.filled_shares.value:
             return self.mark_attempt_unknown(
@@ -533,8 +524,27 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             )
         current = self._apply_terminal_fact(current, fact, received_at=received_at)
         if current.filled_shares != fact.filled_shares:
-            raise PersistenceConflict("submit result differs from broker cumulative fill")
+            raise PersistenceConflict("returned broker result differs from cumulative fill")
         return current
+
+    def record_submit_result(
+        self,
+        aggregate: OrderAggregate,
+        attempt: BrokerAttempt,
+        fact: BrokerOrderFact,
+        fills: tuple[BrokerFillFact, ...],
+        *,
+        received_at: datetime,
+    ) -> OrderAggregate:
+        return self._record_returned_result(
+            aggregate,
+            attempt,
+            fact,
+            fills,
+            command_kind="SUBMIT",
+            response_kind="SUBMIT_RETURN",
+            received_at=received_at,
+        )
 
     def record_cancel_result(
         self,
@@ -545,36 +555,15 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         *,
         received_at: datetime,
     ) -> OrderAggregate:
-        self._validate_attempt_fact(aggregate, attempt, fact, command_kind="CANCEL")
-        ordered_fills = self._ordered_fills(aggregate, fact, fills)
-        proven = self._proven_cumulative_shares(aggregate, ordered_fills)
-        if proven > fact.filled_shares.value:
-            raise PersistenceConflict("cancel result cumulative fill contradicts confirmed fills")
-        self._complete_attempt(attempt, fact, response_kind="CANCEL_RETURN", received_at=received_at)
-        current = self._apply_broker_economics(
+        return self._record_returned_result(
             aggregate,
+            attempt,
             fact,
-            ordered_fills,
+            fills,
+            command_kind="CANCEL",
+            response_kind="CANCEL_RETURN",
             received_at=received_at,
         )
-        if proven < fact.filled_shares.value:
-            return self.mark_attempt_unknown(
-                current,
-                attempt,
-                diagnostic_code="BROKER_FILL_MISSING",
-                occurred_at=received_at,
-            )
-        if fact.status is BrokerOrderStatus.UNKNOWN:
-            return self.mark_attempt_unknown(
-                current,
-                attempt,
-                diagnostic_code="BROKER_STATUS_UNKNOWN",
-                occurred_at=received_at,
-            )
-        current = self._apply_terminal_fact(current, fact, received_at=received_at)
-        if current.filled_shares != fact.filled_shares:
-            raise PersistenceConflict("cancel result differs from broker cumulative fill")
-        return current
 
     def resolve_submit_not_accepted(
         self,
@@ -584,7 +573,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         evidence_sha256: str,
         occurred_at: datetime,
     ) -> OrderAggregate:
-        """Return an unaccepted submit to ARMED without manufacturing broker acceptance."""
+        """Resolve only explicit non-acceptance; UNKNOWN requires dedicated evidence."""
 
         event = (
             UnknownResolvedNotAccepted(
@@ -599,7 +588,11 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         )
         current = self.transition(aggregate, event, occurred_at=occurred_at)
         self.database.write(
-            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? WHERE attempt_id = ?",
+            """
+            UPDATE broker_order_attempts
+            SET state = 'FAILED_LOCAL', completed_at = ?
+            WHERE attempt_id = ?
+            """,
             (occurred_at.isoformat(), attempt.attempt_id),
         )
         return current
@@ -612,7 +605,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         evidence_sha256: str,
         occurred_at: datetime,
     ) -> OrderAggregate:
-        """Restore the open order state after a definitely rejected cancel attempt."""
+        """Restore the prior open state only for explicit cancel non-acceptance."""
 
         current = self.transition(
             aggregate,
@@ -623,7 +616,11 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             occurred_at=occurred_at,
         )
         self.database.write(
-            "UPDATE broker_order_attempts SET state = 'FAILED_LOCAL', completed_at = ? WHERE attempt_id = ?",
+            """
+            UPDATE broker_order_attempts
+            SET state = 'FAILED_LOCAL', completed_at = ?
+            WHERE attempt_id = ?
+            """,
             (occurred_at.isoformat(), attempt.attempt_id),
         )
         return current
