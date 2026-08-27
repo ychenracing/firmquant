@@ -23,8 +23,7 @@ SESSION = date(2026, 8, 25)
 def _write_csv(root: Path, name: str = "sz300308.csv", close: str = "10") -> bytes:
     root.mkdir(parents=True, exist_ok=True)
     content = (
-        "date,open,high,low,close,volume,amount\n"
-        f"2026-08-24,{close},{close},{close},{close},1000,10000\n"
+        f"date,open,high,low,close,volume,amount\n2026-08-24,{close},{close},{close},{close},1000,10000\n"
     ).encode()
     (root / name).write_bytes(content)
     return content
@@ -45,10 +44,7 @@ def _candidate(
     return store.create_candidate(
         active_generation_id=active.generation_id,
         replacement_rows={
-            "sz300308": (
-                b"date,open,high,low,close,volume,amount\n"
-                b"2026-08-24,9,9,9,9,1000,9000\n"
-            )
+            "sz300308": (b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n")
         },
         source="xtquant",
         generated_at=NOW,
