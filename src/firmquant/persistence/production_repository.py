@@ -255,9 +255,12 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             """,
             (fill.session_date.isoformat(), fill.broker_order_id),
         )
-        if latest is not None and latest["max_sequence"] is not None:
-            if fill.event_sequence <= int(latest["max_sequence"]):
-                raise PersistenceConflict("broker fill execution sequence regressed")
+        if (
+            latest is not None
+            and latest["max_sequence"] is not None
+            and fill.event_sequence <= int(latest["max_sequence"])
+        ):
+            raise PersistenceConflict("broker fill execution sequence regressed")
 
         self._record_fill_evidence(fill, execution_id=execution_id)
         super()._record_fill(fill, execution_id=execution_id)
