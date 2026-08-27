@@ -152,8 +152,15 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         ):
             raise PersistenceConflict("broker order lifecycle status regressed")
         previous_sequence = existing["last_event_sequence"]
-        if previous_sequence is not None and int(previous_sequence) > fact.event_sequence:
-            raise PersistenceConflict("broker order event sequence regressed")
+        if previous_sequence is not None:
+            stored_sequence = int(previous_sequence)
+            if fact.event_sequence < stored_sequence:
+                raise PersistenceConflict("broker order event sequence regressed")
+            if fact.event_sequence == stored_sequence and (
+                fact.status.value != str(existing["status"])
+                or fact.filled_shares.value != previous_filled
+            ):
+                raise PersistenceConflict("broker order sequence was reused for different truth")
         self.database.write(
             """
             UPDATE broker_orders
@@ -426,23 +433,17 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             return current
         if fact.status is BrokerOrderStatus.REJECTED:
             event = BrokerRejected(
-                event_id=_stable_event_id(
-                    "recovery-rejected", fact.broker_order_id, fact.event_sequence
-                ),
+                event_id=_stable_event_id("recovery-rejected", fact.broker_order_id, fact.event_sequence),
                 reason_code="BROKER_REJECTED",
             )
         elif fact.status is BrokerOrderStatus.EXPIRED:
             event = OrderExpired(
-                event_id=_stable_event_id(
-                    "recovery-expired", fact.broker_order_id, fact.event_sequence
-                ),
+                event_id=_stable_event_id("recovery-expired", fact.broker_order_id, fact.event_sequence),
                 reason_code="BROKER_EXPIRED",
             )
         elif fact.status is BrokerOrderStatus.CANCELLED:
             event = CancelConfirmed(
-                event_id=_stable_event_id(
-                    "recovery-cancelled", fact.broker_order_id, fact.event_sequence
-                ),
+                event_id=_stable_event_id("recovery-cancelled", fact.broker_order_id, fact.event_sequence),
                 broker_order_id=fact.broker_order_id,
             )
         else:
@@ -464,16 +465,12 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         if self._proven_cumulative_shares(aggregate, ordered) != fact.filled_shares.value:
             raise PersistenceConflict("queried broker fills do not prove cumulative shares")
         self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
-        current = self._apply_broker_economics(
-            aggregate, fact, ordered, received_at=received_at
-        )
+        current = self._apply_broker_economics(aggregate, fact, ordered, received_at=received_at)
         if fact.status is BrokerOrderStatus.UNKNOWN:
             current = self.transition(
                 current,
                 SubmitOutcomeUnknown(
-                    event_id=_stable_event_id(
-                        "recovery-unknown", fact.broker_order_id, fact.event_sequence
-                    ),
+                    event_id=_stable_event_id("recovery-unknown", fact.broker_order_id, fact.event_sequence),
                     diagnostic_code="BROKER_STATUS_UNKNOWN",
                 ),
                 occurred_at=received_at,
@@ -495,19 +492,13 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         response_kind: str,
         received_at: datetime,
     ) -> OrderAggregate:
-        self._validate_attempt_fact(
-            aggregate, attempt, fact, command_kind=command_kind
-        )
+        self._validate_attempt_fact(aggregate, attempt, fact, command_kind=command_kind)
         ordered = self._ordered_fills(aggregate, fact, fills)
         proven = self._proven_cumulative_shares(aggregate, ordered)
         if proven > fact.filled_shares.value:
             raise PersistenceConflict("broker cumulative fill contradicts confirmed fills")
-        self._complete_attempt(
-            attempt, fact, response_kind=response_kind, received_at=received_at
-        )
-        current = self._apply_broker_economics(
-            aggregate, fact, ordered, received_at=received_at
-        )
+        self._complete_attempt(attempt, fact, response_kind=response_kind, received_at=received_at)
+        current = self._apply_broker_economics(aggregate, fact, ordered, received_at=received_at)
         if proven < fact.filled_shares.value:
             return self.mark_attempt_unknown(
                 current,
@@ -520,6 +511,13 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 current,
                 attempt,
                 diagnostic_code="BROKER_STATUS_UNKNOWN",
+                occurred_at=received_at,
+            )
+        if command_kind == "CANCEL" and fact.status not in _TERMINAL:
+            return self.mark_attempt_unknown(
+                current,
+                attempt,
+                diagnostic_code="CANCEL_ACCEPTANCE_UNPROVEN",
                 occurred_at=received_at,
             )
         current = self._apply_terminal_fact(current, fact, received_at=received_at)
