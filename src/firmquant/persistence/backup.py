@@ -578,7 +578,8 @@ def backup_state(
             "audit": {"count": audit.count, "head_hash": audit.head_hash},
         }
     else:
-        assert complete_member_hashes is not None and deployment is not None
+        if complete_member_hashes is None or deployment is None:
+            raise BackupError("complete backup member identity was not prepared")
         complete_member_hashes["firmquant.sqlite3"] = database_sha256
         manifest_payload = {
             "schema_version": 2,
