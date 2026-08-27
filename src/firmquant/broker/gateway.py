@@ -162,9 +162,7 @@ class BrokerOrderAbsenceProof:
         if self.session_date != self.command.strategy_session:
             raise DomainValidationError("absence proof session differs from durable command")
         _aware(self.captured_at, label="absence proof captured_at")
-        if isinstance(self.broker_event_watermark, bool) or not isinstance(
-            self.broker_event_watermark, int
-        ):
+        if isinstance(self.broker_event_watermark, bool) or not isinstance(self.broker_event_watermark, int):
             raise DomainTypeError("absence proof broker watermark must be integer")
         if self.broker_event_watermark < 0:
             raise DomainValidationError("absence proof broker watermark must be nonnegative")
@@ -214,9 +212,7 @@ class BrokerGateway(Protocol):
 class BrokerOrderAbsenceVerifier(Protocol):
     """Optional read capability; an empty ordinary order query is never sufficient proof."""
 
-    def prove_order_not_accepted(
-        self, command: BrokerOrderCommand
-    ) -> BrokerOrderAbsenceProof | None: ...
+    def prove_order_not_accepted(self, command: BrokerOrderCommand) -> BrokerOrderAbsenceProof | None: ...
 
 
 __all__ = (
