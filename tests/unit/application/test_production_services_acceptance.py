@@ -821,8 +821,7 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
             hooks,
             "_reconcile",
             lambda _kind: (
-                events.append("reconcile")
-                or SimpleNamespace(reconciliation_id="recon_" + "e" * 64),
+                events.append("reconcile") or SimpleNamespace(reconciliation_id="recon_" + "e" * 64),
                 snapshot,
                 Account(),
             ),
@@ -869,8 +868,7 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
             ps,
             "backup_state",
             lambda *_args, **_kwargs: (
-                events.append("backup")
-                or SimpleNamespace(backup_id="backup-1", manifest_sha256="a" * 64)
+                events.append("backup") or SimpleNamespace(backup_id="backup-1", manifest_sha256="a" * 64)
             ),
         )
 
