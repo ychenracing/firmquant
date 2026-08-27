@@ -39,7 +39,7 @@ jobs:
 
           gate_test = Path('tests/unit/risk/test_gate.py')
           text = gate_test.read_text(encoding='utf-8')
-          obsolete = '''            (\n                {"replacement_count": 2},\n                GateAction.BLOCK,\n                "REPLACEMENT_LIMIT",\n            ),\n'''
+          obsolete = '''        (\n            {"replacement_count": 2},\n            GateAction.BLOCK,\n            "REPLACEMENT_LIMIT",\n        ),\n'''
           if text.count(obsolete) != 1:
               raise SystemExit(f'obsolete replacement test shape changed: {text.count(obsolete)}')
           gate_test.write_text(text.replace(obsolete, '', 1), encoding='utf-8')
