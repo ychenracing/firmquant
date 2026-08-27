@@ -871,9 +871,7 @@ class LocalOperatorService:
         )
         last_quote = database.scalar("SELECT max(received_at) FROM broker_events WHERE event_type = 'QUOTE'")
         source = load_locked_source_identity()
-        heartbeat = database.query_one(
-            "SELECT * FROM production_heartbeat WHERE singleton_id = 1"
-        )
+        heartbeat = database.query_one("SELECT * FROM production_heartbeat WHERE singleton_id = 1")
         heartbeat_age: float | None = None
         process_health = "NOT_RUNNING"
         broker_connection = "NOT_RUNNING"
@@ -892,9 +890,7 @@ class LocalOperatorService:
                     raise ValueError
             except ValueError as error:
                 raise OperatorCommandDenied("HEARTBEAT_INVALID") from error
-            broker_connection = (
-                "CONNECTED" if int(heartbeat["broker_connected"]) == 1 else "DISCONNECTED"
-            )
+            broker_connection = "CONNECTED" if int(heartbeat["broker_connected"]) == 1 else "DISCONNECTED"
             broker_read_healthy = int(heartbeat["broker_read_healthy"]) == 1
             broker_write_healthy = int(heartbeat["broker_write_healthy"]) == 1
             if heartbeat_age > 30.0:
@@ -902,9 +898,7 @@ class LocalOperatorService:
                 blockers.add("HEARTBEAT_STALE")
             else:
                 process_health = "HEALTHY"
-        effective_state = (
-            status.state.value if process_health == "HEALTHY" else RuntimeState.HALTED.value
-        )
+        effective_state = status.state.value if process_health == "HEALTHY" else RuntimeState.HALTED.value
         return {
             "mode": settings.mode.value,
             "runtime_state": effective_state,
@@ -920,9 +914,7 @@ class LocalOperatorService:
             "broker_read_healthy": broker_read_healthy,
             "broker_write_healthy": broker_write_healthy,
             "last_quote": (last_quote if heartbeat is None else heartbeat["last_quote"]),
-            "last_reconciliation": (
-                None if heartbeat is None else heartbeat["last_reconciliation"]
-            ),
+            "last_reconciliation": (None if heartbeat is None else heartbeat["last_reconciliation"]),
             "last_broker_event": None if heartbeat is None else heartbeat["last_broker_event"],
             "last_decision": None if heartbeat is None else heartbeat["last_decision"],
             "last_execution": None if heartbeat is None else heartbeat["last_execution"],
@@ -1828,7 +1820,7 @@ class LocalOperatorService:
         if receipt.real_order_calls != 0:
             raise OperatorCommandDenied("READONLY_SMOKE_WRITE_CALL_DETECTED")
         return OperatorResult(
-            message="生产只读 smoke 已完成并持久化证据，券商写调用为 0。",
+            message="生产只读 smoke 已完成并持久化证据。券商写调用为 0。",
             payload={**receipt.payload(), "receipt_sha256": receipt.sha256},
         )
 

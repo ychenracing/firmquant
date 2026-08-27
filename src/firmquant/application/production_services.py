@@ -88,8 +88,6 @@ from firmquant.risk.capability import (
 from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCommand, RiskLimits
 from firmquant.risk.runtime import risk_limits_from_settings
 from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockReceipt
-from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockReceipt
-from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockReceipt
 from firmquant.scheduling.sessions import WorkflowReceiptStore
 from firmquant.security.secrets import EnvironmentSecretProvider
 from firmquant.strategy.account_sync import AccountStateContract
@@ -421,9 +419,7 @@ class ProductionServiceHooks:
 
     def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
         shanghai = now.astimezone(_SHANGHAI)
-        completion_wall = datetime.combine(
-            shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI
-        )
+        completion_wall = datetime.combine(shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI)
         cancel_wall = completion_wall - timedelta(seconds=30)
         max_window = timedelta(
             seconds=max(
@@ -491,9 +487,7 @@ class ProductionServiceHooks:
 
     def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
         shanghai = now.astimezone(_SHANGHAI)
-        completion_wall = datetime.combine(
-            shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI
-        )
+        completion_wall = datetime.combine(shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI)
         cancel_wall = completion_wall - timedelta(seconds=30)
         max_window = timedelta(
             seconds=max(
@@ -561,9 +555,7 @@ class ProductionServiceHooks:
 
     def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
         shanghai = now.astimezone(_SHANGHAI)
-        completion_wall = datetime.combine(
-            shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI
-        )
+        completion_wall = datetime.combine(shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI)
         cancel_wall = completion_wall - timedelta(seconds=30)
         max_window = timedelta(
             seconds=max(
@@ -641,8 +633,16 @@ class ProductionServiceHooks:
                 symbol
                 for symbol in set(broker_positions) | set(strategy_positions)
                 if (
-                    (0 if broker_positions.get(symbol) is None else broker_positions[symbol].total_shares.value)
-                    != (0 if strategy_positions.get(symbol) is None else strategy_positions[symbol].total_shares.value)
+                    (
+                        0
+                        if broker_positions.get(symbol) is None
+                        else broker_positions[symbol].total_shares.value
+                    )
+                    != (
+                        0
+                        if strategy_positions.get(symbol) is None
+                        else strategy_positions[symbol].total_shares.value
+                    )
                     or (
                         0
                         if broker_positions.get(symbol) is None
@@ -1200,7 +1200,9 @@ class ProductionServiceHooks:
                 cash_and_positions_safe=(
                     authorities.reconciliation.passed
                     and snapshot.account.available_cash.value >= 0
-                    and all(item.sellable_shares.value <= item.total_shares.value for item in snapshot.positions)
+                    and all(
+                        item.sellable_shares.value <= item.total_shares.value for item in snapshot.positions
+                    )
                 ),
                 frequency_within_limits=(
                     attempts < self._settings.execution.max_submit_count_window
@@ -1470,15 +1472,15 @@ class ProductionServiceHooks:
             broker_connected=health.connected,
             broker_read_healthy=health.read_healthy,
             broker_write_healthy=health.write_healthy,
-            last_broker_event=None if last_broker_event is None else datetime.fromisoformat(str(last_broker_event)),
+            last_broker_event=None
+            if last_broker_event is None
+            else datetime.fromisoformat(str(last_broker_event)),
             last_quote=self._last_quote_at,
             last_reconciliation=(
                 None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
             ),
             last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
-            last_execution=(
-                None if last_execution is None else datetime.fromisoformat(str(last_execution))
-            ),
+            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
         )
         with self._database.transaction():
             self._database.write(
@@ -1502,17 +1504,28 @@ class ProductionServiceHooks:
                     executions=excluded.executions,eod=excluded.eod
                 """,
                 (
-                    enriched.mode.value,enriched.runtime_state.value,enriched.observed_at.isoformat(),
-                    enriched.host_hash,enriched.process_id,enriched.writer_generation,
-                    int(enriched.broker_connected),int(enriched.broker_read_healthy),
-                    int(enriched.broker_write_healthy),enriched.pending_events,
+                    enriched.mode.value,
+                    enriched.runtime_state.value,
+                    enriched.observed_at.isoformat(),
+                    enriched.host_hash,
+                    enriched.process_id,
+                    enriched.writer_generation,
+                    int(enriched.broker_connected),
+                    int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),
+                    enriched.pending_events,
                     None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
                     None if enriched.last_quote is None else enriched.last_quote.isoformat(),
-                    None if enriched.last_reconciliation is None else enriched.last_reconciliation.isoformat(),
+                    None
+                    if enriched.last_reconciliation is None
+                    else enriched.last_reconciliation.isoformat(),
                     None if enriched.last_decision is None else enriched.last_decision.isoformat(),
                     None if enriched.last_execution is None else enriched.last_execution.isoformat(),
-                    enriched.control_request_state,enriched.processed_events,enriched.decisions,
-                    enriched.executions,enriched.eod,
+                    enriched.control_request_state,
+                    enriched.processed_events,
+                    enriched.decisions,
+                    enriched.executions,
+                    enriched.eod,
                 ),
             )
         health = self._broker.health()
@@ -1530,15 +1543,15 @@ class ProductionServiceHooks:
             broker_connected=health.connected,
             broker_read_healthy=health.read_healthy,
             broker_write_healthy=health.write_healthy,
-            last_broker_event=None if last_broker_event is None else datetime.fromisoformat(str(last_broker_event)),
+            last_broker_event=None
+            if last_broker_event is None
+            else datetime.fromisoformat(str(last_broker_event)),
             last_quote=self._last_quote_at,
             last_reconciliation=(
                 None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
             ),
             last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
-            last_execution=(
-                None if last_execution is None else datetime.fromisoformat(str(last_execution))
-            ),
+            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
         )
         with self._database.transaction():
             self._database.write(
@@ -1562,17 +1575,28 @@ class ProductionServiceHooks:
                     executions=excluded.executions,eod=excluded.eod
                 """,
                 (
-                    enriched.mode.value,enriched.runtime_state.value,enriched.observed_at.isoformat(),
-                    enriched.host_hash,enriched.process_id,enriched.writer_generation,
-                    int(enriched.broker_connected),int(enriched.broker_read_healthy),
-                    int(enriched.broker_write_healthy),enriched.pending_events,
+                    enriched.mode.value,
+                    enriched.runtime_state.value,
+                    enriched.observed_at.isoformat(),
+                    enriched.host_hash,
+                    enriched.process_id,
+                    enriched.writer_generation,
+                    int(enriched.broker_connected),
+                    int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),
+                    enriched.pending_events,
                     None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
                     None if enriched.last_quote is None else enriched.last_quote.isoformat(),
-                    None if enriched.last_reconciliation is None else enriched.last_reconciliation.isoformat(),
+                    None
+                    if enriched.last_reconciliation is None
+                    else enriched.last_reconciliation.isoformat(),
                     None if enriched.last_decision is None else enriched.last_decision.isoformat(),
                     None if enriched.last_execution is None else enriched.last_execution.isoformat(),
-                    enriched.control_request_state,enriched.processed_events,enriched.decisions,
-                    enriched.executions,enriched.eod,
+                    enriched.control_request_state,
+                    enriched.processed_events,
+                    enriched.decisions,
+                    enriched.executions,
+                    enriched.eod,
                 ),
             )
         health = self._broker.health()
@@ -1590,15 +1614,15 @@ class ProductionServiceHooks:
             broker_connected=health.connected,
             broker_read_healthy=health.read_healthy,
             broker_write_healthy=health.write_healthy,
-            last_broker_event=None if last_broker_event is None else datetime.fromisoformat(str(last_broker_event)),
+            last_broker_event=None
+            if last_broker_event is None
+            else datetime.fromisoformat(str(last_broker_event)),
             last_quote=self._last_quote_at,
             last_reconciliation=(
                 None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
             ),
             last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
-            last_execution=(
-                None if last_execution is None else datetime.fromisoformat(str(last_execution))
-            ),
+            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
         )
         with self._database.transaction():
             self._database.write(
@@ -1622,17 +1646,28 @@ class ProductionServiceHooks:
                     executions=excluded.executions,eod=excluded.eod
                 """,
                 (
-                    enriched.mode.value,enriched.runtime_state.value,enriched.observed_at.isoformat(),
-                    enriched.host_hash,enriched.process_id,enriched.writer_generation,
-                    int(enriched.broker_connected),int(enriched.broker_read_healthy),
-                    int(enriched.broker_write_healthy),enriched.pending_events,
+                    enriched.mode.value,
+                    enriched.runtime_state.value,
+                    enriched.observed_at.isoformat(),
+                    enriched.host_hash,
+                    enriched.process_id,
+                    enriched.writer_generation,
+                    int(enriched.broker_connected),
+                    int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),
+                    enriched.pending_events,
                     None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
                     None if enriched.last_quote is None else enriched.last_quote.isoformat(),
-                    None if enriched.last_reconciliation is None else enriched.last_reconciliation.isoformat(),
+                    None
+                    if enriched.last_reconciliation is None
+                    else enriched.last_reconciliation.isoformat(),
                     None if enriched.last_decision is None else enriched.last_decision.isoformat(),
                     None if enriched.last_execution is None else enriched.last_execution.isoformat(),
-                    enriched.control_request_state,enriched.processed_events,enriched.decisions,
-                    enriched.executions,enriched.eod,
+                    enriched.control_request_state,
+                    enriched.processed_events,
+                    enriched.decisions,
+                    enriched.executions,
+                    enriched.eod,
                 ),
             )
 

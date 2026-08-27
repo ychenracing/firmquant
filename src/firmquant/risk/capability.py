@@ -29,8 +29,6 @@ from firmquant.domain.errors import DomainTypeError, DomainValidationError
 from firmquant.domain.states import RuntimeState
 from firmquant.domain.values import Symbol
 from firmquant.scheduling.clock import ClockReceipt
-from firmquant.scheduling.clock import ClockReceipt
-from firmquant.scheduling.clock import ClockReceipt
 
 from .arm import ArmBinding, ArmLease, ArmLeaseDenied, ArmService
 from .gate import GateAction, GateDecision
