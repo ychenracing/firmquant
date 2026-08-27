@@ -466,9 +466,7 @@ class AccountBootstrapService:
         if snapshot.orders or snapshot.fills:
             raise AccountBootstrapDenied("BROKER_ACTIVITY_PRESENT")
         pending = self._pending_bootstrap()
-        self._preconditions(
-            allow_existing_account_file=pending is not None and self._account_path.exists()
-        )
+        self._preconditions(allow_existing_account_file=pending is not None and self._account_path.exists())
         self._economic_summary(snapshot)
         identity = self._identity()
         data = self._data_identity_provider(snapshot)
