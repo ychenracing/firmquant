@@ -15,9 +15,7 @@ def test_account_authority_is_owned_by_central_schema_migration(tmp_path: Path) 
         assert database.scalar("SELECT max(version) FROM schema_migrations") == 3
         tables = {
             str(row["name"])
-            for row in database.query_all(
-                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-            )
+            for row in database.query_all("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         }
         assert {
             "account_bindings",
