@@ -86,7 +86,9 @@ def _decode_identity(payload: object) -> EvidenceIdentity:
     if value.get("schema") != "firmquant.execution-observation-identity.v1":
         raise PromotionStoreError("execution observation identity schema is invalid")
     try:
-        execution_session = date.fromisoformat(cast(str, _text(value.get("execution_session"), label="session")))
+        execution_session = date.fromisoformat(
+            cast(str, _text(value.get("execution_session"), label="session"))
+        )
     except ValueError as error:
         raise PromotionStoreError("execution observation session is invalid") from error
     return EvidenceIdentity(
@@ -190,9 +192,7 @@ def _decode_observation(payload: object) -> ExecutionObservation:
             value.get("duplicate_economic_orders"), label="duplicate economic orders"
         ),
         duplicate_fills=_integer(value.get("duplicate_fills"), label="duplicate fills"),
-        data_quality_failures=_integer(
-            value.get("data_quality_failures"), label="data quality failures"
-        ),
+        data_quality_failures=_integer(value.get("data_quality_failures"), label="data quality failures"),
         created_at=created_at,
     )
     if value.get("content_sha256") != observation.content_sha256:
@@ -224,8 +224,7 @@ class PromotionStore:
         if not isinstance(stage, EvidenceStage):
             raise TypeError("promotion evidence stage must be typed")
         rows = self._database.query_all(
-            "SELECT payload_json FROM audit_events "
-            "WHERE category = 'EXECUTION_OBSERVATION' ORDER BY sequence"
+            "SELECT payload_json FROM audit_events WHERE category = 'EXECUTION_OBSERVATION' ORDER BY sequence"
         )
         matched: list[ExecutionObservation] = []
         for row in rows:
