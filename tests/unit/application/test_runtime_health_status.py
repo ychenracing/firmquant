@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+from firmquant.application.operations import OperatorCommand
 from firmquant.config import Mode
 from firmquant.domain.states import RuntimeState
 from firmquant.persistence.writer_lease import WriterLease
@@ -15,7 +16,6 @@ from tests.integration.test_cli_operations import (
     request,
     service,
 )
-from firmquant.application.operations import OperatorCommand
 
 
 def _ready_runtime_and_heartbeat(config: Path, *, observed_age: timedelta | None) -> None:
