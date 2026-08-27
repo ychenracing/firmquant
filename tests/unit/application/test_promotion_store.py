@@ -80,7 +80,9 @@ def test_promotion_store_derives_sessions_from_immutable_details(tmp_path: Path)
         assert aggregate.observed_sessions == 2
         assert aggregate.order_count == 0
         assert aggregate.max_tracking_error == Decimal("0")
-        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'EXECUTION_OBSERVATION'") == 2
+        assert (
+            database.scalar("SELECT count(*) FROM audit_events WHERE category = 'EXECUTION_OBSERVATION'") == 2
+        )
     finally:
         database.close()
 
