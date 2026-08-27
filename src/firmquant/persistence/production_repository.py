@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import datetime
 
 from firmquant.domain.broker_facts import (
@@ -164,18 +165,16 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             ),
         )
 
-    def _fill_evidence_rows(self, broker_fill_id: str) -> tuple[object, ...]:
-        return tuple(
-            self.database.query_all(
-                """
-                SELECT broker_sequence, safe_payload_json
-                FROM broker_events
-                WHERE event_type = 'FILL_EVIDENCE'
-                  AND json_extract(safe_payload_json, '$.broker_fill_id') = ?
-                ORDER BY sequence
-                """.replace("ORDER BY sequence", "ORDER BY recorded_at, broker_event_id"),
-                (broker_fill_id,),
-            )
+    def _fill_evidence_rows(self, broker_fill_id: str) -> tuple[sqlite3.Row, ...]:
+        return self.database.query_all(
+            """
+            SELECT broker_sequence, safe_payload_json
+            FROM broker_events
+            WHERE event_type = 'FILL_EVIDENCE'
+              AND json_extract(safe_payload_json, '$.broker_fill_id') = ?
+            ORDER BY recorded_at, broker_event_id
+            """,
+            (broker_fill_id,),
         )
 
     def _record_fill_evidence(self, fill: BrokerFillFact, *, execution_id: str) -> None:
@@ -237,8 +236,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 raise PersistenceConflict("stored broker fill lacks execution sequence evidence")
             for row in evidence:
                 try:
-                    payload = json.loads(str(row["safe_payload_json"]))  # type: ignore[index]
-                    sequence = int(row["broker_sequence"])  # type: ignore[index]
+                    payload = json.loads(str(row["safe_payload_json"]))
+                    sequence = int(row["broker_sequence"])
                 except (KeyError, TypeError, ValueError) as error:
                     raise PersistenceConflict("stored broker fill sequence evidence is malformed") from error
                 if sequence != fill.event_sequence or payload.get("identity_sha256") != identity_sha256:
