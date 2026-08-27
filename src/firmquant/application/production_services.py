@@ -88,6 +88,7 @@ from firmquant.risk.capability import (
 from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCommand, RiskLimits
 from firmquant.risk.runtime import risk_limits_from_settings
 from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockReceipt
+from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockReceipt
 from firmquant.scheduling.sessions import WorkflowReceiptStore
 from firmquant.security.secrets import EnvironmentSecretProvider
 from firmquant.strategy.account_sync import AccountStateContract
@@ -147,6 +148,7 @@ class _ExecutionAuthorities:
     facts: ExecutionBrokerSnapshot
     decision: DecisionSnapshot
     planned: Mapping[str, PlannedOrder]
+    reconciliation: ReconciliationReceipt
     reconciliation: ReconciliationReceipt
 
 
@@ -354,6 +356,7 @@ class ProductionServiceHooks:
         self._startup_reconciliation_id: str | None = None
         self._real_order_calls = 0
         self._active_execution_deadlines: ExecutionDeadlines | None = None
+        self._active_execution_deadlines: ExecutionDeadlines | None = None
 
     @property
     def status(self) -> RuntimeStatus:
@@ -364,6 +367,76 @@ class ProductionServiceHooks:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
         return value
+
+    def _monotonic(self) -> float:
+        value = self._monotonic_clock()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_INVALID")
+        observed = float(value)
+        if observed < 0 or (self._last_monotonic is not None and observed < self._last_monotonic):
+            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_ROLLBACK")
+        self._last_monotonic = observed
+        return observed
+
+    def _clock_receipt(self, symbol: Symbol) -> ClockReceipt:
+        system_time = self._now()
+        quote = self._broker.query_quote(symbol)
+        self._last_quote_at = quote.received_at
+        try:
+            return ClockGuard(
+                max_drift=timedelta(seconds=self._settings.execution.max_clock_drift_seconds)
+            ).verify(
+                ClockObservation(
+                    system_time=system_time,
+                    reference_time=quote.event_time,
+                    local_timezone=self._settings.timezone,
+                )
+            )
+        except Exception as error:
+            raise ProductionServicesUnavailable("CLOCK_DRIFT_UNVERIFIED") from error
+
+    def _disconnect_duration(self, *, connected: bool) -> timedelta:
+        observed = self._monotonic()
+        if connected:
+            self._disconnect_started_monotonic = None
+            return timedelta(seconds=observed - observed)
+        if self._disconnect_started_monotonic is None:
+            self._disconnect_started_monotonic = observed
+        return timedelta(seconds=observed - self._disconnect_started_monotonic)
+
+    def _existing_order_age(self, now: datetime) -> timedelta | None:
+        row = self._database.query_one(
+            "SELECT min(created_at) AS created_at FROM execution_intents WHERE state IN "
+            "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED','UNKNOWN')"
+        )
+        if row is None or row["created_at"] is None:
+            return None
+        created_at = datetime.fromisoformat(str(row["created_at"]))
+        if created_at.tzinfo is None or created_at.utcoffset() is None or created_at > now:
+            raise ProductionServicesUnavailable("EXISTING_ORDER_TIME_INVALID")
+        return now - created_at
+
+    def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
+        shanghai = now.astimezone(_SHANGHAI)
+        completion_wall = datetime.combine(
+            shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI
+        )
+        cancel_wall = completion_wall - timedelta(seconds=30)
+        max_window = timedelta(
+            seconds=max(
+                self._settings.execution.sell_window_seconds,
+                self._settings.execution.buy_window_seconds,
+            )
+        )
+        submit_wall = cancel_wall - max_window
+        if shanghai >= submit_wall:
+            return None
+        monotonic_now = self._monotonic()
+        return ExecutionDeadlines(
+            latest_new_submit=monotonic_now + (submit_wall - shanghai).total_seconds(),
+            latest_cancel_initiation=monotonic_now + (cancel_wall - shanghai).total_seconds(),
+            absolute_completion=monotonic_now + (completion_wall - shanghai).total_seconds(),
+        )
 
     def _monotonic(self) -> float:
         value = self._monotonic_clock()
@@ -1369,6 +1442,66 @@ class ProductionServiceHooks:
                     enriched.executions,enriched.eod,
                 ),
             )
+        health = self._broker.health()
+        last_broker_event = self._database.scalar("SELECT max(recorded_at) FROM broker_events")
+        last_reconciliation = self._database.scalar(
+            "SELECT max(completed_at) FROM reconciliation_runs WHERE completed_at IS NOT NULL"
+        )
+        last_decision = self._database.scalar("SELECT max(created_at) FROM decision_snapshots")
+        last_execution = self._database.scalar(
+            "SELECT max(created_at) FROM audit_events WHERE category = 'PRODUCTION_EXECUTION'"
+        )
+        enriched = replace(
+            heartbeat,
+            runtime_state=self._status.state,
+            broker_connected=health.connected,
+            broker_read_healthy=health.read_healthy,
+            broker_write_healthy=health.write_healthy,
+            last_broker_event=None if last_broker_event is None else datetime.fromisoformat(str(last_broker_event)),
+            last_quote=self._last_quote_at,
+            last_reconciliation=(
+                None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
+            ),
+            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
+            last_execution=(
+                None if last_execution is None else datetime.fromisoformat(str(last_execution))
+            ),
+        )
+        with self._database.transaction():
+            self._database.write(
+                """
+                INSERT INTO production_heartbeat(
+                    singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,
+                    broker_connected,broker_read_healthy,broker_write_healthy,pending_events,
+                    last_broker_event,last_quote,last_reconciliation,last_decision,last_execution,
+                    control_request_state,processed_events,decisions,executions,eod
+                ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    mode=excluded.mode,runtime_state=excluded.runtime_state,observed_at=excluded.observed_at,
+                    host_hash=excluded.host_hash,process_id=excluded.process_id,
+                    writer_generation=excluded.writer_generation,broker_connected=excluded.broker_connected,
+                    broker_read_healthy=excluded.broker_read_healthy,
+                    broker_write_healthy=excluded.broker_write_healthy,pending_events=excluded.pending_events,
+                    last_broker_event=excluded.last_broker_event,last_quote=excluded.last_quote,
+                    last_reconciliation=excluded.last_reconciliation,last_decision=excluded.last_decision,
+                    last_execution=excluded.last_execution,control_request_state=excluded.control_request_state,
+                    processed_events=excluded.processed_events,decisions=excluded.decisions,
+                    executions=excluded.executions,eod=excluded.eod
+                """,
+                (
+                    enriched.mode.value,enriched.runtime_state.value,enriched.observed_at.isoformat(),
+                    enriched.host_hash,enriched.process_id,enriched.writer_generation,
+                    int(enriched.broker_connected),int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),enriched.pending_events,
+                    None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
+                    None if enriched.last_quote is None else enriched.last_quote.isoformat(),
+                    None if enriched.last_reconciliation is None else enriched.last_reconciliation.isoformat(),
+                    None if enriched.last_decision is None else enriched.last_decision.isoformat(),
+                    None if enriched.last_execution is None else enriched.last_execution.isoformat(),
+                    enriched.control_request_state,enriched.processed_events,enriched.decisions,
+                    enriched.executions,enriched.eod,
+                ),
+            )
 
     def halt(self, reason_code: str) -> None:
         reason = reason_code if isinstance(reason_code, str) and reason_code else "PRODUCTION_HALTED"
@@ -1481,6 +1614,7 @@ def build_production_runtime(
         universe_policy=universe,
     )
     pump = DomainEventPump(capacity=4096, clock=clock)
+    monotonic_clock = time_module.monotonic
     monotonic_clock = time_module.monotonic
     hooks = ProductionServiceHooks(
         config_path=config_path.resolve(),

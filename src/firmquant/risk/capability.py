@@ -29,6 +29,7 @@ from firmquant.domain.errors import DomainTypeError, DomainValidationError
 from firmquant.domain.states import RuntimeState
 from firmquant.domain.values import Symbol
 from firmquant.scheduling.clock import ClockReceipt
+from firmquant.scheduling.clock import ClockReceipt
 
 from .arm import ArmBinding, ArmLease, ArmLeaseDenied, ArmService
 from .gate import GateAction, GateDecision
@@ -118,6 +119,8 @@ class WriteAuthorizationContext:
             raise DomainTypeError("write context gate decision must be GateDecision or null")
         if self.clock_receipt is not None and not isinstance(self.clock_receipt, ClockReceipt):
             raise DomainTypeError("write context clock receipt must be ClockReceipt or null")
+        if self.clock_receipt is not None and not isinstance(self.clock_receipt, ClockReceipt):
+            raise DomainTypeError("write context clock receipt must be ClockReceipt or null")
         boolean_values = (
             self.startup_reconciliation_passed,
             self.session_valid,
@@ -200,6 +203,18 @@ class _Authorizer:
             reasons.append("BROKER_HEALTH_STALE")
         if not context.startup_reconciliation_passed:
             reasons.append("STARTUP_RECONCILIATION_REQUIRED")
+        if operation in {WriteOperation.SUBMIT, WriteOperation.CANCEL}:
+            receipt = context.clock_receipt
+            if receipt is None:
+                reasons.append("CLOCK_DRIFT_UNVERIFIED")
+            else:
+                maximum_drift_ms = context.settings.execution.max_clock_drift_seconds * 1000
+                if receipt.drift_milliseconds > maximum_drift_ms:
+                    reasons.append("CLOCK_DRIFT_LIMIT")
+                if receipt.system_time > context.now:
+                    reasons.append("CLOCK_RECEIPT_TIME_IN_FUTURE")
+                elif context.now - receipt.system_time > context.max_quote_age:
+                    reasons.append("CLOCK_RECEIPT_STALE")
         if operation in {WriteOperation.SUBMIT, WriteOperation.CANCEL}:
             receipt = context.clock_receipt
             if receipt is None:
