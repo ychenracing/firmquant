@@ -1,0 +1,63 @@
+name: Runtime Format Fix
+
+on:
+  push:
+    branches:
+      - codex/runtime-time-health
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.repository == 'ychenracing/firmquant'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/runtime-time-health
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.33'
+      - run: uv sync --frozen --extra dev
+      - name: Remove transformation residue and format affected files
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/firmquant/risk/gate.py')
+          text = path.read_text(encoding='utf-8')
+          residue = '''        for optional_label, optional_value in (\n        ):\n            if optional_value is not None and not isinstance(optional_value, bool):\n                raise DomainTypeError(f"risk {optional_label} must be bool or null")\n'''
+          if text.count(residue) != 4:
+              raise SystemExit(f'unexpected optional-loop residue count: {text.count(residue)}')
+          path.write_text(text.replace(residue, ''), encoding='utf-8')
+          PY
+          uv run ruff format \
+            src/firmquant/application/production_daemon.py \
+            src/firmquant/broker/production_factory.py \
+            src/firmquant/execution/live_controller.py \
+            src/firmquant/observability/health.py \
+            src/firmquant/risk/gate.py \
+            src/firmquant/scheduling/clock.py
+          uv run ruff check .
+          uv run ruff format --check .
+          rm .github/workflows/runtime-format-fix.yml
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          git config user.name 'firmquant-runtime-safety-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/firmquant/application/production_daemon.py \
+                  src/firmquant/broker/production_factory.py \
+                  src/firmquant/execution/live_controller.py \
+                  src/firmquant/observability/health.py \
+                  src/firmquant/risk/gate.py \
+                  src/firmquant/scheduling/clock.py \
+                  .github/workflows/runtime-format-fix.yml
+          git commit -m 'Normalize runtime safety formatting'
+          git push origin HEAD:codex/runtime-time-health
