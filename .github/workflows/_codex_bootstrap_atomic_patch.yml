@@ -1,0 +1,34 @@
+name: Apply isolated bootstrap atomicity patch
+
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+    paths:
+      - .github/_codex_bootstrap_atomic_patch.py
+      - .github/workflows/_codex_bootstrap_atomic_patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Apply exact source patch
+        run: python .github/_codex_bootstrap_atomic_patch.py
+      - name: Remove temporary patch machinery
+        run: rm .github/_codex_bootstrap_atomic_patch.py .github/workflows/_codex_bootstrap_atomic_patch.yml
+      - name: Commit and push clean result
+        run: |
+          git diff --check
+          git config user.name "firmquant-agent"
+          git config user.email "firmquant-agent@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 1
+          git commit -m "fix: make account bootstrap crash-consistent"
+          git push origin HEAD:codex/account-authority-reconciliation
