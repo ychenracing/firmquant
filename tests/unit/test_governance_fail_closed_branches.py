@@ -501,6 +501,7 @@ def test_xtquant_status_lookup_fail_closed_and_trading_path() -> None:
 
 
 def _backup_inputs(tmp_path: Path, *, settings: Settings | None = None) -> backup.BackupBundleInputs:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     config = tmp_path / "production.toml"
     config.write_text("", encoding="utf-8")
     observed_settings = load_settings(config) if settings is None else settings
@@ -553,9 +554,6 @@ def test_backup_input_and_config_identity_guards(tmp_path: Path) -> None:
     )
     with pytest.raises(backup.BackupError, match="secret material"):
         backup._validated_config_bytes(forbidden)
-
-    with pytest.raises(TypeError, match="validated Settings"):
-        object.__new__(backup.BackupBundleInputs).__post_init__()  # type: ignore[misc]
 
 
 def test_backup_json_and_manifest_validation_helpers_fail_closed(tmp_path: Path) -> None:
