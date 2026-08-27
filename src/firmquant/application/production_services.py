@@ -148,8 +148,6 @@ class _ExecutionAuthorities:
     decision: DecisionSnapshot
     planned: Mapping[str, PlannedOrder]
     reconciliation: ReconciliationReceipt
-    reconciliation: ReconciliationReceipt
-    reconciliation: ReconciliationReceipt
 
 
 def _hash_event(prefix: str, payload: object) -> str:
@@ -356,8 +354,6 @@ class ProductionServiceHooks:
         self._startup_reconciliation_id: str | None = None
         self._real_order_calls = 0
         self._active_execution_deadlines: ExecutionDeadlines | None = None
-        self._active_execution_deadlines: ExecutionDeadlines | None = None
-        self._active_execution_deadlines: ExecutionDeadlines | None = None
 
     @property
     def status(self) -> RuntimeStatus:
@@ -368,142 +364,6 @@ class ProductionServiceHooks:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
         return value
-
-    def _monotonic(self) -> float:
-        value = self._monotonic_clock()
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_INVALID")
-        observed = float(value)
-        if observed < 0 or (self._last_monotonic is not None and observed < self._last_monotonic):
-            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_ROLLBACK")
-        self._last_monotonic = observed
-        return observed
-
-    def _clock_receipt(self, symbol: Symbol) -> ClockReceipt:
-        system_time = self._now()
-        quote = self._broker.query_quote(symbol)
-        self._last_quote_at = quote.received_at
-        try:
-            return ClockGuard(
-                max_drift=timedelta(seconds=self._settings.execution.max_clock_drift_seconds)
-            ).verify(
-                ClockObservation(
-                    system_time=system_time,
-                    reference_time=quote.event_time,
-                    local_timezone=self._settings.timezone,
-                )
-            )
-        except Exception as error:
-            raise ProductionServicesUnavailable("CLOCK_DRIFT_UNVERIFIED") from error
-
-    def _disconnect_duration(self, *, connected: bool) -> timedelta:
-        observed = self._monotonic()
-        if connected:
-            self._disconnect_started_monotonic = None
-            return timedelta(seconds=observed - observed)
-        if self._disconnect_started_monotonic is None:
-            self._disconnect_started_monotonic = observed
-        return timedelta(seconds=observed - self._disconnect_started_monotonic)
-
-    def _existing_order_age(self, now: datetime) -> timedelta | None:
-        row = self._database.query_one(
-            "SELECT min(created_at) AS created_at FROM execution_intents WHERE state IN "
-            "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED','UNKNOWN')"
-        )
-        if row is None or row["created_at"] is None:
-            return None
-        created_at = datetime.fromisoformat(str(row["created_at"]))
-        if created_at.tzinfo is None or created_at.utcoffset() is None or created_at > now:
-            raise ProductionServicesUnavailable("EXISTING_ORDER_TIME_INVALID")
-        return now - created_at
-
-    def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
-        shanghai = now.astimezone(_SHANGHAI)
-        completion_wall = datetime.combine(shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI)
-        cancel_wall = completion_wall - timedelta(seconds=30)
-        max_window = timedelta(
-            seconds=max(
-                self._settings.execution.sell_window_seconds,
-                self._settings.execution.buy_window_seconds,
-            )
-        )
-        submit_wall = cancel_wall - max_window
-        if shanghai >= submit_wall:
-            return None
-        monotonic_now = self._monotonic()
-        return ExecutionDeadlines(
-            latest_new_submit=monotonic_now + (submit_wall - shanghai).total_seconds(),
-            latest_cancel_initiation=monotonic_now + (cancel_wall - shanghai).total_seconds(),
-            absolute_completion=monotonic_now + (completion_wall - shanghai).total_seconds(),
-        )
-
-    def _monotonic(self) -> float:
-        value = self._monotonic_clock()
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_INVALID")
-        observed = float(value)
-        if observed < 0 or (self._last_monotonic is not None and observed < self._last_monotonic):
-            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_ROLLBACK")
-        self._last_monotonic = observed
-        return observed
-
-    def _clock_receipt(self, symbol: Symbol) -> ClockReceipt:
-        system_time = self._now()
-        quote = self._broker.query_quote(symbol)
-        self._last_quote_at = quote.received_at
-        try:
-            return ClockGuard(
-                max_drift=timedelta(seconds=self._settings.execution.max_clock_drift_seconds)
-            ).verify(
-                ClockObservation(
-                    system_time=system_time,
-                    reference_time=quote.event_time,
-                    local_timezone=self._settings.timezone,
-                )
-            )
-        except Exception as error:
-            raise ProductionServicesUnavailable("CLOCK_DRIFT_UNVERIFIED") from error
-
-    def _disconnect_duration(self, *, connected: bool) -> timedelta:
-        observed = self._monotonic()
-        if connected:
-            self._disconnect_started_monotonic = None
-            return timedelta(seconds=observed - observed)
-        if self._disconnect_started_monotonic is None:
-            self._disconnect_started_monotonic = observed
-        return timedelta(seconds=observed - self._disconnect_started_monotonic)
-
-    def _existing_order_age(self, now: datetime) -> timedelta | None:
-        row = self._database.query_one(
-            "SELECT min(created_at) AS created_at FROM execution_intents WHERE state IN "
-            "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED','UNKNOWN')"
-        )
-        if row is None or row["created_at"] is None:
-            return None
-        created_at = datetime.fromisoformat(str(row["created_at"]))
-        if created_at.tzinfo is None or created_at.utcoffset() is None or created_at > now:
-            raise ProductionServicesUnavailable("EXISTING_ORDER_TIME_INVALID")
-        return now - created_at
-
-    def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
-        shanghai = now.astimezone(_SHANGHAI)
-        completion_wall = datetime.combine(shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI)
-        cancel_wall = completion_wall - timedelta(seconds=30)
-        max_window = timedelta(
-            seconds=max(
-                self._settings.execution.sell_window_seconds,
-                self._settings.execution.buy_window_seconds,
-            )
-        )
-        submit_wall = cancel_wall - max_window
-        if shanghai >= submit_wall:
-            return None
-        monotonic_now = self._monotonic()
-        return ExecutionDeadlines(
-            latest_new_submit=monotonic_now + (submit_wall - shanghai).total_seconds(),
-            latest_cancel_initiation=monotonic_now + (cancel_wall - shanghai).total_seconds(),
-            absolute_completion=monotonic_now + (completion_wall - shanghai).total_seconds(),
-        )
 
     def _monotonic(self) -> float:
         value = self._monotonic_clock()

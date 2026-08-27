@@ -84,7 +84,7 @@ class ProductionHeartbeat:
             raise ValueError("heartbeat time must be timezone-aware")
         if not isinstance(self.host_hash, str) or _SHA256.fullmatch(self.host_hash) is None:
             raise ValueError("heartbeat host hash must be SHA-256")
-        for label, value in (
+        for label, integer_value in (
             ("process id", self.process_id),
             ("writer generation", self.writer_generation),
             ("pending events", self.pending_events),
@@ -93,26 +93,28 @@ class ProductionHeartbeat:
             ("executions", self.executions),
             ("EOD", self.eod),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if isinstance(integer_value, bool) or not isinstance(integer_value, int) or integer_value < 0:
                 raise ValueError(f"heartbeat {label} must be a nonnegative integer")
-        for label, value in (
+        for label, boolean_value in (
             ("broker connected", self.broker_connected),
             ("broker read health", self.broker_read_healthy),
             ("broker write health", self.broker_write_healthy),
         ):
-            if type(value) is not bool:
+            if type(boolean_value) is not bool:
                 raise TypeError(f"heartbeat {label} must be bool")
         if self.broker_write_healthy and not self.broker_read_healthy:
             raise ValueError("heartbeat write health requires read health")
-        for label, value in (
+        for label, timestamp_value in (
             ("last broker event", self.last_broker_event),
             ("last quote", self.last_quote),
             ("last reconciliation", self.last_reconciliation),
             ("last decision", self.last_decision),
             ("last execution", self.last_execution),
         ):
-            if value is not None and (
-                not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None
+            if timestamp_value is not None and (
+                not isinstance(timestamp_value, datetime)
+                or timestamp_value.tzinfo is None
+                or timestamp_value.utcoffset() is None
             ):
                 raise ValueError(f"heartbeat {label} must be timezone-aware or null")
         if (

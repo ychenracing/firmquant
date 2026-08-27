@@ -33,6 +33,7 @@ from firmquant.domain.orders import OrderState
 from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.execution.policy import ExecutionPolicy, FeeSchedule, FillModel
+from firmquant.observability.health import ReadOnlyDoctorBroker
 from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyReportBuilder
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
@@ -564,7 +565,7 @@ class ConfiguredOperatorPorts:
         except Exception as error:
             raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE") from error
 
-    def doctor_broker(self) -> object:
+    def doctor_broker(self) -> ReadOnlyDoctorBroker:
         """Build a fresh diagnostic broker; production returns a read-only XtQuant facade."""
 
         identity = StrategyIdentity.locked()
@@ -582,7 +583,7 @@ class ConfiguredOperatorPorts:
                     raise OperatorCommandDenied("XTQUANT_SDK_UNAVAILABLE") from error
                 raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE") from error
         account = _safe_account(self._account_path(settings))
-        return self._gateway(settings, account)
+        return cast(ReadOnlyDoctorBroker, self._gateway(settings, account))
 
     def _bootstrap_data_identity(
         self,

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from firmquant.config import BrokerAdapter, Mode, Settings
 from firmquant.domain.broker_facts import (
@@ -86,13 +86,16 @@ def _build_transport(
         manifest=manifest,
         clock=clock,
     )
-    return ProductionXtQuantBroker.load_sdk(
-        userdata_path=userdata,
-        session_id=session_id,
-        account_id=account_id,
-        clock=clock,
-        importer=importer,
-        safety_facts=safety,
+    return cast(
+        ProductionXtQuantBroker,
+        ProductionXtQuantBroker.load_sdk(
+            userdata_path=userdata,
+            session_id=session_id,
+            account_id=account_id,
+            clock=clock,
+            importer=importer,
+            safety_facts=safety,
+        ),
     )
 
 
