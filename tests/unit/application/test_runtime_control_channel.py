@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from firmquant.application.control_channel import (
     MAX_CONTROL_REQUEST_BYTES,
     ControlCommand,
