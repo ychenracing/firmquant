@@ -31,12 +31,12 @@ from firmquant.domain.broker_facts import (
     QuoteFact,
     Side,
 )
-from firmquant.domain.values import Shares, Symbol
+from firmquant.domain.values import Symbol
 from firmquant.execution.planner import ExecutionBrokerSnapshot, ExecutionPlan, PlannedOrder
 from firmquant.execution.policy import ExecutionPolicy, FeeSchedule, FillModel
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
-from firmquant.persistence.repositories import canonical_json, canonical_sha256
+from firmquant.persistence.repositories import canonical_sha256
 from firmquant.strategy.snapshots import DecisionSnapshot
 
 _ZERO = Decimal(0)
@@ -186,9 +186,7 @@ def _target_observations(
             target_shares = planned_order.target_shares.value
         else:
             unit = instrument.trading_unit.value
-            raw = int(
-                (portfolio_equity * weight / reference).to_integral_value(rounding=ROUND_FLOOR)
-            )
+            raw = int((portfolio_equity * weight / reference).to_integral_value(rounding=ROUND_FLOOR))
             target_shares = raw - raw % unit
         targets[symbol] = TargetObservation(
             symbol=symbol.canonical,
@@ -274,7 +272,10 @@ def _duplicate_fills(database: Database, *, session: date) -> int:
 
 
 def _known_client_ids(database: Database) -> frozenset[str]:
-    return frozenset(str(row["uquant_order_id"]) for row in database.query_all("SELECT uquant_order_id FROM execution_intents"))
+    return frozenset(
+        str(row["uquant_order_id"])
+        for row in database.query_all("SELECT uquant_order_id FROM execution_intents")
+    )
 
 
 def _external_activity(database: Database, broker: BrokerGateway, *, session: date) -> int:
@@ -282,7 +283,8 @@ def _external_activity(database: Database, broker: BrokerGateway, *, session: da
     return sum(
         1
         for item in broker.query_orders()
-        if item.session_date == session and (item.client_order_id is None or item.client_order_id not in known)
+        if item.session_date == session
+        and (item.client_order_id is None or item.client_order_id not in known)
     )
 
 

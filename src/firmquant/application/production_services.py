@@ -19,6 +19,12 @@ from zoneinfo import ZoneInfo
 
 from firmquant.application.close_checkpoint import CloseCheckpointStore, CloseStep
 from firmquant.application.event_pump import DomainEventPump
+from firmquant.application.execution_evidence import EvidenceStage, ExecutionEvidenceStore
+from firmquant.application.execution_evidence_runtime import (
+    build_shadow_observation,
+    finalize_canary_observation,
+    record_canary_plan,
+)
 from firmquant.application.production_daemon import (
     ProductionCycleResult,
     ProductionDaemon,
@@ -31,7 +37,6 @@ from firmquant.application.production_identity import (
     promotion_config_sha256,
 )
 from firmquant.application.production_runtime import ProductionRuntime
-from firmquant.application.promotion import ShadowPromotionEvidence
 from firmquant.application.promotion_store import PromotionStore
 from firmquant.broker.gateway import BrokerGateway, BrokerOrderCommand
 from firmquant.broker.production_factory import build_production_xtquant_gateway
@@ -556,7 +561,9 @@ class ProductionServiceHooks:
         if self._settings.mode is Mode.SHADOW:
             return
         thresholds = self._settings.promotion
-        if not PromotionStore(self._database).qualifies(
+        store = PromotionStore(self._database)
+        if not store.qualifies(
+            stage=EvidenceStage.SHADOW,
             firmquant_commit=self._identity.firmquant_commit,
             uquant_commit=self._identity.uquant_commit,
             config_sha256=self._identity.promotion_config_sha256,
@@ -566,6 +573,20 @@ class ProductionServiceHooks:
             max_tracking_error=thresholds.max_target_tracking_error,
         ):
             raise ProductionServicesUnavailable("SHADOW_PROMOTION_EVIDENCE_REQUIRED")
+        if self._settings.mode is Mode.CANARY:
+            return
+        if not store.qualifies(
+            stage=EvidenceStage.CANARY,
+            firmquant_commit=self._identity.firmquant_commit,
+            uquant_commit=self._identity.uquant_commit,
+            config_sha256=self._identity.promotion_config_sha256,
+            account_hash=account_hash,
+            min_sessions=thresholds.min_canary_sessions,
+            min_orders=thresholds.min_canary_orders,
+            min_fills=thresholds.min_canary_fills,
+            max_tracking_error=thresholds.max_canary_target_tracking_error,
+        ):
+            raise ProductionServicesUnavailable("CANARY_PROMOTION_EVIDENCE_REQUIRED")
 
     def startup(self) -> str:
         self._writer.assert_current()
@@ -1105,63 +1126,37 @@ class ProductionServiceHooks:
             context_provider=context_provider,
         )
 
-    def _shadow_execute(self, plan: ExecutionPlan, decision: DecisionSnapshot) -> None:
-        account_hash = self._broker.query_account().account_id_hash
-        store = PromotionStore(self._database)
-        prior = store.latest(
+    def _shadow_execute(
+        self,
+        plan: ExecutionPlan,
+        decision: DecisionSnapshot,
+        facts: ExecutionBrokerSnapshot,
+    ) -> None:
+        observation = build_shadow_observation(
+            database=self._database,
+            broker=self._broker,
+            facts=facts,
+            plan=plan,
+            decision=decision,
             firmquant_commit=self._identity.firmquant_commit,
             uquant_commit=self._identity.uquant_commit,
-            config_sha256=self._identity.promotion_config_sha256,
-            account_hash=account_hash,
+            promotion_config_sha256=self._identity.promotion_config_sha256,
+            calendar_sha256=self._calendar.sha256,
+            safety_manifest=self._safety,
+            created_at=self._now(),
         )
-        store.append(
-            ShadowPromotionEvidence(
-                firmquant_commit=self._identity.firmquant_commit,
-                uquant_commit=self._identity.uquant_commit,
-                config_sha256=self._identity.promotion_config_sha256,
-                account_hash=account_hash,
-                observed_sessions=1 if prior is None else prior.observed_sessions + 1,
-                hypothetical_orders=len(plan.orders)
-                if prior is None
-                else prior.hypothetical_orders + len(plan.orders),
-                unresolved_orders=_count(
-                    self._database.scalar(
-                        "SELECT count(*) FROM execution_intents WHERE state IN "
-                        "('SUBMITTING','CANCEL_REQUESTED','UNKNOWN')"
-                    ),
-                    label="UNRESOLVED_ORDER_COUNT",
-                ),
-                external_orders=self._external_order_count(),
-                duplicate_economic_orders=_count(
-                    self._database.scalar(
-                        "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
-                        "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
-                    ),
-                    label="DUPLICATE_ECONOMIC_ORDER_COUNT",
-                ),
-                duplicate_fills=_count(
-                    self._database.scalar(
-                        "SELECT count(*) FROM (SELECT broker_fill_id FROM fills "
-                        "GROUP BY broker_fill_id HAVING count(*) > 1)"
-                    ),
-                    label="DUPLICATE_FILL_COUNT",
-                ),
-                max_target_tracking_error=max(
-                    Decimal(0) if prior is None else prior.max_target_tracking_error,
-                    Decimal(1) if plan.blockers else Decimal(0),
-                ),
-                created_at=self._now(),
-            )
-        )
+        ExecutionEvidenceStore(self._database).append(observation)
         self._audit(
             "shadow-execution:" + decision.decision_id + ":" + plan.execution_session.isoformat(),
             "SHADOW_EXECUTION",
             {
                 "schema": "firmquant.shadow-execution.v1",
                 "decision_id": decision.decision_id,
+                "plan_id": plan.plan_id,
                 "execution_session": plan.execution_session,
                 "hypothetical_order_count": len(plan.orders),
-                "blocker_count": len(plan.blockers),
+                "blockers": [item.reason_code for item in plan.blockers],
+                "observation_sha256": observation.content_sha256,
                 "real_order_calls": 0,
             },
         )
@@ -1194,7 +1189,7 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable("EXECUTION_MARKET_FACT_INVALID")
         plan = ExecutionPlanner().plan(decision, facts)
         if self._settings.mode is Mode.SHADOW:
-            self._shadow_execute(plan, decision)
+            self._shadow_execute(plan, decision, facts)
             self._audit(
                 event_id,
                 "PRODUCTION_EXECUTION",
@@ -1209,6 +1204,19 @@ class ProductionServiceHooks:
             )
             return 1
         self._require_promotion(facts.broker_snapshot.account.account_id_hash)
+        if self._settings.mode is Mode.CANARY:
+            record_canary_plan(
+                database=self._database,
+                broker=self._broker,
+                facts=facts,
+                plan=plan,
+                decision=decision,
+                firmquant_commit=self._identity.firmquant_commit,
+                uquant_commit=self._identity.uquant_commit,
+                promotion_config_sha256=self._identity.promotion_config_sha256,
+                calendar_sha256=self._calendar.sha256,
+                created_at=self._now(),
+            )
         authorities = _ExecutionAuthorities(
             plan=plan,
             facts=facts,
@@ -1287,8 +1295,10 @@ class ProductionServiceHooks:
 
         eod = self._close.load(session, CloseStep.EOD_RECONCILED)
         eod_created_now = eod is None
+        eod_snapshot: BrokerSnapshot | None = None
         if eod is None:
             receipt, snapshot, _ = self._reconcile(ReconciliationKind.EOD)
+            eod_snapshot = snapshot
             eod = self._close.append(
                 session,
                 CloseStep.EOD_RECONCILED,
@@ -1299,6 +1309,20 @@ class ProductionServiceHooks:
                 },
                 created_at=self._now(),
             )
+
+        if self._settings.mode is Mode.CANARY:
+            if eod_snapshot is None:
+                eod_snapshot = self._capture()
+            if eod_snapshot.session_date != session:
+                raise ProductionServicesUnavailable("CANARY_EOD_SNAPSHOT_SESSION_MISMATCH")
+            canary = finalize_canary_observation(
+                database=self._database,
+                eod_snapshot=eod_snapshot,
+                session=session,
+                created_at=self._now(),
+            )
+            if canary is not None:
+                ExecutionEvidenceStore(self._database).append(canary)
 
         data = self._close.load(session, CloseStep.DATA_VALIDATED)
         if data is None:
@@ -1483,156 +1507,14 @@ class ProductionServiceHooks:
             broker_connected=health.connected,
             broker_read_healthy=health.read_healthy,
             broker_write_healthy=health.write_healthy,
-            last_broker_event=None
-            if last_broker_event is None
-            else datetime.fromisoformat(str(last_broker_event)),
+            last_broker_event=(
+                None if last_broker_event is None else datetime.fromisoformat(str(last_broker_event))
+            ),
             last_quote=self._last_quote_at,
             last_reconciliation=(
                 None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
             ),
-            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
-            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
-        )
-        with self._database.transaction():
-            self._database.write(
-                """
-                INSERT INTO production_heartbeat(
-                    singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,
-                    broker_connected,broker_read_healthy,broker_write_healthy,pending_events,
-                    last_broker_event,last_quote,last_reconciliation,last_decision,last_execution,
-                    control_request_state,processed_events,decisions,executions,eod
-                ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(singleton_id) DO UPDATE SET
-                    mode=excluded.mode,runtime_state=excluded.runtime_state,observed_at=excluded.observed_at,
-                    host_hash=excluded.host_hash,process_id=excluded.process_id,
-                    writer_generation=excluded.writer_generation,broker_connected=excluded.broker_connected,
-                    broker_read_healthy=excluded.broker_read_healthy,
-                    broker_write_healthy=excluded.broker_write_healthy,pending_events=excluded.pending_events,
-                    last_broker_event=excluded.last_broker_event,last_quote=excluded.last_quote,
-                    last_reconciliation=excluded.last_reconciliation,last_decision=excluded.last_decision,
-                    last_execution=excluded.last_execution,control_request_state=excluded.control_request_state,
-                    processed_events=excluded.processed_events,decisions=excluded.decisions,
-                    executions=excluded.executions,eod=excluded.eod
-                """,
-                (
-                    enriched.mode.value,
-                    enriched.runtime_state.value,
-                    enriched.observed_at.isoformat(),
-                    enriched.host_hash,
-                    enriched.process_id,
-                    enriched.writer_generation,
-                    int(enriched.broker_connected),
-                    int(enriched.broker_read_healthy),
-                    int(enriched.broker_write_healthy),
-                    enriched.pending_events,
-                    None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
-                    None if enriched.last_quote is None else enriched.last_quote.isoformat(),
-                    None
-                    if enriched.last_reconciliation is None
-                    else enriched.last_reconciliation.isoformat(),
-                    None if enriched.last_decision is None else enriched.last_decision.isoformat(),
-                    None if enriched.last_execution is None else enriched.last_execution.isoformat(),
-                    enriched.control_request_state,
-                    enriched.processed_events,
-                    enriched.decisions,
-                    enriched.executions,
-                    enriched.eod,
-                ),
-            )
-        health = self._broker.health()
-        last_broker_event = self._database.scalar("SELECT max(recorded_at) FROM broker_events")
-        last_reconciliation = self._database.scalar(
-            "SELECT max(completed_at) FROM reconciliation_runs WHERE completed_at IS NOT NULL"
-        )
-        last_decision = self._database.scalar("SELECT max(created_at) FROM decision_snapshots")
-        last_execution = self._database.scalar(
-            "SELECT max(created_at) FROM audit_events WHERE category = 'PRODUCTION_EXECUTION'"
-        )
-        enriched = replace(
-            heartbeat,
-            runtime_state=self._status.state,
-            broker_connected=health.connected,
-            broker_read_healthy=health.read_healthy,
-            broker_write_healthy=health.write_healthy,
-            last_broker_event=None
-            if last_broker_event is None
-            else datetime.fromisoformat(str(last_broker_event)),
-            last_quote=self._last_quote_at,
-            last_reconciliation=(
-                None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
-            ),
-            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
-            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
-        )
-        with self._database.transaction():
-            self._database.write(
-                """
-                INSERT INTO production_heartbeat(
-                    singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,
-                    broker_connected,broker_read_healthy,broker_write_healthy,pending_events,
-                    last_broker_event,last_quote,last_reconciliation,last_decision,last_execution,
-                    control_request_state,processed_events,decisions,executions,eod
-                ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(singleton_id) DO UPDATE SET
-                    mode=excluded.mode,runtime_state=excluded.runtime_state,observed_at=excluded.observed_at,
-                    host_hash=excluded.host_hash,process_id=excluded.process_id,
-                    writer_generation=excluded.writer_generation,broker_connected=excluded.broker_connected,
-                    broker_read_healthy=excluded.broker_read_healthy,
-                    broker_write_healthy=excluded.broker_write_healthy,pending_events=excluded.pending_events,
-                    last_broker_event=excluded.last_broker_event,last_quote=excluded.last_quote,
-                    last_reconciliation=excluded.last_reconciliation,last_decision=excluded.last_decision,
-                    last_execution=excluded.last_execution,control_request_state=excluded.control_request_state,
-                    processed_events=excluded.processed_events,decisions=excluded.decisions,
-                    executions=excluded.executions,eod=excluded.eod
-                """,
-                (
-                    enriched.mode.value,
-                    enriched.runtime_state.value,
-                    enriched.observed_at.isoformat(),
-                    enriched.host_hash,
-                    enriched.process_id,
-                    enriched.writer_generation,
-                    int(enriched.broker_connected),
-                    int(enriched.broker_read_healthy),
-                    int(enriched.broker_write_healthy),
-                    enriched.pending_events,
-                    None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
-                    None if enriched.last_quote is None else enriched.last_quote.isoformat(),
-                    None
-                    if enriched.last_reconciliation is None
-                    else enriched.last_reconciliation.isoformat(),
-                    None if enriched.last_decision is None else enriched.last_decision.isoformat(),
-                    None if enriched.last_execution is None else enriched.last_execution.isoformat(),
-                    enriched.control_request_state,
-                    enriched.processed_events,
-                    enriched.decisions,
-                    enriched.executions,
-                    enriched.eod,
-                ),
-            )
-        health = self._broker.health()
-        last_broker_event = self._database.scalar("SELECT max(recorded_at) FROM broker_events")
-        last_reconciliation = self._database.scalar(
-            "SELECT max(completed_at) FROM reconciliation_runs WHERE completed_at IS NOT NULL"
-        )
-        last_decision = self._database.scalar("SELECT max(created_at) FROM decision_snapshots")
-        last_execution = self._database.scalar(
-            "SELECT max(created_at) FROM audit_events WHERE category = 'PRODUCTION_EXECUTION'"
-        )
-        enriched = replace(
-            heartbeat,
-            runtime_state=self._status.state,
-            broker_connected=health.connected,
-            broker_read_healthy=health.read_healthy,
-            broker_write_healthy=health.write_healthy,
-            last_broker_event=None
-            if last_broker_event is None
-            else datetime.fromisoformat(str(last_broker_event)),
-            last_quote=self._last_quote_at,
-            last_reconciliation=(
-                None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
-            ),
-            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
+            last_decision=(None if last_decision is None else datetime.fromisoformat(str(last_decision))),
             last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
         )
         with self._database.transaction():
