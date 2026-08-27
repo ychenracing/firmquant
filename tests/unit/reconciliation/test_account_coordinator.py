@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -9,12 +10,13 @@ import pytest
 
 from firmquant.persistence.account_authority import AccountBinding, AccountBindingRepository
 from firmquant.persistence.database import Database
+from firmquant.persistence.repositories import canonical_json
 from firmquant.persistence.recovery import RecoveryContradiction, UquantAccountStateStore
 from firmquant.reconciliation.account_coordinator import (
     AccountReconciliationBlocked,
     AccountReconciliationCoordinator,
 )
-from firmquant.reconciliation.models import ReconciliationKind
+from firmquant.reconciliation.models import ReconciliationKind, ReconciliationReceipt
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.runtime_account import RuntimeAccountRepository
 from tests.fixtures.broker_snapshots import completed_buy_snapshot, open_buy_account
@@ -38,11 +40,27 @@ class Reconciler:
         self.calls.append((kind, facts))
         if self.before_return is not None:
             self.before_return()
-        return SimpleNamespace(
-            reconciliation_id="recon_" + "a" * 64,
+        details_json = canonical_json({"test": "account-coordinator"})
+        details_sha256 = hashlib.sha256(details_json.encode("utf-8")).hexdigest()
+        identity = canonical_json(
+            {
+                "kind": kind,
+                "details_sha256": details_sha256,
+                "started_at": NOW,
+                "completed_at": NOW,
+            }
+        )
+        return ReconciliationReceipt(
+            reconciliation_id="recon_" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
             kind=kind,
+            snapshot_id=facts.broker_snapshot.snapshot_id,
+            started_at=NOW,
+            completed_at=NOW,
             passed=self.passed,
             blockers=self.blockers,
+            operator_actions=(),
+            details_json=details_json,
+            details_sha256=details_sha256,
         )
 
     def commit(self, _receipt, *, broker_snapshot_sha256):

@@ -97,8 +97,14 @@ class _CommitRejectedAccountRepository:
     def prepare_broker_snapshot(self, snapshot):
         return prepare_account_sync(self._account, snapshot)
 
-    def commit_broker_snapshot(self, _prepared, *, finalize=None):
-        del finalize
+    def commit_broker_snapshot(
+        self,
+        _prepared,
+        *,
+        finalize=None,
+        finalization_payload=None,
+    ):
+        del finalize, finalization_payload
         raise RecoveryContradiction("injected account commit failure")
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hashlib
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -34,7 +35,7 @@ from firmquant.reconciliation.account_preflight import (
     account_difference_sha256,
     evaluate_account_preflight,
 )
-from firmquant.reconciliation.models import ReconciliationKind
+from firmquant.reconciliation.models import ReconciliationKind, ReconciliationReceipt
 from firmquant.strategy import runtime_account as runtime_account_module
 from firmquant.strategy.account_sync import sync_account
 from firmquant.strategy.identity import StrategyIdentity
@@ -554,15 +555,43 @@ class _FakeAccounts:
     def prepare_broker_snapshot(self, _snapshot):
         return self.prepared
 
-    def commit_broker_snapshot(self, _prepared, *, finalize=None):
+    def commit_broker_snapshot(
+        self,
+        _prepared,
+        *,
+        finalize=None,
+        finalization_payload=None,
+    ):
+        assert finalization_payload is not None
         if finalize is not None:
             finalize()
         return self.commit_result
 
 
 class _PassingReconciler:
-    def evaluate(self, _kind, _facts):
-        return SimpleNamespace(passed=True, blockers=())
+    def evaluate(self, kind, facts):
+        details_json = canonical_json({"test": "account-authority-edges"})
+        details_sha256 = hashlib.sha256(details_json.encode("utf-8")).hexdigest()
+        identity = canonical_json(
+            {
+                "kind": kind,
+                "details_sha256": details_sha256,
+                "started_at": NOW,
+                "completed_at": NOW,
+            }
+        )
+        return ReconciliationReceipt(
+            reconciliation_id="recon_" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+            kind=kind,
+            snapshot_id=facts.broker_snapshot.snapshot_id,
+            started_at=NOW,
+            completed_at=NOW,
+            passed=True,
+            blockers=(),
+            operator_actions=(),
+            details_json=details_json,
+            details_sha256=details_sha256,
+        )
 
     def commit(self, _receipt, *, broker_snapshot_sha256):
         assert len(broker_snapshot_sha256) == 64
