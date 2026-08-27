@@ -22,7 +22,11 @@ from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus
 from firmquant.domain.orders import OrderState
 from firmquant.domain.states import RuntimeState
 from firmquant.domain.values import Money
-from firmquant.execution.live_controller import ExecutionWindowPolicy, LiveExecutionController
+from firmquant.execution.live_controller import (
+    ExecutionDeadlines,
+    ExecutionWindowPolicy,
+    LiveExecutionController,
+)
 from firmquant.execution.planner import ExecutionPlanner
 from firmquant.execution.policy import FeeSchedule
 from firmquant.persistence.database import Database
@@ -42,12 +46,25 @@ from tests.fixtures.session_cases import NOW, decision_snapshot, execution_snaps
 class MutableClock:
     def __init__(self, value: datetime) -> None:
         self.value = value
+        self.elapsed = 0.0
 
     def __call__(self) -> datetime:
         return self.value
 
+    def monotonic(self) -> float:
+        return self.elapsed
+
     def sleep(self, seconds: float) -> None:
         self.value += timedelta(seconds=seconds)
+        self.elapsed += seconds
+
+
+class LeaseGuard:
+    def __init__(self) -> None:
+        self.checks = 0
+
+    def check(self) -> None:
+        self.checks += 1
 
 
 def live_settings() -> Settings:
@@ -189,6 +206,8 @@ def controller(
     *,
     deny_submit: bool = False,
     deny_cancel: bool = False,
+    lease_guard: LeaseGuard | None = None,
+    deadlines: ExecutionDeadlines | None = None,
 ) -> LiveExecutionController:
     return LiveExecutionController(
         capability=capability(
@@ -206,6 +225,9 @@ def controller(
             minimum_order_lifetime=timedelta(seconds=1),
             poll_interval=timedelta(seconds=1),
         ),
+        lease_guard=lease_guard or LeaseGuard(),
+        monotonic_clock=clock.monotonic,
+        execution_deadlines=deadlines or ExecutionDeadlines(60.0, 90.0, 120.0),
         sleep=clock.sleep,
     )
 
