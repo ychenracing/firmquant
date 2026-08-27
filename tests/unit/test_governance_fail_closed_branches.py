@@ -253,10 +253,10 @@ def test_generation_candidate_validation_and_pending_guards(tmp_path: Path) -> N
     manifest.write_bytes(original)
 
     assert store.recover_pending_promotion() is None
-    with pytest.raises(generations.DataGenerationError, match="pending.*unavailable"):
+    with pytest.raises(generations.DataGenerationError, match=r"pending.*unavailable"):
         store._pending_payload()
     store.pending_promotion.write_text("{", encoding="utf-8")
-    with pytest.raises(generations.DataGenerationError, match="pending.*invalid"):
+    with pytest.raises(generations.DataGenerationError, match=r"pending.*invalid"):
         store._pending_payload()
     with pytest.raises(generations.DataGenerationError, match="cannot refresh"):
         store.refresh_active_manifest()
