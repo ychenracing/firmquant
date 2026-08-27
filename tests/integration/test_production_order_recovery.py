@@ -46,9 +46,7 @@ class AbsenceProofFakeBroker(FakeBroker):
         self.proof_commands: list[BrokerOrderCommand] = []
         self.connect()
 
-    def prove_order_not_accepted(
-        self, command: BrokerOrderCommand
-    ) -> BrokerOrderAbsenceProof | None:
+    def prove_order_not_accepted(self, command: BrokerOrderCommand) -> BrokerOrderAbsenceProof | None:
         self.proof_commands.append(command)
         return BrokerOrderAbsenceProof(
             command=command,
@@ -89,11 +87,7 @@ def test_unknown_submit_restart_resolves_from_authoritative_broker_truth_without
     assert first.halt_required is True
     assert case.repository.load(case.aggregate.intent.execution_id).state is OrderState.UNKNOWN  # type: ignore[union-attr]
 
-    fills = (
-        (broker_fill(case.command, shares=100, sequence=21, fill_id="full-fill"),)
-        if filled
-        else ()
-    )
+    fills = (broker_fill(case.command, shares=100, sequence=21, fill_id="full-fill"),) if filled else ()
     fact = broker_order(case.command, status=status, filled_shares=filled, sequence=22)
     broker = fake_recovery_broker(orders=(fact,), fills=fills)
     second = _recover(database, broker, offset=2)
@@ -136,10 +130,13 @@ def test_explicit_authoritative_absence_proof_resolves_unknown_submit_without_wr
     assert broker.proof_commands == [case.command]
     assert broker.submitted_commands == ()
     assert broker.cancelled_order_ids == ()
-    assert database.scalar(
-        "SELECT state FROM broker_order_attempts WHERE attempt_id = ?",
-        (case.attempt.attempt_id,),
-    ) == "FAILED_LOCAL"
+    assert (
+        database.scalar(
+            "SELECT state FROM broker_order_attempts WHERE attempt_id = ?",
+            (case.attempt.attempt_id,),
+        )
+        == "FAILED_LOCAL"
+    )
 
 
 def test_absence_proof_recovery_is_repeatable_and_never_resubmits(database: Database) -> None:
@@ -154,7 +151,10 @@ def test_absence_proof_recovery_is_repeatable_and_never_resubmits(database: Data
     assert first.halt_required is False
     assert second.halt_required is False
     assert broker.submitted_commands == ()
-    assert database.scalar(
-        "SELECT count(*) FROM broker_order_attempts WHERE execution_id = ?",
-        (case.aggregate.intent.execution_id,),
-    ) == 1
+    assert (
+        database.scalar(
+            "SELECT count(*) FROM broker_order_attempts WHERE execution_id = ?",
+            (case.aggregate.intent.execution_id,),
+        )
+        == 1
+    )
