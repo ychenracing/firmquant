@@ -6,13 +6,11 @@ canonical universe seal 和确定性 wheel 摘要记录在 [SOURCE_BASELINE.md](
 
 ## 唯一决策路径
 
-策略决策只允许调用一次 `ProductionEngine.decide()`。进入该入口前，账户必须已经完成 firmquant 的权威 reconciliation 与
-CAS finalization。`StrategyAdapter` 的职责仅是：
+策略决策只允许调用一次 `ProductionEngine.decide()`。`StrategyAdapter` 的职责仅是：
 
 1. 验证 uquant checkout/安装包、代码、配置、数据和 universe 身份；
-2. 接收已经通过 AccountBinding/preflight 的完整券商事实；公共 account-sync 语义只在 deep-copy AccountState 上形成候选，
-   不在 reconciliation 前修改生产账户；
-3. 在候选账户通过完整 reconciliation 并以 expected-before CAS 提交后，调用传入的唯一 ProductionEngine；
+2. 使用已经通过账户权威校验并提交的 uquant AccountState 与完整 broker snapshot；
+3. 调用传入的唯一 ProductionEngine；
 4. 原样捕获结果和账户经济状态，构造不可变 DecisionSnapshot；
 5. 对相同 session 与相同输入生成稳定 decision id，拒绝覆盖输入变化后的旧快照。
 
@@ -20,22 +18,22 @@ adapter 不实现第二套 ProductionEngine、PortfolioAllocator、Risk、Sentin
 
 ## AccountState 边界
 
-uquant AccountState 是策略经济状态和持仓 lifecycle 的唯一权威。真实券商账户先通过一次性、不可变 AccountBinding 绑定账户
-id/type；firmquant 不从第一份 BrokerSnapshot 或历史快照隐式采用账户身份。
+uquant AccountState 是策略经济状态和持仓 lifecycle 的唯一权威。首次真实账户接入通过 `bootstrap-account` 建立持久 account
+binding；空持仓账户可以从券商可用现金创建 `AccountState.empty`，非空账户必须提供严格当前 schema 的已复核 seed。seed
+必须与锁定 code/data identity、券商现金、持仓、可卖数量和经济摘要一致，firmquant 不推断 tranche、attribution 或 lifecycle。
 
-Broker sync 拆成 prepare 与 commit。prepare 加载严格 uquant AccountState 并在 deep copy 上调用公共 account-sync 合同，只允许
-operational ledger 已证明归属且身份一致的系统订单/成交进入候选；prepare 不写账户文件、不创建 account operation/receipt。
-人工订单、异常现金、未知成交或无法解释的持仓差异在生产 AccountState 变更前由 preflight 阻断。
+之后的 broker sync 是显式 prepare-validate-commit 协议。生产路径先加载当前 AccountState 和持久 binding，对 broker snapshot、
+operational ledger 和当前策略账户做 preflight；只有已知、映射一致且已入账的系统订单/成交可以解释差异。prepare 只对深拷贝
+调用锁定 uquant account-sync，生产文件和 account-operation ledger 在该阶段保持不变。prepared AccountState 还必须再次通过完整
+reconciliation；全部通过后才以 expected-before CAS 提交。
 
-候选账户必须再与同一 BrokerSnapshot 和同一 operational-ledger view 执行完整资金、持仓、委托、成交、代码/数据/配置
-reconciliation。只有通过后才以 before economic hash 做 CAS；AccountState 原子保存之后，account-operation 与 reconciliation
-receipt 在同一 SQLite finalization 边界提交。文件落盘后若进程崩溃，durable reconciliation evidence 允许恢复服务幂等补齐
-finalization，而不是重放策略或创建第二份经济账户。
+AccountState 文件替换与 SQLite 不是伪装成单一物理事务，而是 crash-consistent finalization：account operation 封存 before/after、
+broker evidence 与 reconciliation finalization payload；文件原子保存后，在一个 SQLite transaction 中完成 account operation
+receipt、audit 和 reconciliation receipt。重启可由同一 evidence 收敛，不重新执行经济行为。
 
-ReviewedAccountAdjustment 只是一条精确、只追加的操作员复核证据，不会改变 uquant 的语义所有权。与当前
-account/symbol/session/type/broker snapshot/difference hash 完全一致的现金差异可以被显式授权；涉及持仓总数、可卖数量、公司
-行动或人工卖出的变化仍不能由 firmquant 推导 lifecycle、tranche 或 attribution，必须提供已经复核并通过 uquant 严格 loader 的
-AccountState。券商持仓差异不能被自动改造成新的策略 lifecycle。
+券商持仓差异不能被自动改造成新的策略 lifecycle。`ReviewedAccountAdjustment` 只允许对精确账户、symbol/session、broker
+snapshot 和 difference hash 留下 append-only 人工复核证据。精确现金差异可被授权；持仓或可卖数量差异即使有 reviewed
+receipt，仍要求显式 reviewed AccountState，receipt 本身不能成为忽略差异或生成新 tranche 的开关。
 
 Operational Ledger 只记录 broker id、订单尝试、事件、成交、对账和运行控制，不保存另一份策略目标或策略参数。
 

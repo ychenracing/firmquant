@@ -8,11 +8,10 @@ firmquant 采用模块化单体和端口适配器：一个进程、一个 SQLite
 ```mermaid
 flowchart LR
     B[券商与行情事实] --> N[严格规范化]
-    N --> S[完整 BrokerSnapshot 证据]
-    S --> P[持久 AccountBinding + Preflight]
-    P --> A[deep-copy uquant AccountState candidate]
-    A --> C[完整 Reconciliation]
-    C --> K[expected-before CAS + account/reconciliation receipts]
+    N --> P[Binding + Preflight]
+    P --> A[内存 Prepared Account Sync]
+    A --> C[Final Reconciliation]
+    C --> K[CAS Account / Receipt Finalization]
     K --> U[ProductionEngine.decide]
     U --> D[不可变 DecisionSnapshot]
     D --> R[ExecutionRiskGate]
@@ -20,11 +19,11 @@ flowchart LR
     O --> G[BrokerGateway]
     G --> E[委托与成交事件队列]
     E --> W[单 writer 事务推进]
-    W --> L[Operational Ledger / 报告 / 审计]
+    W --> P
 ```
 
-盘后决策和次日执行是两个独立、可恢复的 workflow step。盘中行情只供执行与安全检查，不能进入日频策略输入。盘中或
-EOD 新取得的完整券商快照重新进入同一 binding/preflight/reconciliation 边界，不能绕过该边界直接修改 AccountState。
+盘后决策和次日执行是两个独立、可恢复的 workflow step。盘中行情只供执行与安全检查，不能进入日频策略输入。broker
+facts 只有经过持久 account binding、preflight、内存 prepare 和 final reconciliation 后，才允许进入 uquant AccountState。
 
 ## 三类权威
 
@@ -32,28 +31,26 @@ EOD 新取得的完整券商快照重新进入同一 binding/preflight/reconcili
 |---|---|---|
 | 券商 | 可用现金、总资产、真实/可卖持仓、broker order/fill id、委托成交、费用、实时证券状态 | 策略目标、策略 lifecycle |
 | uquant | 机会、风险、Sentinel、目标组合、策略持仓 lifecycle、经济 order id、策略配置与数据身份 | 在线连接、broker id、重试和告警 |
-| firmquant | broker 映射、提交尝试、回调、UNKNOWN、对账、arm lease、kill switch、运行健康和审计 | 第二策略账户、目标组合、策略参数 |
+| firmquant | broker 映射、提交尝试、回调、UNKNOWN、账户 binding、对账、arm lease、kill switch、运行健康和审计 | 第二策略账户、目标组合、策略参数 |
 
-券商事实不能反向“猜出”uquant lifecycle，firmquant operational ledger 也不能成为第二个经济账户。任何权威间差异都先
-保留证据并 HALT，由操作员依据明确事实处理。
+首次真实账户接入通过一次性 bootstrap 建立券商账户与 uquant AccountState 的持久 binding；之后生产对账只信任该 binding，
+不会把“上一份 broker snapshot”当成账户绑定依据。券商事实不能反向猜出 uquant lifecycle，firmquant operational ledger 也
+不能成为第二个经济账户。任何权威间差异都先保留证据并 HALT，由操作员依据明确事实处理。
 
-## 账户权威与提交边界
+## 账户提交边界
 
-真实账户身份来自一次性、不可变的 AccountBinding，而不是历史 BrokerSnapshot。生产流程不存在“没有历史快照就采用当前
-账户”的隐式绑定；未绑定、账户 id/type 改变或 binding 与快照不一致都会在 AccountState 变更前失败关闭。
+账户同步分为 prepare 与 commit。prepare 只在深拷贝上调用锁定 uquant 的 account-sync 语义，不修改生产文件，也不创建
+account operation 或 reconciliation receipt。preflight 只允许由 firmquant 已知、映射一致且已落 operational ledger 的系统
+成交解释账户变化；人工交易、异常现金、外部订单、身份漂移和未解释持仓变化在生产 AccountState 改写前阻断。
 
-账户同步拆为 prepare 与 commit：prepare 只在 uquant AccountState 的 deep copy 上调用公共 account-sync 语义，不创建
-account operation、不写 SQLite receipt，也不修改生产账户文件。preflight 只允许已由 operational ledger 证明归属且身份
-一致的系统订单/成交解释差异；人工订单、未知成交、异常现金和无法解释的持仓变化都会阻断。
+final reconciliation 对 prepared AccountState 再做三方完整比较。通过后，expected-before CAS 才允许原子替换 AccountState
+文件；account operation payload 同时封存 reconciliation finalization evidence，随后在一个 SQLite transaction 内完成 account
+operation receipt、audit 与 reconciliation receipt。崩溃发生在文件替换与 SQLite finalization 之间时，恢复逻辑以同一
+finalization evidence 收敛，而不是重新猜测或重新执行经济行为。
 
-候选 AccountState 形成后还必须执行完整 reconciliation。只有 reconciliation 通过，才使用 recorded before hash 做 CAS
-提交。账户文件原子保存后，account-operation receipt 与 reconciliation receipt 在同一 SQLite finalization 事务中提交；若
-进程恰在文件落盘后退出，durable canonical reconciliation evidence 允许 recovery 幂等补齐该 finalization。证据缺失、损坏或
-identity 冲突时保持 FILE_COMMITTED/HALT，不猜测完成状态。
-
-ReviewedAccountAdjustment 是显式、只追加的操作员复核证据，绑定 account、symbol、session、adjustment type、broker
-snapshot 和精确 difference hash。它不是通用 ignore 开关：精确现金差异可以被授权；涉及持仓总数或可卖数量的变化仍不能由
-firmquant 生成 lifecycle/tranche/attribution，必须提供已复核且满足 uquant 严格合同的 AccountState。
+`ReviewedAccountAdjustment` 只是精确、append-only 的人工复核证据，绑定账户、symbol/session、类型、broker snapshot 和具体
+difference hash。精确现金差异可被授权；持仓/可卖数量差异即使已复核仍要求显式、完整的 reviewed AccountState，firmquant
+不会据此合成策略 tranche、公司行动或人工卖出生命周期。
 
 ## 模块边界
 
@@ -64,8 +61,8 @@ firmquant 生成 lifecycle/tranche/attribution，必须提供已复核且满足 
 - `market_data`：权威交易日历、日频 manifest/append-only 验证、执行行情端口。
 - `execution`：冻结决策到订单计划、SELL/BUY 执行顺序、提交/撤单与期限政策。
 - `risk`：只收缩的逐单风控、arm lease、kill switch 与 broker-write capability。
-- `reconciliation`：三类权威之间的身份、资金、持仓、委托、成交 preflight、完整对账及 finalization evidence。
-- `persistence`：SQLite migration、账户 binding/复核 receipt、事务 repository、单 writer、恢复、备份和 hash-chain audit。
+- `reconciliation`：binding、preflight、三类权威之间的资金、持仓、委托、成交和身份对账。
+- `persistence`：SQLite migration、事务 repository、单 writer、账户权威证据、恢复、备份和 hash-chain audit。
 - `scheduling`：Asia/Shanghai session、时钟校验和可恢复 workflow receipt。
 - `observability` / `security`：结构化日志、报告、告警、secret provider、脱敏与扫描。
 
