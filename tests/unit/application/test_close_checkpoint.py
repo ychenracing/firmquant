@@ -81,12 +81,7 @@ def test_checkpoint_order_idempotency_and_conflict_are_fail_closed(tmp_path: Pat
             created_at=NOW,
         )
         assert duplicate == first
-        assert (
-            database.scalar(
-                "SELECT count(*) FROM audit_events WHERE category = 'CLOSE_SESSION'"
-            )
-            == 1
-        )
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'CLOSE_SESSION'") == 1
 
         with pytest.raises(CloseCheckpointError, match="conflicts"):
             store.append(
