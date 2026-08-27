@@ -19,10 +19,15 @@ from firmquant.build_identity import load_locked_source_identity, verify_uquant_
 from firmquant.domain.broker_facts import (
     AccountType,
     BrokerAccountFact,
+    BrokerFillFact,
+    BrokerOrderFact,
+    BrokerOrderStatus,
     BrokerPositionFact,
     BrokerSnapshot,
+    FillStatus,
     InstrumentFact,
     MarketSessionStatus,
+    PriceType,
     QuoteFact,
     SecurityStatus,
     SecurityType,
@@ -337,21 +342,27 @@ def _snapshot(
     account: ReplayAccount,
     bars: dict[str, DailyBar],
     *,
+    average_costs: dict[str, Decimal],
     session: date,
     captured_at: datetime,
     field: str,
+    orders: tuple[BrokerOrderFact, ...] = (),
+    fills: tuple[BrokerFillFact, ...] = (),
 ) -> BrokerSnapshot:
     assets = _market_value(account, bars, field=field)
     positions: list[BrokerPositionFact] = []
     for symbol_text, shares in sorted(account.positions.items()):
         bar = bars[symbol_text]
         price = getattr(bar, field)
+        average_cost = average_costs.get(symbol_text)
+        if average_cost is None or average_cost <= 0:
+            raise ExecutionReplayError(f"average cost is unavailable for held symbol {symbol_text}")
         positions.append(
             BrokerPositionFact(
                 symbol=Symbol.parse(symbol_text),
                 total_shares=Shares(shares),
                 sellable_shares=Shares(account.sellable.get(symbol_text, 0)),
-                average_cost=Price(price),
+                average_cost=Price(average_cost),
                 market_value=Money(price * Decimal(shares)),
             )
         )
@@ -363,6 +374,9 @@ def _snapshot(
         "assets": _decimal_text(assets),
         "positions": dict(sorted(account.positions.items())),
         "sellable": dict(sorted(account.sellable.items())),
+        "average_costs": {key: _decimal_text(value) for key, value in sorted(average_costs.items())},
+        "orders": [item.raw_payload_sha256 for item in orders],
+        "fills": [item.raw_payload_sha256 for item in fills],
         "field": field,
     }
     digest = canonical_sha256(payload)
@@ -375,11 +389,11 @@ def _snapshot(
             total_assets=Money(assets),
         ),
         positions=tuple(positions),
-        orders=(),
-        fills=(),
+        orders=orders,
+        fills=fills,
         session_date=session,
         captured_at=captured_at,
-        broker_event_watermark=0,
+        broker_event_watermark=len(orders) + len(fills),
         raw_payload_sha256=digest,
         complete=True,
     )
@@ -387,6 +401,7 @@ def _snapshot(
 
 def _execution_facts(
     account: ReplayAccount,
+    average_costs: dict[str, Decimal],
     plan_symbols: tuple[str, ...],
     panels: dict[str, pd.DataFrame],
     *,
@@ -402,6 +417,7 @@ def _execution_facts(
     snapshot = _snapshot(
         account,
         bars,
+        average_costs=average_costs,
         session=session,
         captured_at=_timestamp(session, time(9, 30)),
         field="open",
@@ -502,17 +518,20 @@ def _decision_snapshot(
 
 def _plan_symbols(snapshot: DecisionSnapshot) -> tuple[str, ...]:
     payload = json.loads(snapshot.payload_json)
-    pending = payload.get("pending_orders") if isinstance(payload, dict) else None
-    if not isinstance(pending, list):
-        raise ExecutionReplayError("decision pending orders are unavailable")
+    if not isinstance(payload, dict):
+        raise ExecutionReplayError("decision payload is unavailable")
     values: set[str] = set()
-    for item in pending:
-        if isinstance(item, dict) and isinstance(item.get("symbol"), str):
-            values.add(Symbol.parse(str(item["symbol"])).canonical)
+    for field in ("pending_orders", "targets"):
+        items = payload.get(field)
+        if not isinstance(items, list):
+            raise ExecutionReplayError(f"decision {field} are unavailable")
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("symbol"), str):
+                values.add(Symbol.parse(str(item["symbol"])).canonical)
     return tuple(sorted(values))
 
 
-def _replay_costs(config: Any) -> ReplayCosts:
+def _replay_costs(config: Any, *, max_price_deviation_bps: Decimal) -> ReplayCosts:
     slippage = Decimal(str(config.slippage)) * Decimal("10000")
     return ReplayCosts(
         commission_rate=Decimal(str(config.commission_rate)),
@@ -520,7 +539,7 @@ def _replay_costs(config: Any) -> ReplayCosts:
         sell_stamp_duty_rate=Decimal(str(config.stamp_duty)),
         transfer_fee_rate=Decimal(str(config.transfer_fee)),
         slippage_bps=slippage,
-        max_price_deviation_bps=Decimal("200"),
+        max_price_deviation_bps=max_price_deviation_bps,
     )
 
 
@@ -552,25 +571,228 @@ def _replay_orders(
 
 
 def _tracking(
-    plan: ExecutionPlan,
+    decision: DecisionSnapshot,
     account: ReplayAccount,
     bars: dict[str, DailyBar],
+    *,
+    target_equity: Decimal,
 ) -> tuple[list[Decimal], Decimal, Decimal]:
-    assets = _market_value(account, bars, field="open")
+    if target_equity <= 0:
+        raise ExecutionReplayError("tracking target equity must be positive")
+    actual_equity = _market_value(account, bars, field="open")
+    raw_targets = decision.uquant_payload.get("targets")
+    if not isinstance(raw_targets, list):
+        raise ExecutionReplayError("decision targets are unavailable for tracking")
+    target_weights: dict[str, Decimal] = {}
+    for raw in raw_targets:
+        if not isinstance(raw, dict) or not isinstance(raw.get("symbol"), str):
+            raise ExecutionReplayError("decision target payload is malformed")
+        weight_raw = raw.get("weight")
+        if isinstance(weight_raw, bool) or not isinstance(weight_raw, (int, float, str)):
+            raise ExecutionReplayError("decision target weight is malformed")
+        weight = Decimal(str(weight_raw))
+        if not weight.is_finite() or not _ZERO <= weight <= _ONE:
+            raise ExecutionReplayError("decision target weight is outside bounds")
+        target_weights[Symbol.parse(str(raw["symbol"])).canonical] = weight
+    symbols = tuple(sorted(set(target_weights) | set(account.positions)))
     errors: list[Decimal] = []
     weighted = _ZERO
     notional = _ZERO
-    for order in plan.orders:
-        bar = bars[order.symbol.canonical]
-        actual = Decimal(account.positions.get(order.symbol.canonical, 0)) * bar.open
-        actual_weight = _ZERO if assets <= 0 else actual / assets
-        error = abs(order.target_weight - actual_weight)
+    for symbol in symbols:
+        bar = bars.get(symbol)
+        if bar is None:
+            raise ExecutionReplayError(f"tracking bar is unavailable for {symbol}")
+        weight = target_weights.get(symbol, _ZERO)
+        raw_target_shares = int((target_equity * weight / bar.open).to_integral_value(rounding="ROUND_FLOOR"))
+        target_shares = raw_target_shares - raw_target_shares % 100
+        actual_shares = account.positions.get(symbol, 0)
+        actual_notional = Decimal(actual_shares) * bar.open
+        actual_weight = _ZERO if actual_equity <= 0 else actual_notional / actual_equity
+        error = abs(weight - actual_weight)
         errors.append(error)
-        target_notional = Decimal(order.target_shares.value) * bar.open
-        symbol_notional = max(target_notional, actual)
+        target_notional = Decimal(target_shares) * bar.open
+        symbol_notional = max(target_notional, actual_notional)
         weighted += error * symbol_notional
         notional += symbol_notional
     return errors, weighted, notional
+
+
+def _updated_average_costs(
+    before: ReplayAccount,
+    after: ReplayAccount,
+    prior: dict[str, Decimal],
+    result: object,
+) -> dict[str, Decimal]:
+    observed = dict(prior)
+    order_results = getattr(result, "orders", None)
+    if not isinstance(order_results, tuple):
+        raise ExecutionReplayError("execution result orders are unavailable")
+    running_shares = dict(before.positions)
+    for item in order_results:
+        side = getattr(item, "side", None)
+        symbol = getattr(item, "symbol", None)
+        filled = getattr(item, "filled_shares", None)
+        price = getattr(item, "fill_price", None)
+        commission = getattr(item, "commission", None)
+        transfer = getattr(item, "transfer_fee", None)
+        if not isinstance(symbol, str) or isinstance(filled, bool) or not isinstance(filled, int):
+            raise ExecutionReplayError("execution result is malformed")
+        if filled <= 0:
+            continue
+        if side is ReplaySide.SELL:
+            remaining = running_shares.get(symbol, 0) - filled
+            running_shares[symbol] = max(remaining, 0)
+            if remaining <= 0:
+                observed.pop(symbol, None)
+            continue
+        if side is not ReplaySide.BUY or not isinstance(price, Decimal):
+            raise ExecutionReplayError("execution fill economics are malformed")
+        if not isinstance(commission, Decimal) or not isinstance(transfer, Decimal):
+            raise ExecutionReplayError("execution fill fees are malformed")
+        old_shares = running_shares.get(symbol, 0)
+        old_cost = observed.get(symbol, price)
+        added_cost = price * Decimal(filled) + commission + transfer
+        new_shares = old_shares + filled
+        observed[symbol] = (old_cost * Decimal(old_shares) + added_cost) / Decimal(new_shares)
+        running_shares[symbol] = new_shares
+    if set(observed) != set(after.positions):
+        raise ExecutionReplayError("average-cost state differs from replay positions")
+    return observed
+
+
+def _broker_execution_facts(
+    plan: ExecutionPlan,
+    result: object | None,
+    *,
+    session: date,
+) -> tuple[tuple[BrokerOrderFact, ...], tuple[BrokerFillFact, ...]]:
+    result_orders = () if result is None else getattr(result, "orders", ())
+    if not isinstance(result_orders, tuple):
+        raise ExecutionReplayError("execution result orders are unavailable")
+    by_key = {(item.symbol, item.side.value): item for item in result_orders}
+    orders: list[BrokerOrderFact] = []
+    fills: list[BrokerFillFact] = []
+    sequence = 0
+    for planned in plan.orders:
+        sequence += 1
+        key = (planned.symbol.canonical, planned.side.value)
+        observed = by_key.get(key)
+        if observed is None:
+            raise ExecutionReplayError("planned execution result is missing")
+        filled = int(observed.filled_shares)
+        requested = planned.authorized_shares.value
+        broker_order_id = (
+            "replay-order:"
+            + hashlib.sha256(f"{session.isoformat()} {planned.uquant_order_id}".encode()).hexdigest()
+        )
+        status = BrokerOrderStatus.FILLED if filled == requested else BrokerOrderStatus.CANCELLED
+        order_payload = {
+            "schema": "firmquant.execution-replay-order.v1",
+            "broker_order_id": broker_order_id,
+            "client_order_id": planned.uquant_order_id,
+            "symbol": planned.symbol.canonical,
+            "side": planned.side.value,
+            "requested_shares": requested,
+            "filled_shares": filled,
+            "status": status.value,
+            "session": session.isoformat(),
+        }
+        order_hash = canonical_sha256(order_payload)
+        orders.append(
+            BrokerOrderFact(
+                broker_order_id=broker_order_id,
+                client_order_id=planned.uquant_order_id,
+                symbol=planned.symbol,
+                side=planned.side,
+                price_type=PriceType.LIMIT,
+                status=status,
+                requested_shares=Shares(requested),
+                filled_shares=Shares(filled),
+                limit_price=planned.limit_price,
+                session_date=session,
+                event_time=_timestamp(session, time(14, 55)),
+                received_at=_timestamp(session, time(14, 55)),
+                event_sequence=sequence,
+                raw_payload_sha256=order_hash,
+            )
+        )
+        if filled > 0:
+            fill_price = observed.fill_price
+            if not isinstance(fill_price, Decimal):
+                raise ExecutionReplayError("filled replay order has no price")
+            sequence += 1
+            fill_id = (
+                "replay-fill:"
+                + hashlib.sha256(
+                    f"{session.isoformat()} {planned.uquant_order_id} {filled} {fill_price}".encode()
+                ).hexdigest()
+            )
+            fill_payload = {
+                "schema": "firmquant.execution-replay-fill.v1",
+                "fill_id": fill_id,
+                "broker_order_id": broker_order_id,
+                "symbol": planned.symbol.canonical,
+                "side": planned.side.value,
+                "shares": filled,
+                "price": _decimal_text(fill_price),
+                "session": session.isoformat(),
+            }
+            fills.append(
+                BrokerFillFact(
+                    broker_fill_id=fill_id,
+                    broker_order_id=broker_order_id,
+                    symbol=planned.symbol,
+                    side=planned.side,
+                    status=FillStatus.CONFIRMED,
+                    shares=Shares(filled),
+                    price=Price(fill_price),
+                    commission=Money(observed.commission),
+                    stamp_duty=Money(observed.stamp_duty),
+                    transfer_fee=Money(observed.transfer_fee),
+                    session_date=session,
+                    event_time=_timestamp(session, time(14, 55)),
+                    received_at=_timestamp(session, time(14, 55)),
+                    event_sequence=sequence,
+                    raw_payload_sha256=canonical_sha256(fill_payload),
+                )
+            )
+    for blocker in plan.blockers:
+        sequence += 1
+        broker_order_id = (
+            "replay-order:"
+            + hashlib.sha256(f"{session.isoformat()} {blocker.uquant_order_id}".encode()).hexdigest()
+        )
+        order_payload = {
+            "schema": "firmquant.execution-replay-order.v1",
+            "broker_order_id": broker_order_id,
+            "client_order_id": blocker.uquant_order_id,
+            "symbol": blocker.symbol.canonical,
+            "side": blocker.side.value,
+            "requested_shares": blocker.requested_shares.value,
+            "filled_shares": 0,
+            "status": BrokerOrderStatus.CANCELLED.value,
+            "session": session.isoformat(),
+            "reason": blocker.reason_code,
+        }
+        orders.append(
+            BrokerOrderFact(
+                broker_order_id=broker_order_id,
+                client_order_id=blocker.uquant_order_id,
+                symbol=blocker.symbol,
+                side=blocker.side,
+                price_type=PriceType.LIMIT,
+                status=BrokerOrderStatus.CANCELLED,
+                requested_shares=blocker.requested_shares,
+                filled_shares=Shares(0),
+                limit_price=blocker.reference_price,
+                session_date=session,
+                event_time=_timestamp(session, time(14, 55)),
+                received_at=_timestamp(session, time(14, 55)),
+                event_sequence=sequence,
+                raw_payload_sha256=canonical_sha256(order_payload),
+            )
+        )
+    return tuple(orders), tuple(fills)
 
 
 def _max_drawdown(equity: list[Decimal]) -> Decimal:
@@ -589,6 +811,7 @@ def run_execution_replay(
     data_root: Path,
     start: date,
     end: date,
+    max_price_deviation_bps: Decimal,
 ) -> ReplaySummary:
     """Run a deterministic causal execution replay without any broker write surface."""
 
@@ -621,8 +844,9 @@ def run_execution_replay(
     initial_cash = Decimal(str(engine.cfg.initial_cash))
     strategy_account = _account_state(float(initial_cash))
     replay_account = ReplayAccount(cash=initial_cash, positions={}, sellable={})
+    average_costs: dict[str, Decimal] = {}
     planner = ExecutionPlanner()
-    costs = _replay_costs(engine.cfg)
+    costs = _replay_costs(engine.cfg, max_price_deviation_bps=max_price_deviation_bps)
     pending: DecisionSnapshot | None = None
     equity: list[Decimal] = []
     commissions = stamp = transfer = slippage = unfilled_loss = turnover = _ZERO
@@ -633,15 +857,21 @@ def run_execution_replay(
     tracking_notional = _ZERO
 
     for session in sessions:
+        broker_orders: tuple[BrokerOrderFact, ...] = ()
+        broker_fills: tuple[BrokerFillFact, ...] = ()
         if pending is not None:
             replay_account = replay_account.roll_session()
             facts, execution_bars = _execution_facts(
                 replay_account,
+                average_costs,
                 _plan_symbols(pending),
                 panels,
                 session=session,
             )
             plan = planner.plan(pending, facts)
+            target_equity = facts.broker_snapshot.account.total_assets.value
+            before_execution = replay_account
+            execution_result: object | None = None
             orders = _replay_orders(
                 plan,
                 replay_account,
@@ -649,7 +879,11 @@ def run_execution_replay(
             )
             if orders:
                 result = execute_session(replay_account, orders, execution_bars, costs)
+                execution_result = result
                 replay_account = result.ending_account
+                average_costs = _updated_average_costs(
+                    before_execution, replay_account, average_costs, result
+                )
                 commissions += result.commissions
                 stamp += result.stamp_duty
                 transfer += result.transfer_fees
@@ -663,12 +897,15 @@ def run_execution_replay(
                 price_limit_blocks += result.price_limit_blocks
                 suspension_blocks += result.suspension_blocks
                 incomplete_sell_blocks += result.incomplete_sell_blocked_buys
+            broker_orders, broker_fills = _broker_execution_facts(plan, execution_result, session=session)
             current_bars = {
                 symbol: _daily_bar(symbol, panels[symbol], session)
                 for symbol in sorted(set(replay_account.positions) | set(_plan_symbols(pending)))
                 if symbol in panels
             }
-            errors, weighted, notion = _tracking(plan, replay_account, current_bars)
+            errors, weighted, notion = _tracking(
+                pending, replay_account, current_bars, target_equity=target_equity
+            )
             tracking_errors.extend(errors)
             weighted_tracking += weighted
             tracking_notional += notion
@@ -687,9 +924,12 @@ def run_execution_replay(
         close_snapshot = _snapshot(
             replay_account,
             mark_bars,
+            average_costs=average_costs,
             session=session,
             captured_at=_timestamp(session, time(15, 5)),
             field="close",
+            orders=broker_orders,
+            fills=broker_fills,
         )
         sync_account(strategy_account, close_snapshot)
         close_equity = _market_value(replay_account, mark_bars, field="close")
