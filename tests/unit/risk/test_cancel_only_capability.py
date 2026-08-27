@@ -5,13 +5,13 @@ from datetime import timedelta
 from pathlib import Path
 
 from firmquant.broker.fake import BrokerOperation, ScriptedOutcome
+from firmquant.config import Mode
 from firmquant.domain.broker_facts import BrokerOrderStatus
 from firmquant.domain.orders import OrderState
 from firmquant.persistence.account_authority import AccountBinding, AccountBindingRepository
 from firmquant.persistence.database import Database
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
 from firmquant.risk.capability import CancelOnlyCapabilityFactory
-from firmquant.config import Mode
 from tests.fixtures.recovery_cases import (
     NOW,
     acknowledge_locally,
@@ -138,7 +138,6 @@ def test_cancel_only_ignores_external_and_terminal_orders(tmp_path: Path) -> Non
         assert result.cancelled_order_ids == ()
         assert broker.cancelled_order_ids == ()
 
-        # A broker-only external order is never a trusted cancellation candidate.
         external = replace(
             terminal_fact,
             broker_order_id="external-order-1",
@@ -190,7 +189,6 @@ def test_cancel_only_revalidates_account_and_broker_identity_before_write(tmp_pa
         assert result.denied_order_ids == (acknowledged_fact.broker_order_id,)
         assert broker.cancelled_order_ids == ()
 
-        # Correct account, but broker identity drift: still no write.
         database.close()
         database = Database.open(tmp_path / "identity.sqlite3")
         _, _, acknowledged_fact = _open_case(database)
