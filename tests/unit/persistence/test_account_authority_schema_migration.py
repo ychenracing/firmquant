@@ -46,11 +46,11 @@ def test_account_authority_tables_are_immutable_at_schema_boundary(tmp_path: Pat
             database.write(
                 """
                 INSERT INTO account_bindings(
-                    binding_id, account_id_hash, account_type, broker_snapshot_sha256,
-                    account_state_sha256, uquant_commit, uquant_code_fingerprint,
-                    data_hash, data_as_of, data_symbols_json, created_at,
-                    payload_json, payload_sha256
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    binding_id, singleton_id, account_id_hash, account_type,
+                    broker_snapshot_sha256, account_state_sha256, uquant_commit,
+                    uquant_code_fingerprint, data_hash, data_as_of, data_symbols_json,
+                    created_at, payload_json, payload_sha256
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     "acctbind_" + "1" * 64,
