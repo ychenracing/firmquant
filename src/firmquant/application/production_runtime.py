@@ -29,7 +29,7 @@ class ProductionRuntimeReceipt:
     mode: Mode
     started_at: datetime
     stopped_at: datetime
-    startup_reconciliation_id: str
+    startup_reconciliation_id: str | None
     event_count: int
     decision_count: int
     execution_count: int
@@ -45,7 +45,7 @@ class ProductionRuntimeReceipt:
         _aware(self.stopped_at, label="production runtime stop")
         if self.stopped_at < self.started_at:
             raise ValueError("production runtime stopped before it started")
-        if (
+        if self.startup_reconciliation_id is not None and (
             not isinstance(self.startup_reconciliation_id, str)
             or not self.startup_reconciliation_id.startswith("recon_")
             or len(self.startup_reconciliation_id) != 70

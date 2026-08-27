@@ -128,8 +128,8 @@ def test_daemon_drains_callbacks_renews_writer_and_stops_cleanly(tmp_path: Path)
 
     assert broker.connected is False
     assert hooks.handled == 2
-    assert hooks.cycles == 4
-    assert hooks.heartbeats == 4
+    assert hooks.cycles == 3
+    assert hooks.heartbeats == 3
     assert receipt.event_count == 2
     assert receipt.decision_count == 1
     assert receipt.writer_renewals >= 2

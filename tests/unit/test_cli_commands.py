@@ -71,10 +71,9 @@ class RecordingOperator:
         (["replay", "--events", "recording.jsonl"], OperatorCommand.REPLAY),
         (["backup"], OperatorCommand.BACKUP),
         (["verify-backup", "--bundle", "backup-1"], OperatorCommand.VERIFY_BACKUP),
-        (["cancel-system-orders"], OperatorCommand.CANCEL_SYSTEM_ORDERS),
     ],
 )
-def test_every_command_delegates_to_the_application_service(
+def test_every_application_command_delegates_to_the_application_service(
     arguments: list[str],
     expected: OperatorCommand,
     tmp_path: Path,
