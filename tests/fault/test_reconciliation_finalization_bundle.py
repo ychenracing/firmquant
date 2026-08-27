@@ -64,9 +64,7 @@ def test_file_committed_broker_sync_recovers_reconciliation_finalization_once(tm
     assert row["actual_account_after_sha256"] == operation.expected_account_after_sha256
     assert "ACCOUNT_FINALIZATION_REQUIRED" not in first.blockers
     assert database.scalar("SELECT count(*) FROM reconciliation_runs") == 1
-    assert database.scalar(
-        "SELECT count(*) FROM audit_events WHERE category = 'reconciliation.receipt'"
-    ) == 1
+    assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'reconciliation.receipt'") == 1
 
     second = RecoveryService(
         database=database,
