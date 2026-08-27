@@ -49,9 +49,7 @@ class ExecutionDeadlines:
             raise TypeError("execution deadlines must be numeric monotonic values")
         if self.latest_new_submit < 0:
             raise ValueError("execution deadlines cannot be negative")
-        if not (
-            self.latest_new_submit <= self.latest_cancel_initiation <= self.absolute_completion
-        ):
+        if not (self.latest_new_submit <= self.latest_cancel_initiation <= self.absolute_completion):
             raise ValueError("execution deadlines must be ordered")
 
 
@@ -150,11 +148,7 @@ class LiveExecutionController(ExecutionController):
     def _cancel_only_after_lease_loss(self, aggregate: OrderAggregate | None) -> None:
         """Best-effort broker-only cancel; durable state is recovered after restart."""
 
-        if (
-            aggregate is None
-            or aggregate.state not in _OPEN_STATES
-            or aggregate.broker_order_id is None
-        ):
+        if aggregate is None or aggregate.state not in _OPEN_STATES or aggregate.broker_order_id is None:
             return
         try:
             if self._monotonic() >= self._deadlines.latest_cancel_initiation:
@@ -348,10 +342,7 @@ class LiveExecutionController(ExecutionController):
                 current = self._refresh_open_order(current)
         if current.state in _OPEN_STATES:
             now = self._monotonic()
-            if (
-                now < self._deadlines.latest_cancel_initiation
-                and now < self._deadlines.absolute_completion
-            ):
+            if now < self._deadlines.latest_cancel_initiation and now < self._deadlines.absolute_completion:
                 current = self._cancel_live(current)
         return current
 
@@ -377,9 +368,7 @@ class LiveExecutionController(ExecutionController):
         cancel_calls = 0
         for planned in plan.orders:
             if unresolved_unknown:
-                outcomes.append(
-                    self._outcome(planned, None, reason_code="BLOCKED_BY_UNRESOLVED_UNKNOWN")
-                )
+                outcomes.append(self._outcome(planned, None, reason_code="BLOCKED_BY_UNRESOLVED_UNKNOWN"))
                 continue
             if planned.side is Side.BUY and incomplete_sell:
                 outcomes.append(

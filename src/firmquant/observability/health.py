@@ -550,11 +550,7 @@ class Doctor:
                 return _evidence(False, "READONLY_ACCOUNT_UNAVAILABLE", configured=False)
             if production_mode and safety_manifest is None:
                 return _evidence(False, "XTQUANT_SAFETY_MANIFEST_UNAVAILABLE", configured=True)
-            probe = (
-                safety_manifest.probe_symbol
-                if safety_manifest is not None
-                else Symbol.parse("000001.SZ")
-            )
+            probe = safety_manifest.probe_symbol if safety_manifest is not None else Symbol.parse("000001.SZ")
             with _broker_read_session(broker):
                 account = broker.query_account()
                 positions = broker.query_positions()

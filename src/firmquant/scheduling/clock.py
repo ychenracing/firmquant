@@ -99,9 +99,7 @@ class RuntimeClockObservation:
 
     def __post_init__(self) -> None:
         _aware(self.wall_time, label="runtime wall time")
-        if isinstance(self.monotonic_time, bool) or not isinstance(
-            self.monotonic_time, (int, float)
-        ):
+        if isinstance(self.monotonic_time, bool) or not isinstance(self.monotonic_time, (int, float)):
             raise ClockValidationError("runtime monotonic time must be numeric")
         if self.monotonic_time < 0:
             raise ClockValidationError("runtime monotonic time cannot be negative")

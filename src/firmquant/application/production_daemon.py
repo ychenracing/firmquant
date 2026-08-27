@@ -112,9 +112,7 @@ class ProductionHeartbeat:
             ("last execution", self.last_execution),
         ):
             if value is not None and (
-                not isinstance(value, datetime)
-                or value.tzinfo is None
-                or value.utcoffset() is None
+                not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None
             ):
                 raise ValueError(f"heartbeat {label} must be timezone-aware or null")
         if (

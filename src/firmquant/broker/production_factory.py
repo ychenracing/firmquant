@@ -145,9 +145,7 @@ def build_readonly_xtquant_gateway(
 ) -> ReadOnlyXtQuantGateway:
     """Build a fresh XtQuant read facade without a BrokerGateway/write interface."""
 
-    return ReadOnlyXtQuantGateway(
-        _build_transport(settings=settings, clock=clock, importer=importer)
-    )
+    return ReadOnlyXtQuantGateway(_build_transport(settings=settings, clock=clock, importer=importer))
 
 
 def build_production_xtquant_gateway(
