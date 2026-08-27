@@ -498,10 +498,11 @@ def test_hook_reconciliation_builds_session_scoped_authority_view(
         assert facts.config_identity_matches is True
 
         hooks._reconciler = SimpleNamespace(
-            run=lambda _kind, _facts: SimpleNamespace(
+            evaluate=lambda _kind, _facts: SimpleNamespace(
                 passed=False,
                 blockers=("BROKER_MISMATCH",),
-            )
+            ),
+            commit=lambda _receipt, **_kwargs: None,
         )
         with pytest.raises(ProductionServicesUnavailable, match="BROKER_MISMATCH"):
             hooks._reconcile(ReconciliationKind.MANUAL)

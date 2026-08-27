@@ -82,10 +82,12 @@ def test_account_recovery_uses_only_before_or_expected_after_hash(
     ).recover()
 
     assert report.account_receipts[0].classification is expected
-    assert report.halt_required is (expected is AccountRecoveryClassification.CONTRADICTION)
-    expected_stage = (
-        "CONTRADICTION" if expected is AccountRecoveryClassification.CONTRADICTION else "RECEIPT_COMMITTED"
-    )
+    assert report.halt_required is True
+    expected_stage = {
+        AccountRecoveryClassification.NOT_APPLIED: "PREPARED",
+        AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING: "FILE_COMMITTED",
+        AccountRecoveryClassification.CONTRADICTION: "CONTRADICTION",
+    }[expected]
     assert database.scalar("SELECT stage FROM account_operations") == expected_stage
     if expected is AccountRecoveryClassification.CONTRADICTION:
         repeated = RecoveryService(

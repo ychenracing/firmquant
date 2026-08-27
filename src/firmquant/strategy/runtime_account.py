@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
@@ -17,7 +17,7 @@ from firmquant.persistence.recovery import (
     RecoveryContradiction,
     UquantAccountStateStore,
 )
-from firmquant.persistence.repositories import PersistenceConflict
+from firmquant.persistence.repositories import PersistenceConflict, canonical_json
 from firmquant.strategy.account_prepare import PreparedAccountSync, prepare_account_sync
 from firmquant.strategy.account_sync import AccountStateContract, AccountSyncReceipt
 
@@ -138,6 +138,7 @@ class RuntimeAccountRepository:
         prepared: PreparedAccountSync,
         *,
         operation_id: str,
+        finalization_payload: Mapping[str, object] | None = None,
     ) -> AccountOperation | None:
         row = self._database.query_one(
             "SELECT operation_kind, stage, account_before_sha256, "
@@ -158,12 +159,17 @@ class RuntimeAccountRepository:
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise PersistenceConflict("broker account operation payload is invalid") from error
         path_sha256 = _path_sha256(self._path)
-        expected_payload = {
+        expected_payload: dict[str, object] = {
             "schema": "firmquant.account-operation.v1",
             "operation_kind": "BROKER_SYNC",
             "account_path_sha256": path_sha256,
             "evidence_sha256": prepared.broker_snapshot_sha256,
         }
+        if finalization_payload is not None:
+            decoded = json.loads(canonical_json(finalization_payload))
+            if not isinstance(decoded, dict):
+                raise PersistenceConflict("broker account finalization payload is invalid")
+            expected_payload["finalization"] = decoded
         if payload != expected_payload:
             raise PersistenceConflict("broker account preparation payload collision")
         stage = str(row["stage"])
@@ -196,6 +202,7 @@ class RuntimeAccountRepository:
         prepared: PreparedAccountSync,
         *,
         finalize: Callable[[], None] | None = None,
+        finalization_payload: Mapping[str, object] | None = None,
     ) -> str:
         """CAS-commit one reviewed preparation and its SQLite finalization atomically."""
 
@@ -206,7 +213,11 @@ class RuntimeAccountRepository:
         if self._store.hash_state(prepared.prepared_account) != prepared.account_after_sha256:
             raise RecoveryContradiction("prepared broker account changed before commit")
         operation_id = self._operation_id(prepared)
-        operation = self._existing_broker_operation(prepared, operation_id=operation_id)
+        operation = self._existing_broker_operation(
+            prepared,
+            operation_id=operation_id,
+            finalization_payload=finalization_payload,
+        )
         now = self._now()
         if operation is None:
             operation = AccountOperation.begin(
@@ -219,6 +230,7 @@ class RuntimeAccountRepository:
                 evidence_sha256=prepared.broker_snapshot_sha256,
                 now=now,
                 operation_id=operation_id,
+                finalization_payload=finalization_payload,
             )
         operation.commit_file(now=now)
         operation.commit_receipt(now=now, finalize=finalize)

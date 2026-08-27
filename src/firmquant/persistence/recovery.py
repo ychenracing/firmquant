@@ -8,7 +8,7 @@ import json
 import os
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -201,6 +201,7 @@ class AccountOperation:
         evidence_sha256: str,
         now: datetime,
         operation_id: str | None = None,
+        finalization_payload: Mapping[str, object] | None = None,
     ) -> AccountOperation:
         if not isinstance(database, Database):
             raise DomainTypeError("account operation database must be Database")
@@ -220,12 +221,20 @@ class AccountOperation:
         identity = operation_id or "acctop_" + os.urandom(32).hex()
         if not isinstance(identity, str) or _ACCOUNT_OPERATION_ID.fullmatch(identity) is None:
             raise DomainValidationError("account operation id is not canonical")
-        payload = {
+        payload: dict[str, object] = {
             "schema": "firmquant.account-operation.v1",
             "operation_kind": operation_kind,
             "account_path_sha256": path_digest,
             "evidence_sha256": evidence_sha256,
         }
+        if finalization_payload is not None:
+            if not isinstance(finalization_payload, Mapping):
+                raise DomainTypeError("account operation finalization payload must be a mapping")
+            canonical_finalization = canonical_json(finalization_payload)
+            decoded_finalization = json.loads(canonical_finalization)
+            if not isinstance(decoded_finalization, dict):
+                raise DomainValidationError("account operation finalization payload must be an object")
+            payload["finalization"] = decoded_finalization
         payload_json = canonical_json(payload)
         payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         stable = (
@@ -443,6 +452,71 @@ class RecoveryService:
         self._append_report_audit(report, now=now)
         return report
 
+    @staticmethod
+    def _operation_payload(payload_json: str) -> dict[str, object] | None:
+        try:
+            payload: object = json.loads(payload_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _recover_broker_sync_finalization(
+        self,
+        *,
+        row: sqlite3.Row,
+        operation_id: str,
+        actual: str,
+        now: datetime,
+    ) -> bool:
+        payload = self._operation_payload(str(row["payload_json"]))
+        if payload is None or "finalization" not in payload:
+            return False
+        finalization = payload["finalization"]
+        evidence_sha256 = payload.get("evidence_sha256")
+        if not isinstance(evidence_sha256, str):
+            return False
+        try:
+            from firmquant.reconciliation.service import commit_reconciliation_finalization
+
+            with self._database.transaction():
+                self._database.write(
+                    "UPDATE account_operations SET stage = 'RECEIPT_COMMITTED', "
+                    "actual_account_after_sha256 = ?, updated_at = ? "
+                    "WHERE operation_id = ? AND stage IN ('PREPARED','FILE_COMMITTED')",
+                    (actual, now.isoformat(), operation_id),
+                )
+                AuditLedger(self._database).append(
+                    audit_event_id="account-operation."
+                    + hashlib.sha256(operation_id.encode("utf-8")).hexdigest(),
+                    category="account.operation.committed",
+                    actor="firmquant",
+                    payload={
+                        "operation_id": operation_id,
+                        "operation_kind": "BROKER_SYNC",
+                        "account_path_sha256": payload.get("account_path_sha256"),
+                        "evidence_sha256": evidence_sha256,
+                        "account_before_sha256": str(row["account_before_sha256"]),
+                        "account_after_sha256": str(row["expected_account_after_sha256"]),
+                    },
+                    created_at=now,
+                )
+                commit_reconciliation_finalization(self._database, finalization)
+                self._append_account_recovery_audit(
+                    operation_id=operation_id,
+                    classification=AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING,
+                    actual=actual,
+                    now=now,
+                )
+            return True
+        except (
+            DomainTypeError,
+            DomainValidationError,
+            PersistenceConflict,
+            sqlite3.DatabaseError,
+            ValueError,
+        ):
+            return False
+
     def _recover_accounts(self, now: datetime) -> tuple[tuple[AccountRecoveryReceipt, ...], tuple[str, ...]]:
         rows = self._database.query_all(
             "SELECT * FROM account_operations WHERE stage != 'RECEIPT_COMMITTED' "
@@ -499,6 +573,20 @@ class RecoveryService:
                     classification is AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING
                     and original_stage in {"PREPARED", "FILE_COMMITTED"}
                 ):
+                    if actual is not None and self._recover_broker_sync_finalization(
+                        row=row,
+                        operation_id=operation_id,
+                        actual=actual,
+                        now=now,
+                    ):
+                        receipts.append(
+                            AccountRecoveryReceipt(
+                                operation_id=operation_id,
+                                classification=classification,
+                                actual_account_sha256=actual,
+                            )
+                        )
+                        continue
                     target_stage = "FILE_COMMITTED"
                     blockers.add("ACCOUNT_FINALIZATION_REQUIRED")
                 else:

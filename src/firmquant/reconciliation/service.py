@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from datetime import datetime
+from decimal import Decimal
 
 from firmquant.domain.broker_facts import (
     BrokerOrderStatus,
@@ -62,6 +63,142 @@ def _aware(value: datetime, *, label: str) -> None:
 
 def _evidence_hash(*values: object) -> str:
     return hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
+
+
+def _finalization_sha256(value: str, *, label: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise DomainValidationError(f"{label} must be lowercase SHA-256")
+
+
+def _receipt_identity(receipt: ReconciliationReceipt) -> str:
+    return "recon_" + hashlib.sha256(
+        canonical_json(
+            {
+                "kind": receipt.kind,
+                "details_sha256": receipt.details_sha256,
+                "started_at": receipt.started_at,
+                "completed_at": receipt.completed_at,
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_receipt_integrity(receipt: ReconciliationReceipt) -> None:
+    details_sha256 = hashlib.sha256(receipt.details_json.encode("utf-8")).hexdigest()
+    if details_sha256 != receipt.details_sha256:
+        raise DomainValidationError("reconciliation finalization details hash mismatch")
+    if _receipt_identity(receipt) != receipt.reconciliation_id:
+        raise DomainValidationError("reconciliation finalization identity mismatch")
+
+
+def reconciliation_finalization_payload(
+    receipt: ReconciliationReceipt,
+    *,
+    broker_snapshot_sha256: str,
+) -> dict[str, object]:
+    """Serialize one passed/blocked receipt as canonical crash-recovery evidence."""
+
+    if not isinstance(receipt, ReconciliationReceipt):
+        raise DomainTypeError("reconciliation finalization requires ReconciliationReceipt")
+    _finalization_sha256(
+        broker_snapshot_sha256,
+        label="reconciliation finalization broker snapshot hash",
+    )
+    _validate_receipt_integrity(receipt)
+    return {
+        "schema": "firmquant.reconciliation-finalization.v1",
+        "broker_snapshot_sha256": broker_snapshot_sha256,
+        "receipt": {
+            "reconciliation_id": receipt.reconciliation_id,
+            "kind": receipt.kind.value,
+            "snapshot_id": receipt.snapshot_id,
+            "started_at": receipt.started_at.isoformat(),
+            "completed_at": receipt.completed_at.isoformat(),
+            "passed": receipt.passed,
+            "blockers": list(receipt.blockers),
+            "operator_actions": list(receipt.operator_actions),
+            "details_json": receipt.details_json,
+            "details_sha256": receipt.details_sha256,
+        },
+    }
+
+
+def _decode_reconciliation_finalization(
+    payload: object,
+) -> tuple[ReconciliationReceipt, str]:
+    if not isinstance(payload, Mapping):
+        raise DomainTypeError("reconciliation finalization payload must be a mapping")
+    if set(payload) != {"schema", "broker_snapshot_sha256", "receipt"}:
+        raise DomainValidationError("reconciliation finalization payload schema is unexpected")
+    if payload["schema"] != "firmquant.reconciliation-finalization.v1":
+        raise DomainValidationError("reconciliation finalization schema is unsupported")
+    broker_snapshot_sha256 = payload["broker_snapshot_sha256"]
+    if not isinstance(broker_snapshot_sha256, str):
+        raise DomainTypeError("reconciliation finalization broker hash must be text")
+    _finalization_sha256(
+        broker_snapshot_sha256,
+        label="reconciliation finalization broker snapshot hash",
+    )
+    raw = payload["receipt"]
+    if not isinstance(raw, Mapping):
+        raise DomainTypeError("reconciliation finalization receipt must be a mapping")
+    expected_keys = {
+        "reconciliation_id",
+        "kind",
+        "snapshot_id",
+        "started_at",
+        "completed_at",
+        "passed",
+        "blockers",
+        "operator_actions",
+        "details_json",
+        "details_sha256",
+    }
+    if set(raw) != expected_keys:
+        raise DomainValidationError("reconciliation finalization receipt schema is unexpected")
+    blockers = raw["blockers"]
+    operator_actions = raw["operator_actions"]
+    if not isinstance(blockers, list) or not isinstance(operator_actions, list):
+        raise DomainTypeError("reconciliation finalization collections must be lists")
+    try:
+        kind = ReconciliationKind(str(raw["kind"]))
+        started_at = datetime.fromisoformat(str(raw["started_at"]))
+        completed_at = datetime.fromisoformat(str(raw["completed_at"]))
+    except (TypeError, ValueError) as error:
+        raise DomainValidationError("reconciliation finalization typed fields are invalid") from error
+    receipt = ReconciliationReceipt(
+        reconciliation_id=str(raw["reconciliation_id"]),
+        kind=kind,
+        snapshot_id=str(raw["snapshot_id"]),
+        started_at=started_at,
+        completed_at=completed_at,
+        passed=raw["passed"],
+        blockers=tuple(blockers),
+        operator_actions=tuple(operator_actions),
+        details_json=str(raw["details_json"]),
+        details_sha256=str(raw["details_sha256"]),
+    )
+    _validate_receipt_integrity(receipt)
+    return receipt, broker_snapshot_sha256
+
+
+def commit_reconciliation_finalization(database: Database, payload: object) -> ReconciliationReceipt:
+    """Validate durable evidence and idempotently append its reconciliation receipt."""
+
+    if not isinstance(database, Database):
+        raise DomainTypeError("reconciliation finalization database must be Database")
+    receipt, broker_snapshot_sha256 = _decode_reconciliation_finalization(payload)
+    service = ReconciliationService(
+        database=database,
+        cash_tolerance=Money(Decimal("0")),
+        clock=lambda: receipt.completed_at,
+    )
+    service.commit(receipt, broker_snapshot_sha256=broker_snapshot_sha256)
+    return receipt
 
 
 class ReconciliationService:
@@ -453,4 +590,8 @@ class ReconciliationService:
             )
 
 
-__all__ = ("ReconciliationService",)
+__all__ = (
+    "ReconciliationService",
+    "commit_reconciliation_finalization",
+    "reconciliation_finalization_payload",
+)

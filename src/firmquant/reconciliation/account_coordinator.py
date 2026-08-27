@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol
@@ -20,6 +20,7 @@ from firmquant.strategy.account_sync import AccountStateContract
 
 from .account_preflight import AccountPreflightResult, evaluate_account_preflight
 from .models import OperationalLedgerView, ReconciliationFacts, ReconciliationKind, ReconciliationReceipt
+from .service import reconciliation_finalization_payload
 
 
 class _AccountStore(Protocol):
@@ -39,6 +40,7 @@ class _AccountRepository(Protocol):
         prepared: PreparedAccountSync,
         *,
         finalize: Callable[[], None] | None = None,
+        finalization_payload: Mapping[str, object] | None = None,
     ) -> str: ...
 
 
@@ -187,12 +189,17 @@ class AccountReconciliationCoordinator:
                 committed=False,
             )
 
+        finalization = reconciliation_finalization_payload(
+            receipt,
+            broker_snapshot_sha256=snapshot.raw_payload_sha256,
+        )
         committed = self._accounts.commit_broker_snapshot(
             prepared,
             finalize=lambda: self._reconciler.commit(
                 receipt,
                 broker_snapshot_sha256=snapshot.raw_payload_sha256,
             ),
+            finalization_payload=finalization,
         )
         if committed != prepared.account_after_sha256:
             raise RecoveryContradiction("committed account hash differs from reviewed preparation")

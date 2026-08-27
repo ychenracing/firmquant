@@ -95,7 +95,11 @@ def test_reconcile_routes_bound_account_through_gated_coordinator(
             assert facts.operational_ledger == operational_ledger
             assert operational_ledger.expected_account_id_hash == binding.account_id_hash
             assert operational_ledger.expected_account_type is binding.account_type
-            receipt = self._reconciler.run(kind, facts)
+            receipt = self._reconciler.evaluate(kind, facts)
+            self._reconciler.commit(
+                receipt,
+                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            )
             return SimpleNamespace(receipt=receipt, account=candidate)
 
     monkeypatch.setattr(ps, "AccountReconciliationCoordinator", RecordingCoordinator, raising=False)
