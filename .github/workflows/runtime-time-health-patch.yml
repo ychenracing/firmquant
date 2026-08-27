@@ -22,7 +22,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Apply exact runtime safety transformations
-        run: python scripts/runtime_time_health_patch.py
+        run: |
+          python scripts/runtime_time_health_patch.py
+          python scripts/runtime_time_health_patch2.py
       - name: Commit transformed files when needed
         shell: bash
         run: |
@@ -36,7 +38,10 @@ jobs:
                   src/firmquant/config.py \
                   src/firmquant/risk/runtime.py \
                   src/firmquant/risk/gate.py \
+                  src/firmquant/risk/capability.py \
                   src/firmquant/application/composition.py \
-                  src/firmquant/application/operations.py
-          git commit -m 'Wire heartbeat status and fail-closed risk facts'
+                  src/firmquant/application/operations.py \
+                  src/firmquant/application/production_services.py \
+                  src/firmquant/application/production_daemon.py
+          git commit -m 'Connect production time and authority facts'
           git push origin HEAD:codex/runtime-time-health
