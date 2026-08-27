@@ -1,0 +1,45 @@
+name: Fix Runtime Final Repair Harness
+
+on:
+  push:
+    branches:
+      - codex/runtime-time-health
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.repository == 'ychenracing/firmquant'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/runtime-time-health
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Remove nonessential reconciliation display transform
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/runtime-final-targeted-repair.yml')
+          text = path.read_text(encoding='utf-8')
+          block = '''          replace_once(\n              'src/firmquant/application/operations.py',\n              ''' + "'''" + '''            \"last_reconciliation\": (None if heartbeat is None else heartbeat[\"last_reconciliation\"]),\\n''' + "'''" + ''',\n              ''' + "'''" + '''            \"last_reconciliation\": (\\n                None\\n                if heartbeat is None and latest_reconciliation is None\\n                else latest_reconciliation[\"completed_at\"]\\n                if heartbeat is None\\n                else heartbeat[\"last_reconciliation\"]\\n            ),\\n''' + "'''" + ''',\n              'status reconciliation fallback',\n          )\n'''
+          if text.count(block) != 1:
+              raise SystemExit(f'workflow reconciliation transform shape changed: {text.count(block)}')
+          path.write_text(text.replace(block, '', 1), encoding='utf-8')
+          PY
+          rm .github/workflows/fix-runtime-final-repair.yml
+      - name: Commit harness correction
+        shell: bash
+        run: |
+          git config user.name 'firmquant-runtime-safety-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add .github/workflows/runtime-final-targeted-repair.yml \
+                  .github/workflows/fix-runtime-final-repair.yml
+          git commit -m 'Correct targeted runtime repair harness'
+          git push origin HEAD:codex/runtime-time-health
