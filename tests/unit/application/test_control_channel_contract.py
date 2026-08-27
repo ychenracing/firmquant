@@ -74,7 +74,7 @@ def test_control_time_requires_aware_datetime() -> None:
         (1, TypeError),
         ("   ", ValueError),
         ("x" * 513, ValueError),
-        ("line\nbreak", ValueError),
+        ("line\x00break", ValueError),
     ],
 )
 def test_reason_digest_rejects_noncanonical_text(reason: object, error: type[Exception]) -> None:
@@ -189,7 +189,9 @@ def test_control_inbox_status_and_enqueue_validation(tmp_path: Path) -> None:
 
 
 def test_control_request_id_collision_and_completed_idempotency(tmp_path: Path) -> None:
-    clock = lambda: NOW
+    def clock() -> datetime:
+        return NOW
+
     request_id = "ctrl_" + "4" * 64
     inbox = ControlInbox(tmp_path, host_hash="e" * 64, clock=clock)
     original = inbox.enqueue(ControlCommand.DISARM, request_id=request_id)
