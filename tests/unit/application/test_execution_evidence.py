@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
@@ -97,7 +97,7 @@ def _observation(*, stage: EvidenceStage = EvidenceStage.SHADOW) -> ExecutionObs
         duplicate_economic_orders=0,
         duplicate_fills=0,
         data_quality_failures=0,
-        created_at=datetime(2026, 8, 27, 15, 10, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 27, 15, 10, tzinfo=UTC),
     )
 
 
