@@ -19,12 +19,17 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Never, Protocol, runtime_checkable
 
+from firmquant.application.execution_evidence import EvidenceStage
+from firmquant.application.live_readiness_runtime import collect_live_readiness
+from firmquant.application.production_identity import promotion_config_sha256
+from firmquant.application.promotion_store import PromotionStore
 from firmquant.broker.production_smoke import run_readonly_production_smoke
 from firmquant.broker.replay import RecordedReplayBroker
 from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
 from firmquant.build_identity import load_locked_source_identity
 from firmquant.config import Mode, PathSettings, Settings, load_settings
 from firmquant.domain.states import RuntimeState, RuntimeStatus
+from firmquant.execution.replay_runner import run_execution_replay
 from firmquant.observability.health import Doctor, ReadOnlyDoctorBroker
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.backup import backup_state, verify_backup
@@ -106,6 +111,8 @@ class OperatorCommand(StrEnum):
     FILLS = "fills"
     REPORT = "report"
     REPLAY = "replay"
+    EXECUTION_REPLAY = "execution-replay"
+    LIVE_READINESS = "live-readiness"
     BACKUP = "backup"
     VERIFY_BACKUP = "verify-backup"
     CANCEL_SYSTEM_ORDERS = "cancel-system-orders"
@@ -167,6 +174,8 @@ class OperatorRequest:
     output_json: bool = False
     mode: Mode | None = None
     session: date | None = None
+    start_session: date | None = None
+    end_session: date | None = None
     events_path: Path | None = None
     bundle_path: Path | None = None
     account_state_path: Path | None = None
@@ -183,6 +192,14 @@ class OperatorRequest:
             raise TypeError("operator run mode must be typed")
         if self.session is not None and type(self.session) is not date:
             raise TypeError("operator session must be a date")
+        for value in (self.start_session, self.end_session):
+            if value is not None and type(value) is not date:
+                raise TypeError("operator replay range must contain dates")
+        if self.command is OperatorCommand.EXECUTION_REPLAY:
+            if self.start_session is None or self.end_session is None:
+                raise ValueError("execution replay requires start and end sessions")
+            if self.start_session >= self.end_session:
+                raise ValueError("execution replay start must precede end")
         for value in (self.events_path, self.bundle_path, self.account_state_path):
             if value is not None and not isinstance(value, Path):
                 raise TypeError("operator path values must be pathlib.Path")
@@ -432,6 +449,8 @@ class LocalOperatorService:
             OperatorCommand.FILLS: lambda: self._fills(request),
             OperatorCommand.REPORT: lambda: self._report(request),
             OperatorCommand.REPLAY: lambda: self._replay(request),
+            OperatorCommand.EXECUTION_REPLAY: lambda: self._execution_replay(request),
+            OperatorCommand.LIVE_READINESS: lambda: self._live_readiness(),
             OperatorCommand.BACKUP: lambda: self._backup(request),
             OperatorCommand.VERIFY_BACKUP: lambda: self._verify_backup(request),
             OperatorCommand.CANCEL_SYSTEM_ORDERS: lambda: self._cancel_system_orders(),
@@ -955,27 +974,6 @@ class LocalOperatorService:
         return OperatorResult(message="运行状态已读取。", payload=payload)
 
     @staticmethod
-    def _shadow_validated(database: Database) -> bool:
-        rows = database.query_all(
-            "SELECT payload_json FROM audit_events WHERE category = 'RUNTIME' ORDER BY sequence"
-        )
-        for row in rows:
-            try:
-                payload: object = json.loads(
-                    str(row["payload_json"]),
-                    parse_constant=_reject_json_constant,
-                )
-            except (json.JSONDecodeError, ValueError):
-                return False
-            if (
-                isinstance(payload, dict)
-                and payload.get("mode") == Mode.SHADOW.value
-                and payload.get("state") == RuntimeState.READY.value
-            ):
-                return True
-        return False
-
-    @staticmethod
     def _active_arm_preconditions(database: Database, now: datetime) -> str:
         row = database.query_one(
             "SELECT account_id_hash, captured_at FROM broker_snapshots "
@@ -1031,12 +1029,6 @@ class LocalOperatorService:
             )
             if reconciliation is None or reconciliation["passed"] != 1:
                 raise OperatorCommandDenied("STARTUP_RECONCILIATION_REQUIRED")
-            if not self._shadow_validated(database):
-                raise OperatorCommandDenied("SHADOW_VALIDATION_REQUIRED")
-            if self._unresolved_orders(database):
-                raise OperatorCommandDenied("UNRESOLVED_ORDER_STATE")
-            if self._external_active_orders(database):
-                raise OperatorCommandDenied("EXTERNAL_BROKER_ORDER")
             account_hash = self._active_arm_preconditions(database, now)
             firmquant_commit = self._firmquant_commit()
             try:
@@ -1044,6 +1036,35 @@ class LocalOperatorService:
                 identity.verify()
             except Exception as error:
                 raise OperatorCommandDenied("UQUANT_IDENTITY_UNAVAILABLE") from error
+            if settings.mode is Mode.CANARY:
+                qualified = PromotionStore(database).qualifies(
+                    stage=EvidenceStage.SHADOW,
+                    firmquant_commit=firmquant_commit,
+                    uquant_commit=identity.uquant_commit,
+                    config_sha256=promotion_config_sha256(settings),
+                    account_hash=account_hash,
+                    min_sessions=settings.promotion.min_shadow_sessions,
+                    min_orders=settings.promotion.min_shadow_orders,
+                    max_tracking_error=settings.promotion.max_target_tracking_error,
+                )
+                if not qualified:
+                    raise OperatorCommandDenied("SHADOW_VALIDATION_REQUIRED")
+            else:
+                try:
+                    readiness = collect_live_readiness(
+                        settings=settings,
+                        config_path=self._config_path,
+                        database=database,
+                        now=now,
+                    )
+                except Exception as error:
+                    raise OperatorCommandDenied("LIVE_READINESS_EVIDENCE_INVALID") from error
+                if not readiness.software_ready:
+                    raise OperatorCommandDenied("LIVE_READINESS_REQUIRED")
+            if self._unresolved_orders(database):
+                raise OperatorCommandDenied("UNRESOLVED_ORDER_STATE")
+            if self._external_active_orders(database):
+                raise OperatorCommandDenied("EXTERNAL_BROKER_ORDER")
             binding = ArmBinding(
                 mode=settings.mode,
                 host_hash=writer.host_hash,
@@ -1730,6 +1751,51 @@ class LocalOperatorService:
                 "event_count": len(events),
                 "write_attempts": len(broker.write_attempts),
             },
+        )
+
+    def _execution_replay(self, request: OperatorRequest) -> OperatorResult:
+        settings = self._settings()
+        checkout = settings.paths.uquant_source_checkout
+        if checkout is None:
+            raise OperatorCommandDenied("UQUANT_SOURCE_CHECKOUT_MISSING")
+        source_checkout = self._resolved(checkout).resolve()
+        data_root = source_checkout / "data" / "frozen"
+        if request.start_session is None or request.end_session is None:
+            raise OperatorCommandDenied("EXECUTION_REPLAY_RANGE_REQUIRED")
+        try:
+            summary = run_execution_replay(
+                source_checkout=source_checkout,
+                data_root=data_root,
+                start=request.start_session,
+                end=request.end_session,
+                max_price_deviation_bps=settings.execution.max_price_deviation_bps,
+            )
+        except OperatorCommandDenied:
+            raise
+        except Exception as error:
+            raise OperatorCommandDenied("EXECUTION_REPLAY_FAILED") from error
+        return OperatorResult(
+            message="锁定 uquant 数据已完成因果 execution-aware Replay; 未触达真实券商写接口。",
+            payload=summary.payload(),
+        )
+
+    def _live_readiness(self) -> OperatorResult:
+        settings, database = self._open_read_database()
+        try:
+            snapshot = collect_live_readiness(
+                settings=settings,
+                config_path=self._config_path,
+                database=database,
+                now=self._now(),
+            )
+        except Exception as error:
+            raise OperatorCommandDenied("LIVE_READINESS_EVIDENCE_INVALID") from error
+        finally:
+            database.close()
+        return OperatorResult(
+            message="机器可验证生产准入门槛已只读汇总; 未创建 arm 或券商写调用。",
+            payload=snapshot.payload(),
+            exit_code=0 if snapshot.software_ready else 2,
         )
 
     def _backup(self, request: OperatorRequest) -> OperatorResult:

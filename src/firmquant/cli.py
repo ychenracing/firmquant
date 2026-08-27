@@ -48,6 +48,8 @@ _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("fills", "查询规范化成交事实"),
     ("report", "生成或读取 session 报告"),
     ("replay", "确定性重放冻结事件"),
+    ("execution-replay", "使用锁定 uquant 数据运行跨日 execution-aware Replay"),
+    ("live-readiness", "只读汇总全部机器可验证生产准入门槛"),
     ("backup", "创建一致性状态备份"),
     ("verify-backup", "执行备份恢复验证"),
     ("data-candidates", "查看隔离的历史数据重写候选"),
@@ -138,6 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
             )
         elif name == "replay":
             subparser.add_argument("--events", type=Path, required=True, help="冻结事件文件")
+        elif name == "execution-replay":
+            subparser.add_argument("--start", dest="start_session", type=_session_date, required=True)
+            subparser.add_argument("--end", dest="end_session", type=_session_date, required=True)
         elif name == "verify-backup":
             subparser.add_argument("--bundle", type=Path, required=True, help="备份 bundle 目录")
         elif name == "backup":
@@ -197,6 +202,8 @@ def _request(arguments: argparse.Namespace) -> OperatorRequest:
         output_json=bool(getattr(arguments, "output_json", False)),
         mode=None if mode_value is None else Mode(str(mode_value).upper()),
         session=cast(date | None, getattr(arguments, "session", None)),
+        start_session=cast(date | None, getattr(arguments, "start_session", None)),
+        end_session=cast(date | None, getattr(arguments, "end_session", None)),
         events_path=cast(Path | None, getattr(arguments, "events", None)),
         bundle_path=cast(Path | None, getattr(arguments, "bundle", None)),
         account_state_path=cast(Path | None, getattr(arguments, "account_state", None)),
