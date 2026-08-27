@@ -6,16 +6,24 @@ from pathlib import Path
 
 import pytest
 
-import firmquant.market_data.xtquant_daily as daily
+from firmquant.market_data.xtquant_daily import (
+    DailyBar,
+    DailyDataDeadlineExceeded,
+    DailyDataUpdateError,
+    DailyFetchPolicy,
+    InstrumentSessionState,
+    InstrumentSessionStatus,
+    XtQuantDailyDataUpdater,
+)
 
 
 TARGET = date(2026, 8, 25)
 NOW = datetime(2026, 8, 25, 7, 10, tzinfo=UTC)
 
 
-def bar(day: int, close: str = "10") -> daily.DailyBar:
+def bar(day: int, close: str = "10") -> DailyBar:
     value = Decimal(close)
-    return daily.DailyBar(
+    return DailyBar(
         session=date(2026, 8, day),
         open=value,
         high=value,
@@ -28,11 +36,11 @@ def bar(day: int, close: str = "10") -> daily.DailyBar:
 
 def status(
     symbol: str,
-    state: daily.InstrumentSessionState,
+    state: InstrumentSessionState,
     *,
     observed_at: datetime = NOW,
-) -> daily.InstrumentSessionStatus:
-    return daily.InstrumentSessionStatus(
+) -> InstrumentSessionStatus:
+    return InstrumentSessionStatus(
         symbol=symbol,
         session=TARGET,
         state=state,
@@ -45,8 +53,8 @@ def status(
 class Provider:
     def __init__(
         self,
-        bars: dict[str, tuple[daily.DailyBar, ...]],
-        statuses: dict[str, daily.InstrumentSessionStatus],
+        bars: dict[str, tuple[DailyBar, ...]],
+        statuses: dict[str, InstrumentSessionStatus],
         *,
         failures: int = 0,
     ) -> None:
@@ -71,9 +79,9 @@ def test_suspended_security_may_keep_last_real_bar_without_fabrication(tmp_path:
     symbol = "sz300308"
     provider = Provider(
         {symbol: (bar(24),)},
-        {symbol: status(symbol, daily.InstrumentSessionState.SUSPENDED)},
+        {symbol: status(symbol, InstrumentSessionState.SUSPENDED)},
     )
-    updater = daily.XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
+    updater = XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
 
     receipt = updater.update((symbol,), through=TARGET)
 
@@ -88,11 +96,11 @@ def test_normal_security_missing_target_bar_fails_closed(tmp_path: Path) -> None
     symbol = "sz300308"
     provider = Provider(
         {symbol: (bar(24),)},
-        {symbol: status(symbol, daily.InstrumentSessionState.TRADING)},
+        {symbol: status(symbol, InstrumentSessionState.TRADING)},
     )
-    updater = daily.XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
+    updater = XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
 
-    with pytest.raises(daily.DailyDataUpdateError, match="target session"):
+    with pytest.raises(DailyDataUpdateError, match="target session"):
         updater.update((symbol,), through=TARGET)
 
 
@@ -101,11 +109,11 @@ def test_stale_suspension_fact_fails_closed(tmp_path: Path) -> None:
     stale = datetime(2026, 8, 25, 6, 30, tzinfo=UTC)
     provider = Provider(
         {symbol: (bar(24),)},
-        {symbol: status(symbol, daily.InstrumentSessionState.SUSPENDED, observed_at=stale)},
+        {symbol: status(symbol, InstrumentSessionState.SUSPENDED, observed_at=stale)},
     )
-    updater = daily.XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
+    updater = XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
 
-    with pytest.raises(daily.DailyDataUpdateError, match="status is stale"):
+    with pytest.raises(DailyDataUpdateError, match="status is stale"):
         updater.update((symbol,), through=TARGET)
 
 
@@ -113,16 +121,16 @@ def test_reference_index_missing_target_bar_is_never_excused(tmp_path: Path) -> 
     symbol = "sh000300"
     provider = Provider(
         {symbol: (bar(24),)},
-        {symbol: status(symbol, daily.InstrumentSessionState.SUSPENDED)},
+        {symbol: status(symbol, InstrumentSessionState.SUSPENDED)},
     )
-    updater = daily.XtQuantDailyDataUpdater(
+    updater = XtQuantDailyDataUpdater(
         root=tmp_path,
         provider=provider,
         clock=lambda: NOW,
         required_complete_symbols=frozenset({symbol}),
     )
 
-    with pytest.raises(daily.DailyDataUpdateError, match="required complete"):
+    with pytest.raises(DailyDataUpdateError, match="required complete"):
         updater.update((symbol,), through=TARGET)
 
 
@@ -130,7 +138,7 @@ def test_bounded_retry_succeeds_and_persists_attempt_receipts(tmp_path: Path) ->
     symbol = "sz300308"
     provider = Provider(
         {symbol: (bar(24), bar(25, "11"))},
-        {symbol: status(symbol, daily.InstrumentSessionState.TRADING)},
+        {symbol: status(symbol, InstrumentSessionState.TRADING)},
         failures=2,
     )
     monotonic = [0.0]
@@ -138,14 +146,14 @@ def test_bounded_retry_succeeds_and_persists_attempt_receipts(tmp_path: Path) ->
     def sleep(seconds: float) -> None:
         monotonic[0] += seconds
 
-    updater = daily.XtQuantDailyDataUpdater(
+    updater = XtQuantDailyDataUpdater(
         root=tmp_path / "data",
         state_root=tmp_path / "state",
         provider=provider,
         clock=lambda: NOW,
         monotonic=lambda: monotonic[0],
         sleep=sleep,
-        fetch_policy=daily.DailyFetchPolicy(
+        fetch_policy=DailyFetchPolicy(
             max_attempts=3,
             retry_interval_seconds=1,
             total_deadline_seconds=5,
@@ -164,7 +172,7 @@ def test_bounded_retry_exhaustion_and_deadline_do_not_loop_forever(tmp_path: Pat
     symbol = "sz300308"
     provider = Provider(
         {symbol: (bar(24),)},
-        {symbol: status(symbol, daily.InstrumentSessionState.TRADING)},
+        {symbol: status(symbol, InstrumentSessionState.TRADING)},
         failures=99,
     )
     monotonic = [0.0]
@@ -172,20 +180,20 @@ def test_bounded_retry_exhaustion_and_deadline_do_not_loop_forever(tmp_path: Pat
     def sleep(seconds: float) -> None:
         monotonic[0] += seconds
 
-    updater = daily.XtQuantDailyDataUpdater(
+    updater = XtQuantDailyDataUpdater(
         root=tmp_path / "data",
         state_root=tmp_path / "state",
         provider=provider,
         clock=lambda: NOW,
         monotonic=lambda: monotonic[0],
         sleep=sleep,
-        fetch_policy=daily.DailyFetchPolicy(
+        fetch_policy=DailyFetchPolicy(
             max_attempts=10,
             retry_interval_seconds=2,
             total_deadline_seconds=3,
         ),
     )
 
-    with pytest.raises(daily.DailyDataDeadlineExceeded):
+    with pytest.raises(DailyDataDeadlineExceeded):
         updater.update((symbol,), through=TARGET)
     assert provider.fetch_calls == 2
