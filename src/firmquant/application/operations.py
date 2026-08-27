@@ -579,10 +579,7 @@ class LocalOperatorService:
         resolved_settings = settings.model_copy(update={"paths": paths})
         broker: ReadOnlyDoctorBroker | None = None
         if self._doctor_broker_provider is not None:
-            try:
-                broker = self._doctor_broker_provider()
-            except Exception:
-                broker = None
+            broker = self._doctor_broker_provider()
         doctor = Doctor.for_local_environment(
             resolved_settings,
             database_path=paths.state_directory / "firmquant.sqlite3",
@@ -865,19 +862,66 @@ class LocalOperatorService:
         )
         last_quote = database.scalar("SELECT max(received_at) FROM broker_events WHERE event_type = 'QUOTE'")
         source = load_locked_source_identity()
+        heartbeat = database.query_one(
+            "SELECT * FROM production_heartbeat WHERE singleton_id = 1"
+        )
+        heartbeat_age: float | None = None
+        process_health = "NOT_RUNNING"
+        broker_connection = "NOT_RUNNING"
+        broker_read_healthy = False
+        broker_write_healthy = False
+        if heartbeat is None:
+            blockers.add("PROCESS_NOT_RUNNING")
+        else:
+            try:
+                heartbeat_at = datetime.fromisoformat(str(heartbeat["observed_at"]))
+                if heartbeat_at.tzinfo is None or heartbeat_at.utcoffset() is None:
+                    raise ValueError
+                age = now - heartbeat_at
+                heartbeat_age = age.total_seconds()
+                if heartbeat_age < 0:
+                    raise ValueError
+            except ValueError as error:
+                raise OperatorCommandDenied("HEARTBEAT_INVALID") from error
+            broker_connection = (
+                "CONNECTED" if int(heartbeat["broker_connected"]) == 1 else "DISCONNECTED"
+            )
+            broker_read_healthy = int(heartbeat["broker_read_healthy"]) == 1
+            broker_write_healthy = int(heartbeat["broker_write_healthy"]) == 1
+            if heartbeat_age > 30.0:
+                process_health = "STALE"
+                blockers.add("HEARTBEAT_STALE")
+            else:
+                process_health = "HEALTHY"
+        effective_state = (
+            status.state.value if process_health == "HEALTHY" else RuntimeState.HALTED.value
+        )
         return {
             "mode": settings.mode.value,
-            "runtime_state": status.state.value,
+            "runtime_state": effective_state,
+            "stored_runtime_state": status.state.value,
+            "process_health": process_health,
+            "heartbeat_age": heartbeat_age,
             "armed": armed,
             "arm_expires_at": expires_at,
             "firmquant_commit": firmquant_commit,
             "uquant_commit": source.uquant_commit,
             "strategy_session": strategy_session,
-            "broker_connection": "UNKNOWN",
-            "last_quote": last_quote,
+            "broker_connection": broker_connection,
+            "broker_read_healthy": broker_read_healthy,
+            "broker_write_healthy": broker_write_healthy,
+            "last_quote": (last_quote if heartbeat is None else heartbeat["last_quote"]),
             "last_reconciliation": (
-                None if latest_reconciliation is None else latest_reconciliation["completed_at"]
+                None if heartbeat is None else heartbeat["last_reconciliation"]
             ),
+            "last_broker_event": None if heartbeat is None else heartbeat["last_broker_event"],
+            "last_decision": None if heartbeat is None else heartbeat["last_decision"],
+            "last_execution": None if heartbeat is None else heartbeat["last_execution"],
+            "control_request_state": None if heartbeat is None else heartbeat["control_request_state"],
+            "writer_generation": None if heartbeat is None else heartbeat["writer_generation"],
+            "process_id": None if heartbeat is None else heartbeat["process_id"],
+            "host_hash": None if heartbeat is None else heartbeat["host_hash"],
+            "pending_events": None if heartbeat is None else heartbeat["pending_events"],
             "unresolved_orders": unresolved,
             "current_cash": current_cash,
             "actual_gross": actual_gross,

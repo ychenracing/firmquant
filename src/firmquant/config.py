@@ -156,7 +156,6 @@ class ExecutionRuntimeSettings(SafeConfigModel):
     max_open_orders: PositiveInteger = 4
     max_consecutive_rejections: PositiveInteger = 3
     max_disconnect_seconds: PositiveInteger = 30
-    max_replacements: PositiveInteger = 2
     max_submit_count_window: PositiveInteger = 20
     max_cancel_count_window: PositiveInteger = 20
     max_quote_age_seconds: PositiveInteger = 5

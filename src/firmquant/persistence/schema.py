@@ -533,6 +533,39 @@ MIGRATIONS: Final = (
         name="account_authority",
         statements=_ACCOUNT_AUTHORITY_SCHEMA,
     ),
+    Migration.create(
+        version=4,
+        name="production_heartbeat",
+        statements=(
+            """
+            CREATE TABLE production_heartbeat (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                mode TEXT NOT NULL CHECK (mode IN ('SHADOW','CANARY','LIVE')),
+                runtime_state TEXT NOT NULL CHECK (runtime_state IN (
+                    'DISARMED','STARTING','RECONCILING','READY','EXECUTING','DEGRADED','HALTED','STOPPING'
+                )),
+                observed_at TEXT NOT NULL,
+                host_hash TEXT NOT NULL CHECK (length(host_hash) = 64),
+                process_id INTEGER NOT NULL CHECK (process_id > 0),
+                writer_generation INTEGER NOT NULL CHECK (writer_generation > 0),
+                broker_connected INTEGER NOT NULL CHECK (broker_connected IN (0, 1)),
+                broker_read_healthy INTEGER NOT NULL CHECK (broker_read_healthy IN (0, 1)),
+                broker_write_healthy INTEGER NOT NULL CHECK (broker_write_healthy IN (0, 1)),
+                pending_events INTEGER NOT NULL CHECK (pending_events >= 0),
+                last_broker_event TEXT,
+                last_quote TEXT,
+                last_reconciliation TEXT,
+                last_decision TEXT,
+                last_execution TEXT,
+                control_request_state TEXT NOT NULL,
+                processed_events INTEGER NOT NULL CHECK (processed_events >= 0),
+                decisions INTEGER NOT NULL CHECK (decisions >= 0),
+                executions INTEGER NOT NULL CHECK (executions >= 0),
+                eod INTEGER NOT NULL CHECK (eod >= 0)
+            ) STRICT
+            """,
+        ),
+    ),
 )
 CURRENT_SCHEMA_VERSION: Final = MIGRATIONS[-1].version
 

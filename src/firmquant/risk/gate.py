@@ -81,7 +81,6 @@ class RiskLimits:
     max_consecutive_rejections: int
     max_disconnect_duration: timedelta
     max_order_lifetime: timedelta
-    max_replacements: int
     max_submit_count_window: int
     max_cancel_count_window: int
     max_quote_age: timedelta
@@ -104,7 +103,6 @@ class RiskLimits:
         for integer_label, integer_value in (
             ("max open orders", self.max_open_orders),
             ("max consecutive rejections", self.max_consecutive_rejections),
-            ("max replacements", self.max_replacements),
             ("max submit count", self.max_submit_count_window),
             ("max cancel count", self.max_cancel_count_window),
         ):
@@ -155,9 +153,8 @@ class ExecutionRiskContext:
     open_order_count: int
     consecutive_rejections: int
     broker_connected: bool
-    disconnect_duration: timedelta
+    disconnect_duration: timedelta | None
     existing_order_age: timedelta | None
-    replacement_count: int
     submit_count_window: int
     cancel_count_window: int
     uquant_max_volume_participation: Decimal
@@ -166,9 +163,9 @@ class ExecutionRiskContext:
     capital_drawdown_fraction: Decimal
     reconciliation_healthy: bool
     external_active_order_count: int
-    unexplained_position_change: bool
-    corporate_action_suspected: bool
-    clock_drift: timedelta
+    unexplained_position_change: bool | None
+    corporate_action_suspected: bool | None
+    clock_drift: timedelta | None
     data_identity_matches: bool
     config_identity_matches: bool
     unresolved_order_count: int
@@ -226,23 +223,22 @@ class ExecutionRiskContext:
         for count_label, count_value in (
             ("open order count", self.open_order_count),
             ("consecutive rejections", self.consecutive_rejections),
-            ("replacement count", self.replacement_count),
             ("submit count window", self.submit_count_window),
             ("cancel count window", self.cancel_count_window),
             ("external active order count", self.external_active_order_count),
             ("unresolved order count", self.unresolved_order_count),
         ):
             _positive_int(count_value, label=count_label, allow_zero=True)
-        _duration(self.disconnect_duration, label="disconnect duration", allow_zero=True)
-        _duration(self.clock_drift, label="clock drift", allow_zero=True)
+        if self.disconnect_duration is not None:
+            _duration(self.disconnect_duration, label="disconnect duration", allow_zero=True)
+        if self.clock_drift is not None:
+            _duration(self.clock_drift, label="clock drift", allow_zero=True)
         if self.existing_order_age is not None:
             _duration(self.existing_order_age, label="existing order age", allow_zero=True)
         for bool_label, bool_value in (
             ("freeze new risk", self.freeze_new_risk),
             ("broker connected", self.broker_connected),
             ("reconciliation healthy", self.reconciliation_healthy),
-            ("unexplained position change", self.unexplained_position_change),
-            ("corporate action suspected", self.corporate_action_suspected),
             ("data identity matches", self.data_identity_matches),
             ("config identity matches", self.config_identity_matches),
             ("kill switch tripped", self.kill_switch_tripped),
@@ -250,6 +246,12 @@ class ExecutionRiskContext:
         ):
             if not isinstance(bool_value, bool):
                 raise DomainTypeError(f"risk {bool_label} must be bool")
+        for optional_label, optional_value in (
+            ("unexplained position change", self.unexplained_position_change),
+            ("corporate action suspected", self.corporate_action_suspected),
+        ):
+            if optional_value is not None and not isinstance(optional_value, bool):
+                raise DomainTypeError(f"risk {optional_label} must be bool or null")
         if not isinstance(self.limits, RiskLimits):
             raise DomainTypeError("risk limits must be RiskLimits")
 
@@ -310,9 +312,13 @@ class ExecutionRiskGate:
             halt.append("RECONCILIATION_UNHEALTHY")
         if context.external_active_order_count > 0:
             halt.append("EXTERNAL_ACTIVE_ORDER")
-        if context.unexplained_position_change:
+        if context.unexplained_position_change is None:
+            halt.append("POSITION_CHANGE_UNVERIFIED")
+        elif context.unexplained_position_change:
             halt.append("UNEXPLAINED_POSITION_CHANGE")
-        if context.corporate_action_suspected:
+        if context.corporate_action_suspected is None:
+            halt.append("CORPORATE_ACTION_UNVERIFIED")
+        elif context.corporate_action_suspected:
             halt.append("CORPORATE_ACTION_SUSPECTED")
         if context.consecutive_rejections >= limits.max_consecutive_rejections:
             halt.append("CONSECUTIVE_REJECTION_LIMIT")
@@ -322,7 +328,9 @@ class ExecutionRiskGate:
             halt.append("INTRADAY_LOSS_LIMIT")
         if context.capital_drawdown_fraction > limits.max_capital_drawdown_fraction:
             halt.append("CAPITAL_DRAWDOWN_LIMIT")
-        if context.clock_drift > limits.max_clock_drift:
+        if context.clock_drift is None:
+            halt.append("CLOCK_DRIFT_UNVERIFIED")
+        elif context.clock_drift > limits.max_clock_drift:
             halt.append("CLOCK_DRIFT_LIMIT")
         if context.runtime_state not in {RuntimeState.READY, RuntimeState.EXECUTING}:
             halt.append("RUNTIME_NOT_WRITABLE")
@@ -330,8 +338,11 @@ class ExecutionRiskGate:
             halt.append("DEPLOYMENT_ALLOWLIST_EXPANDS_UNIVERSE")
         if broker_command.requested_shares.value > command.uquant_authorized_shares.value:
             halt.append("COMMAND_EXCEEDS_UQUANT_AUTHORIZATION")
-        if not context.broker_connected and (context.disconnect_duration > limits.max_disconnect_duration):
-            halt.append("BROKER_DISCONNECT_LIMIT")
+        if not context.broker_connected:
+            if context.disconnect_duration is None:
+                halt.append("BROKER_DISCONNECT_DURATION_UNVERIFIED")
+            elif context.disconnect_duration > limits.max_disconnect_duration:
+                halt.append("BROKER_DISCONNECT_LIMIT")
         if context.quote is not None and (context.quote.received_at - context.now > limits.max_clock_drift):
             halt.append("QUOTE_TIME_IN_FUTURE")
         if halt:
@@ -404,8 +415,6 @@ class ExecutionRiskGate:
             context.existing_order_age > limits.max_order_lifetime
         ):
             block.append("ORDER_LIFETIME_LIMIT")
-        if context.replacement_count >= limits.max_replacements:
-            block.append("REPLACEMENT_LIMIT")
         current_shares = 0 if context.position is None else context.position.total_shares.value
         if context.position is not None and context.position.symbol != symbol:
             block.append("POSITION_SYMBOL_MISMATCH")

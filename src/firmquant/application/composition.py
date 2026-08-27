@@ -16,7 +16,10 @@ from firmquant.application.production_runtime import ProductionRuntimeFactory
 from firmquant.application.runtime import ReadOnlyBrokerSession
 from firmquant.broker.gateway import BrokerGateway
 from firmquant.broker.paper import PaperBroker
-from firmquant.broker.production_factory import build_production_xtquant_gateway
+from firmquant.broker.production_factory import (
+    build_production_xtquant_gateway,
+    build_readonly_xtquant_gateway,
+)
 from firmquant.broker.replay import RecordedReplayBroker
 from firmquant.config import Mode, PathSettings, Settings, load_settings
 from firmquant.domain.broker_facts import (
@@ -561,8 +564,8 @@ class ConfiguredOperatorPorts:
         except Exception as error:
             raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE") from error
 
-    def doctor_broker(self) -> BrokerGateway:
-        """Build a fresh read-only diagnostic gateway without write capability."""
+    def doctor_broker(self) -> object:
+        """Build a fresh diagnostic broker; production returns a read-only XtQuant facade."""
 
         identity = StrategyIdentity.locked()
         try:
@@ -570,6 +573,14 @@ class ConfiguredOperatorPorts:
         except Exception as error:
             raise OperatorCommandDenied("UQUANT_IDENTITY_UNAVAILABLE") from error
         settings = self._settings()
+        if settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            try:
+                return build_readonly_xtquant_gateway(settings=settings, clock=self._clock)
+            except Exception as error:
+                code = str(error)
+                if "XTQUANT_SDK_UNAVAILABLE" in code:
+                    raise OperatorCommandDenied("XTQUANT_SDK_UNAVAILABLE") from error
+                raise OperatorCommandDenied("XTQUANT_RUNTIME_PREREQUISITES_UNAVAILABLE") from error
         account = _safe_account(self._account_path(settings))
         return self._gateway(settings, account)
 
