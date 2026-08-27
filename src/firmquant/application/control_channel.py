@@ -10,6 +10,7 @@ import secrets
 import socket
 import stat
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -22,14 +23,9 @@ _DEFAULT_TTL: Final = timedelta(minutes=5)
 _MAX_TTL: Final = timedelta(minutes=15)
 _REQUEST_ID = re.compile(r"^ctrl_[0-9a-f]{64}$")
 _RECEIPT_ID = re.compile(r"^(?:ctrl|invalid)_[0-9a-f]{64}$")
-_REQUEST_FIELDS = frozenset({"request_id", "command", "created_at", "expires_at", "host_hash"})
-_OPTIONAL_REQUEST_FIELDS = frozenset({"reason_sha256"})
-_COMMAND_PRIORITY: Final = {
-    "HALT": 0,
-    "DISARM": 1,
-    "CANCEL_SYSTEM_ORDERS": 2,
-    "STOP": 3,
-}
+_REQUIRED_FIELDS = frozenset({"request_id", "command", "created_at", "expires_at", "host_hash"})
+_OPTIONAL_FIELDS = frozenset({"reason_sha256"})
+_PRIORITY: Final = {"HALT": 0, "DISARM": 1, "CANCEL_SYSTEM_ORDERS": 2, "STOP": 3}
 
 
 class ControlChannelError(RuntimeError):
@@ -64,12 +60,8 @@ def _aware(value: datetime, *, label: str) -> datetime:
 
 def _canonical_json(payload: Mapping[str, object]) -> bytes:
     return json.dumps(
-        dict(payload),
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-        allow_nan=False,
-    ).encode("utf-8")
+        dict(payload), ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+    ).encode()
 
 
 def _strict_json(raw: bytes) -> dict[str, object]:
@@ -107,7 +99,7 @@ def local_host_hash() -> str:
     hostname = socket.gethostname().strip().lower()
     if not hostname:
         raise ControlChannelError("CONTROL_HOSTNAME_UNAVAILABLE")
-    return hashlib.sha256(hostname.encode("utf-8")).hexdigest()
+    return hashlib.sha256(hostname.encode()).hexdigest()
 
 
 def _reason_sha256(reason: str | None) -> str | None:
@@ -120,7 +112,7 @@ def _reason_sha256(reason: str | None) -> str | None:
         raise ValueError("control reason must contain 1..512 canonical characters")
     if any(ord(character) < 32 or ord(character) == 127 for character in canonical):
         raise ValueError("control reason contains control characters")
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _new_request_id() -> str:
@@ -181,10 +173,8 @@ def _atomic_write(directory: Path, target: Path, payload: bytes) -> None:
     except Exception:
         if descriptor is not None:
             os.close(descriptor)
-        try:
+        with suppress(OSError):
             temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
@@ -350,9 +340,8 @@ class ControlInbox:
         if not isinstance(ttl, timedelta) or ttl <= timedelta(0) or ttl > _MAX_TTL:
             raise ValueError("control ttl must be within (0, 15 minutes]")
         created_at = _aware(self._clock(), label="control clock")
-        identifier = request_id or self._request_id_factory()
         request = ControlRequest(
-            request_id=identifier,
+            request_id=request_id or self._request_id_factory(),
             command=command,
             created_at=created_at,
             expires_at=created_at + ttl,
@@ -393,8 +382,7 @@ class ControlInbox:
         return ControlStatusView(request_id=request_id, status=ControlStatus.UNKNOWN)
 
     def process_pending(
-        self,
-        handler: Callable[[ControlRequest], ControlExecution],
+        self, handler: Callable[[ControlRequest], ControlExecution]
     ) -> ControlBatch:
         if not callable(handler):
             raise TypeError("control handler must be callable")
@@ -409,28 +397,29 @@ class ControlInbox:
             loaded = self._load_path(path, now=now)
             if isinstance(loaded, ControlReceipt):
                 receipts.append(loaded)
-            elif loaded is not None:
-                request, request_path = loaded
-                receipt_path = self._receipt_path(request.request_id)
-                if receipt_path.exists() and not receipt_path.is_symlink():
-                    existing = self._read_receipt(receipt_path)
-                    if existing.request_sha256 == request.payload_sha256:
-                        request_path.unlink(missing_ok=True)
-                        _fsync_directory(self._inbox)
-                        continue
-                    collision = self._reject(
+                continue
+            if loaded is None:
+                continue
+            request, request_path = loaded
+            receipt_path = self._receipt_path(request.request_id)
+            if receipt_path.exists() and not receipt_path.is_symlink():
+                existing = self._read_receipt(receipt_path)
+                if existing.request_sha256 == request.payload_sha256:
+                    request_path.unlink(missing_ok=True)
+                    _fsync_directory(self._inbox)
+                    continue
+                receipts.append(
+                    self._reject(
                         request_path,
                         reason="CONTROL_REQUEST_ID_COLLISION",
                         raw_hash=request.payload_sha256,
                     )
-                    receipts.append(collision)
-                    continue
-                pending.append((request, request_path))
+                )
+                continue
+            pending.append((request, request_path))
         pending.sort(
             key=lambda item: (
-                _COMMAND_PRIORITY[item[0].command.value],
-                item[0].created_at,
-                item[0].request_id,
+                _PRIORITY[item[0].command.value], item[0].created_at, item[0].request_id
             )
         )
         halted = False
@@ -456,10 +445,7 @@ class ControlInbox:
         return ControlBatch(receipts=tuple(receipts), halted=halted, stop=stop)
 
     def _load_path(
-        self,
-        path: Path,
-        *,
-        now: datetime,
+        self, path: Path, *, now: datetime
     ) -> tuple[ControlRequest, Path] | ControlReceipt | None:
         try:
             metadata = path.lstat()
@@ -471,6 +457,8 @@ class ControlInbox:
             return self._reject(path, reason="CONTROL_REQUEST_SYMLINK", raw_hash=None)
         if not stat.S_ISREG(metadata.st_mode):
             return self._reject(path, reason="CONTROL_REQUEST_NOT_REGULAR", raw_hash=None)
+        if os.name != "nt" and metadata.st_mode & 0o077:
+            return self._reject(path, reason="CONTROL_REQUEST_NOT_PRIVATE", raw_hash=None)
         if metadata.st_size <= 0 or metadata.st_size > MAX_CONTROL_REQUEST_BYTES:
             return self._reject(path, reason="CONTROL_REQUEST_SIZE_INVALID", raw_hash=None)
         try:
@@ -479,8 +467,7 @@ class ControlInbox:
             raise ControlChannelError("CONTROL_REQUEST_READ_FAILED") from error
         raw_hash = hashlib.sha256(raw).hexdigest()
         try:
-            payload = _strict_json(raw)
-            request = self._parse_request(payload, now=now)
+            request = self._parse_request(_strict_json(raw), now=now)
             expected = self._request_path(request.request_id)
             if path.name != expected.name or path.parent != expected.parent:
                 raise ControlRequestRejected("CONTROL_REQUEST_PATH_MISMATCH")
@@ -490,8 +477,8 @@ class ControlInbox:
 
     def _parse_request(self, payload: Mapping[str, object], *, now: datetime) -> ControlRequest:
         keys = frozenset(payload)
-        if not _REQUEST_FIELDS.issubset(keys) or not keys.issubset(
-            _REQUEST_FIELDS | _OPTIONAL_REQUEST_FIELDS
+        if not _REQUIRED_FIELDS.issubset(keys) or not keys.issubset(
+            _REQUIRED_FIELDS | _OPTIONAL_FIELDS
         ):
             raise ControlRequestRejected("CONTROL_REQUEST_FIELDS_INVALID")
         try:
@@ -516,15 +503,11 @@ class ControlInbox:
         return request
 
     def _reject(self, path: Path, *, reason: str, raw_hash: str | None) -> ControlReceipt:
-        request_id: str | None = None
         stem = path.name[:-5] if path.name.endswith(".json") else ""
-        if _REQUEST_ID.fullmatch(stem) is not None:
-            request_id = stem
-        raw_identity = raw_hash or hashlib.sha256(
-            f"{path.name}:{reason}".encode("utf-8")
-        ).hexdigest()
+        request_id = stem if _REQUEST_ID.fullmatch(stem) is not None else None
+        raw_identity = raw_hash or hashlib.sha256(f"{path.name}:{reason}".encode()).hexdigest()
         receipt_id = request_id or "invalid_" + hashlib.sha256(
-            f"{path.name}:{raw_identity}".encode("utf-8")
+            f"{path.name}:{raw_identity}".encode()
         ).hexdigest()
         receipt = ControlReceipt(
             request_id=receipt_id,
@@ -561,13 +544,7 @@ class ControlInbox:
             raise ControlChannelError("CONTROL_RECEIPT_TOO_LARGE")
         payload = _strict_json(raw)
         expected = {
-            "command",
-            "outcome",
-            "processed_at",
-            "request_id",
-            "request_sha256",
-            "schema",
-            "status",
+            "command", "outcome", "processed_at", "request_id", "request_sha256", "schema", "status"
         }
         if set(payload) != expected or payload.get("schema") != "firmquant.control-receipt.v1":
             raise ControlChannelError("CONTROL_RECEIPT_INVALID")
