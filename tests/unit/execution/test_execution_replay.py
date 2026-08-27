@@ -54,8 +54,12 @@ def _costs() -> ReplayCosts:
 def test_authorization_is_causal_and_does_not_read_future_high_low() -> None:
     order = ReplayOrder("600000.SH", ReplaySide.BUY, 100, Decimal("10.10"), Decimal("0.10"))
     account = ReplayAccount(cash=Decimal("100000"), positions={}, sellable={})
-    first = execute_session(account, (order,), {"600000.SH": _bar("600000.SH", high="10.2", low="9.8")}, _costs())
-    second = execute_session(account, (order,), {"600000.SH": _bar("600000.SH", high="20", low="1")}, _costs())
+    first = execute_session(
+        account, (order,), {"600000.SH": _bar("600000.SH", high="10.2", low="9.8")}, _costs()
+    )
+    second = execute_session(
+        account, (order,), {"600000.SH": _bar("600000.SH", high="20", low="1")}, _costs()
+    )
     assert first.orders[0].authorized == second.orders[0].authorized
 
 
