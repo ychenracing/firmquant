@@ -6,23 +6,31 @@
 
 1. 获取 OS 文件锁与 SQLite writer lease；
 2. 打开数据库，验证 quick/integrity check、foreign keys、schema 和审计 hash chain；
-3. 验证 uquant AccountState 文件、account binding、bootstrap operation 和未完成 account operation；
-4. 连接 broker 并查询完整委托和成交，而不是等待 callback；
-5. 按 durable client order identity、已知 broker order id、订单经济字段和 broker snapshot 将 `SUBMITTING`、`CANCEL_REQUESTED`、`UNKNOWN` 与 broker order/fill 匹配；
-6. 按稳定 execution sequence 幂等应用 confirmed fills，再应用真实 broker 终态；
-7. 运行资金、持仓、委托、成交、费用和身份对账；只有所有矛盾解决后进入 READY。
+3. 连接 broker 后，先消费 `${state_directory}/control/inbox` 中仍未过期且没有 durable receipt 的本机控制请求；HALT 优先于其他请求，并在任何策略 submit 前生效；
+4. 验证 uquant AccountState 文件、account binding、bootstrap operation 和未完成 account operation；
+5. 查询完整委托和成交，而不是等待 callback；
+6. 按 durable client order identity、已知 broker order id、订单经济字段和 broker snapshot 将 `SUBMITTING`、`CANCEL_REQUESTED`、`UNKNOWN` 与 broker order/fill 匹配；
+7. 按稳定 execution sequence 幂等应用 confirmed fills，再应用真实 broker 终态；
+8. 运行资金、持仓、委托、成交、费用和身份对账；只有所有矛盾解决后进入 READY。
+
+控制 inbox 是恢复输入的一部分，不是第二数据库。请求文件必须通过 host binding、时效、canonical JSON、大小、权限和非 symlink 校验；处理结果写到 `control/receipts`。已有 receipt 的同 request id 精确重复不会再次执行。过期、畸形、路径穿越或身份不匹配请求被拒绝并留下 reject receipt，不进入运行状态推进。
 
 恢复服务从不调用 submit/cancel。普通查询找不到订单时仍保持 UNKNOWN；只有 broker 提供针对同一 durable command、同一 session 的明确 `NOT_ACCEPTED` 证明，才允许把 submit UNKNOWN 解析为未接单。多重匹配、身份/经济字段不一致、fill id 冲突、sequence 回退、累计成交量矛盾或证据损坏都失败关闭。
 
-## 订单崩溃边界
+唯一例外是操作员显式发出的 `CANCEL_SYSTEM_ORDERS` 风险缩减控制：它不是恢复服务，也不尝试解析 UNKNOWN。cancel-only capability 只从 durable ledger 选择已确认仍活动的 SYSTEM 订单；每次 broker cancel 前先写 durable cancel attempt。调用结果 UNKNOWN 后该订单立即退出 cancel-only 候选，随后仍由上述只读 UNKNOWN 恢复流程处理，不能重复 cancel。
+
+## 订单与控制崩溃边界
 
 | 崩溃点 | 持久证据 | 重启行为 |
 |---|---|---|
+| control request 已 atomic rename、receipt 尚未写 | `control/inbox/<request>.json` | 验证请求仍未过期后在任何策略工作前重新处理；HALT 不丢失 |
+| control receipt 已写、重复 request 文件再次出现 | `control/receipts/<request>.json` | 验证 request hash 一致后幂等删除重复 inbox 文件，不重复执行 |
 | durable SUBMITTING 已写、broker 调用前 | intent + command + attempt | 查询 broker；没有明确 NOT_ACCEPTED 证明前保持 UNKNOWN |
 | broker 已接受、broker order id 尚未落库 | 本地 SUBMITTING + client identity | 用 client order identity、订单经济字段和 broker snapshot 定位；绝不自动再次 submit |
 | ACK 已落库、fill 尚未落库 | broker order + aggregate | 查询 broker order/fills，confirmed fills 幂等补齐 |
 | 部分成交后崩溃 | 已有部分 fill + broker cumulative | 按 fill identity/sequence 补齐缺失成交，不重复已成交 |
 | cancel request 已落库、broker 响应前 | CANCEL_REQUESTED + cancel attempt | 查询委托与成交；未证明撤单结果时 UNKNOWN，不再次 cancel |
+| cancel-only 调用跨过 broker 边界后进程退出 | durable CANCEL_REQUESTED/attempt，response 可能缺失 | 按 UNKNOWN 恢复查询；不因新的控制请求再次 cancel |
 | terminal broker fact 已到、AccountState 提交前 | ledger/snapshot/account operation | broker facts 保留；下一次 account sync 重新 prepare/reconcile 后提交，不重复经济订单 |
 | AccountState 文件已提交、receipt 尚未提交 | expected-after 文件 + FILE_COMMITTED/PREPARED receipt evidence | 验证文件 hash 后补齐 SQLite receipt/reconciliation finalization，不重复写经济状态 |
 | receipt 已提交后重复启动 | RECEIPT_COMMITTED + audit | 幂等读取与验证，结果保持一致 |
@@ -52,13 +60,13 @@ broker sync 的 prepare 阶段只在深拷贝上执行 uquant account-sync，不
 
 - 临时锁：事务失败，不调用 broker write；释放锁后从持久证据重新恢复。
 - 损坏：`DatabaseCorrupt`，原文件原地保留，不自动重建空库。
-- 第二实例：OS lock 或未到期 database lease 拒绝新 writer。
+- 第二实例：OS lock 或未到期 database lease 拒绝新 writer；风险缩减 CLI 命令只能写入 control inbox，不能启动第二个交易 writer。
 - migration：按 schema version 顺序、事务化且可重复；未知/未来 schema 拒绝打开。
 - audit mismatch：停止运行，不重写 hash chain。
 
 ## Broker/客户端重启
 
-断线超过安全阈值 HALT；重连后先执行完整查询和 reconciliation。新的 event watermark、迟到成交、外部订单和持仓变化必须得到解释。客户端重启不会让本地假设 broker 已清空，也不会重新提交 UNKNOWN 经济订单。
+断线超过安全阈值 HALT；重连后先处理 pending control，再执行完整查询和 reconciliation。新的 event watermark、迟到成交、外部订单和持仓变化必须得到解释。客户端重启不会让本地假设 broker 已清空，也不会重新提交 UNKNOWN 经济订单。
 
 恢复完成后，本地 aggregate、operational ledger、broker snapshot 和 uquant AccountState 必须对已确认终态、现金、持仓和费用严格一致；`REJECTED`、`EXPIRED` 与 `CANCELLED` 在 firmquant 对账中保持不同终态。
 
@@ -66,4 +74,4 @@ broker sync 的 prepare 阶段只在深拷贝上执行 uquant account-sync，不
 
 备份使用 SQLite online backup 生成一致性数据库，连同 manifest 和可选 uquant AccountState 写入临时 bundle；全部摘要、schema、审计链和账户文件验证后原子发布。`verify-backup` 在隔离临时目录恢复，不覆盖生产文件。备份失败或验证失败不删除源数据，也不能作为继续交易的理由。
 
-恢复后使用 [运行指南](OPERATIONS.md) 的 `status`、`reconcile` 和报告证据复核；实盘恢复还需重新 arm。
+恢复后使用 [运行指南](OPERATIONS.md) 的 `status`、`reconcile`、控制 receipt 和报告证据复核；实盘恢复还需重新 arm。
