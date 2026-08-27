@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Never
 
 from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
-from firmquant.config import Settings
+from firmquant.config import Settings, load_settings
 from firmquant.market_data.calendar_manifest import load_trading_calendar_manifest
 
 from .audit import AuditLedger
@@ -37,6 +37,7 @@ class BackupBundleInputs:
     """Validated production identities copied into a complete recovery bundle."""
 
     settings: Settings
+    config_path: Path
     config_sha256: str
     safety_manifest_path: Path
     calendar_manifest_path: Path
@@ -68,6 +69,7 @@ class BackupBundleInputs:
         if type(self.strategy_session) is not date:
             raise TypeError("complete backup strategy session must be date")
         for path in (
+            self.config_path,
             self.safety_manifest_path,
             self.calendar_manifest_path,
             self.active_data_manifest_path,
@@ -335,7 +337,7 @@ def _verify_complete_bundle(
     required = {
         "firmquant.sqlite3",
         "account_state.json",
-        "production_config.json",
+        "production_config.toml",
         "xtquant_safety_manifest.json",
         "trading_calendar.json",
         "active_data_source.json",
@@ -356,9 +358,8 @@ def _verify_complete_bundle(
             raise BackupVerificationError(f"complete backup member SHA-256 mismatch: {name}")
         member_hashes[name] = observed
 
-    config_payload = _json_object(bundle / "production_config.json", label="production config")
     try:
-        Settings.model_validate(config_payload)
+        load_settings(bundle / "production_config.toml")
     except Exception as exc:
         raise BackupVerificationError("complete backup production config is invalid") from exc
     load_trading_calendar_manifest(bundle / "trading_calendar.json")
@@ -371,7 +372,7 @@ def _verify_complete_bundle(
         label="strategy data manifest",
     )
     if not strategy_data:
-        raise BackupVerificationError("complete backup strategy data manifest is empty")
+        raise BackupVerificationError("complete backup strategy data identity is empty")
     deployment = _json_object(bundle / "deployment_record.json", label="deployment record")
     manifest_deployment = _mapping(manifest["deployment"], label="deployment")
     if deployment != manifest_deployment:
@@ -384,6 +385,8 @@ def _verify_complete_bundle(
         raise BackupVerificationError("complete backup account authority is invalid") from exc
     if account_sha256 != authority_hash:
         raise BackupVerificationError("complete backup account identity is inconsistent")
+    if _text(deployment, "config_sha256", label="deployment") != member_hashes["production_config.toml"]:
+        raise BackupVerificationError("complete backup config identity is inconsistent")
     if _text(deployment, "calendar_sha256", label="deployment") != member_hashes["trading_calendar.json"]:
         raise BackupVerificationError("complete backup calendar identity is inconsistent")
     if (
@@ -447,9 +450,20 @@ def verify_backup(
     raise BackupVerificationError("unsupported backup manifest schema version")
 
 
-def _validated_config_bytes(settings: Settings) -> bytes:
-    payload = settings.model_dump(mode="json")
-    rendered = canonical_json(payload).encode("utf-8")
+def _validated_config_bytes(inputs: BackupBundleInputs) -> bytes:
+    path = inputs.config_path
+    if path.is_symlink() or not path.is_file():
+        raise BackupError("production config must be a regular non-symlink file")
+    try:
+        rendered = path.read_bytes()
+        validated = load_settings(path)
+    except Exception as exc:
+        raise BackupError("production config cannot be validated for backup") from exc
+    observed_sha256 = hashlib.sha256(rendered).hexdigest()
+    if observed_sha256 != inputs.config_sha256:
+        raise BackupError("production config identity does not match deployment identity")
+    if validated != inputs.settings:
+        raise BackupError("production config validated settings changed before backup")
     forbidden = (b"ARM_MAC_KEY", b"WEBHOOK_TOKEN", b"password", b"access_token", b"secret_key")
     if any(token.lower() in rendered.lower() for token in forbidden):
         raise BackupError("validated production config unexpectedly contains secret material")
@@ -464,7 +478,7 @@ def _complete_members(
 ) -> tuple[dict[str, str], dict[str, object]]:
     account_destination = temporary_bundle / "account_state.json"
     _copy_fsynced(Path(account_state_path), account_destination, label="account state")
-    _write_fsynced(temporary_bundle / "production_config.json", _validated_config_bytes(inputs.settings))
+    _write_fsynced(temporary_bundle / "production_config.toml", _validated_config_bytes(inputs))
     copies = (
         (inputs.safety_manifest_path, "xtquant_safety_manifest.json", "XtQuant safety manifest"),
         (inputs.calendar_manifest_path, "trading_calendar.json", "trading calendar manifest"),
