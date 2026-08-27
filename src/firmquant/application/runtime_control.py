@@ -40,7 +40,6 @@ class RuntimeControlExecutor:
         writer: WriterLease,
         broker: BrokerGateway | None,
         clock: Callable[[], datetime],
-        halt_hook: Callable[[str], None] | None = None,
     ) -> None:
         if not isinstance(mode, Mode):
             raise TypeError("runtime control mode must be Mode")
@@ -50,13 +49,10 @@ class RuntimeControlExecutor:
             raise TypeError("runtime control broker must satisfy BrokerGateway")
         if not callable(clock):
             raise TypeError("runtime control clock must be callable")
-        if halt_hook is not None and not callable(halt_hook):
-            raise TypeError("runtime control halt hook must be callable")
         self._mode = mode
         self._writer = writer
         self._broker = broker
         self._clock = clock
-        self._halt_hook = halt_hook
         self._cancel_calls = 0
         self._stop_pending = False
 
@@ -83,12 +79,12 @@ class RuntimeControlExecutor:
         raise RuntimeControlError("CONTROL_COMMAND_UNSUPPORTED")
 
     def execute_internal_stop(self, *, source: str = "PROCESS_SIGNAL") -> ControlExecution:
-        """Translate a process stop flag into the same serialized STOP state semantics."""
+        """Translate a signal flag into the same serialized STOP state semantics."""
 
         if not isinstance(source, str) or not source or source != source.strip():
             raise ValueError("internal stop source must be canonical text")
         request_id = "internal-stop-" + hashlib.sha256(
-            f"{source}:{self._writer.generation}".encode("utf-8")
+            f"{source}:{self._writer.generation}".encode()
         ).hexdigest()
         return self._stop(request_id=request_id, reason_sha256=None)
 
@@ -112,9 +108,6 @@ class RuntimeControlExecutor:
     def _halt(self, *, request_id: str, reason_sha256: str | None) -> ControlExecution:
         now = self._now()
         revoked = self._revoke_arm(now=now, reason="local control halt")
-        if self._halt_hook is not None:
-            self._halt_hook("KILL_SWITCH")
-
         receipts = WorkflowReceiptStore(writer_lease=self._writer)
         status = receipts.load_runtime(self._mode)
         if status.state is RuntimeState.STOPPING:
@@ -133,13 +126,12 @@ class RuntimeControlExecutor:
                 reason="local emergency halt control",
                 blockers=(),
             )
-        blockers = tuple(sorted(set(status.blockers) | {"KILL_SWITCH"}))
         status = self._save_transition(
             receipts,
             status=status,
             target=RuntimeState.HALTED,
             reason="local emergency halt",
-            blockers=blockers,
+            blockers=tuple(sorted(set(status.blockers) | {"KILL_SWITCH"})),
         )
         self._append_halt_evidence(
             request_id=request_id,
@@ -304,18 +296,17 @@ class RuntimeControlExecutor:
         status: RuntimeStatus,
         now: datetime,
     ) -> None:
-        event_id = "control-halt:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        event_id = "control-halt:" + hashlib.sha256(request_id.encode()).hexdigest()
         payload = {
             "schema": "firmquant.kill-switch.v1",
-            "control_request_id_sha256": hashlib.sha256(request_id.encode("utf-8")).hexdigest(),
+            "control_request_id_sha256": hashlib.sha256(request_id.encode()).hexdigest(),
             "reason_sha256": reason_sha256 or hashlib.sha256(b"local emergency halt").hexdigest(),
         }
         payload_json = canonical_json(payload)
         with self._writer.database.transaction():
             if (
                 self._writer.database.query_one(
-                    "SELECT 1 FROM risk_events WHERE risk_event_id = ?",
-                    (event_id,),
+                    "SELECT 1 FROM risk_events WHERE risk_event_id = ?", (event_id,)
                 )
                 is None
             ):
@@ -329,7 +320,7 @@ class RuntimeControlExecutor:
                     (
                         event_id,
                         payload_json,
-                        hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
+                        hashlib.sha256(payload_json.encode()).hexdigest(),
                         now.isoformat(),
                     ),
                 )
@@ -350,13 +341,12 @@ class RuntimeControlExecutor:
         payload: dict[str, object],
         now: datetime,
     ) -> None:
-        request_hash = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        request_hash = hashlib.sha256(request_id.encode()).hexdigest()
         event_id = f"control:{command.value.lower()}:{request_hash}"
         with self._writer.database.transaction():
             if (
                 self._writer.database.query_one(
-                    "SELECT 1 FROM audit_events WHERE audit_event_id = ?",
-                    (event_id,),
+                    "SELECT 1 FROM audit_events WHERE audit_event_id = ?", (event_id,)
                 )
                 is not None
             ):
