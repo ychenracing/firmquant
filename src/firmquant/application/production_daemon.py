@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
+from firmquant.application.control_channel import ControlBatch, ControlInbox
 from firmquant.application.production_runtime import ProductionRuntime, ProductionRuntimeReceipt
-from firmquant.broker.gateway import BrokerEventSink
+from firmquant.application.runtime_control import RuntimeControlExecutor
+from firmquant.broker.gateway import BrokerEventSink, BrokerGateway
 from firmquant.config import Mode, Settings
 from firmquant.persistence.writer_lease import WriterLease
 
@@ -137,6 +139,7 @@ class ProductionDaemon(ProductionRuntime):
         clock: Callable[[], datetime],
         sleep: Callable[[float], None],
         stop_requested: Callable[[], bool],
+        control_inbox: ControlInbox | None = None,
         poll_interval: timedelta = timedelta(seconds=1),
         renew_interval: timedelta = timedelta(seconds=10),
         max_events_per_cycle: int = 1024,
@@ -153,6 +156,8 @@ class ProductionDaemon(ProductionRuntime):
             raise TypeError("production daemon hooks do not satisfy their contract")
         if not all(callable(item) for item in (clock, sleep, stop_requested)):
             raise TypeError("production daemon clock/sleep/stop ports must be callable")
+        if control_inbox is not None and not isinstance(control_inbox, ControlInbox):
+            raise TypeError("production daemon control inbox must be ControlInbox")
         self._mode = mode
         self._writer = writer
         self._broker = broker
@@ -161,6 +166,16 @@ class ProductionDaemon(ProductionRuntime):
         self._clock = clock
         self._sleep = sleep
         self._stop_requested = stop_requested
+        self._control_inbox = control_inbox or ControlInbox(writer.database.path.parent, clock=clock)
+        cancel_broker = broker if isinstance(broker, BrokerGateway) else None
+        self._control_executor = RuntimeControlExecutor(
+            mode=mode,
+            writer=writer,
+            broker=cancel_broker,
+            clock=clock,
+            halt_hook=hooks.halt,
+        )
+        self._risk_blocked = False
         self._poll_interval = _positive_duration(poll_interval, label="poll interval")
         self._renew_interval = _positive_duration(renew_interval, label="writer renewal interval")
         if isinstance(max_events_per_cycle, bool) or not isinstance(max_events_per_cycle, int):
@@ -197,6 +212,34 @@ class ProductionDaemon(ProductionRuntime):
             self._hooks.halt(reason)
         raise ProductionDaemonHalted(reason)
 
+    def _process_controls(self) -> ControlBatch:
+        batch = self._control_inbox.process_pending(self._control_executor.execute)
+        if batch.halted:
+            self._risk_blocked = True
+        return batch
+
+    def _heartbeat(
+        self,
+        *,
+        now: datetime,
+        event_count: int,
+        decision_count: int,
+        execution_count: int,
+        eod_count: int,
+    ) -> None:
+        self._hooks.heartbeat(
+            ProductionHeartbeat(
+                mode=self._mode,
+                observed_at=now,
+                writer_generation=self._writer.generation,
+                pending_events=self._pump.pending_count,
+                processed_events=event_count,
+                decisions=decision_count,
+                executions=execution_count,
+                eod=eod_count,
+            )
+        )
+
     def run(self) -> ProductionRuntimeReceipt:
         self._writer.assert_current()
         started_at = self._now()
@@ -206,14 +249,20 @@ class ProductionDaemon(ProductionRuntime):
         decision_count = 0
         execution_count = 0
         eod_count = 0
-        startup_reconciliation_id = ""
+        startup_reconciliation_id: str | None = None
         connected = False
+        clean_stop = False
+        disconnect_error: Exception | None = None
         try:
             self._broker.connect()
             connected = True
             self._broker.subscribe(self._pump.sink)
-            startup_reconciliation_id = self._reconciliation_id(self._hooks.startup())
-            while True:
+
+            initial_controls = self._process_controls()
+            if not initial_controls.stop and not self._risk_blocked:
+                startup_reconciliation_id = self._reconciliation_id(self._hooks.startup())
+
+            while not initial_controls.stop:
                 now = self._now()
                 if now - last_renewed_at >= self._renew_interval:
                     self._writer.renew()
@@ -222,30 +271,34 @@ class ProductionDaemon(ProductionRuntime):
                 else:
                     self._writer.assert_current()
 
+                controls = self._process_controls()
+                if controls.stop:
+                    break
+                if self._stop_requested():
+                    self._control_executor.execute_internal_stop()
+                    self._risk_blocked = True
+                    break
+
                 self._halt_if_required()
                 event_count += self._drain_events()
                 self._halt_if_required()
 
-                cycle = self._hooks.cycle(now)
-                if not isinstance(cycle, ProductionCycleResult):
-                    raise ProductionDaemonHalted("production cycle result is invalid")
-                decision_count += cycle.decisions
-                execution_count += cycle.executions
-                eod_count += cycle.eod
-                heartbeat = ProductionHeartbeat(
-                    mode=self._mode,
-                    observed_at=now,
-                    writer_generation=self._writer.generation,
-                    pending_events=self._pump.pending_count,
-                    processed_events=event_count,
-                    decisions=decision_count,
-                    executions=execution_count,
-                    eod=eod_count,
+                if not self._risk_blocked:
+                    cycle = self._hooks.cycle(now)
+                    if not isinstance(cycle, ProductionCycleResult):
+                        raise ProductionDaemonHalted("production cycle result is invalid")
+                    decision_count += cycle.decisions
+                    execution_count += cycle.executions
+                    eod_count += cycle.eod
+                self._heartbeat(
+                    now=now,
+                    event_count=event_count,
+                    decision_count=decision_count,
+                    execution_count=execution_count,
+                    eod_count=eod_count,
                 )
-                self._hooks.heartbeat(heartbeat)
-                if self._stop_requested():
-                    break
                 self._sleep(self._poll_interval.total_seconds())
+            clean_stop = True
         except ProductionDaemonHalted:
             raise
         except Exception as error:
@@ -254,8 +307,17 @@ class ProductionDaemon(ProductionRuntime):
             raise ProductionDaemonHalted("PRODUCTION_RUNTIME_EXCEPTION") from error
         finally:
             if connected:
-                with suppress(Exception):
+                try:
                     self._broker.disconnect()
+                except Exception as error:
+                    disconnect_error = error
+
+        if disconnect_error is not None:
+            with suppress(Exception):
+                self._hooks.halt("BROKER_DISCONNECT_FAILED")
+            raise ProductionDaemonHalted("BROKER_DISCONNECT_FAILED") from disconnect_error
+        if self._control_executor.stop_pending:
+            self._control_executor.finalize_stop()
 
         stopped_at = self._now()
         return ProductionRuntimeReceipt(
@@ -268,8 +330,8 @@ class ProductionDaemon(ProductionRuntime):
             execution_count=execution_count,
             eod_count=eod_count,
             writer_renewals=writer_renewals,
-            real_order_calls=self._hooks.real_order_calls(),
-            stopped_cleanly=True,
+            real_order_calls=self._hooks.real_order_calls() + self._control_executor.cancel_calls,
+            stopped_cleanly=clean_stop,
         )
 
 
