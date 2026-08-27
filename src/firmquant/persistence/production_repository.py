@@ -101,6 +101,21 @@ def _fill_evidence_id(fill: BrokerFillFact, execution_id: str) -> str:
     )
 
 
+def _response_payload(fact: BrokerOrderFact) -> dict[str, object]:
+    return {
+        "broker_order_id": fact.broker_order_id,
+        "client_order_id": fact.client_order_id,
+        "symbol": fact.symbol,
+        "side": fact.side,
+        "status": fact.status,
+        "requested_shares": fact.requested_shares,
+        "filled_shares": fact.filled_shares,
+        "limit_price": fact.limit_price,
+        "event_sequence": fact.event_sequence,
+        "raw_payload_sha256": fact.raw_payload_sha256,
+    }
+
+
 class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
     """Operational ledger that fails closed on regressing or ambiguous broker truth."""
 
@@ -157,7 +172,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             if fact.event_sequence < stored_sequence:
                 raise PersistenceConflict("broker order event sequence regressed")
             if fact.event_sequence == stored_sequence and (
-                fact.status.value != str(existing["status"]) or fact.filled_shares.value != previous_filled
+                fact.status.value != str(existing["status"])
+                or fact.filled_shares.value != previous_filled
             ):
                 raise PersistenceConflict("broker order sequence was reused for different truth")
         self.database.write(
@@ -491,6 +507,42 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             raise PersistenceConflict("recovered aggregate differs from broker cumulative fill")
         return current
 
+    def _complete_attempt_idempotently(
+        self,
+        attempt: BrokerAttempt,
+        fact: BrokerOrderFact,
+        *,
+        response_kind: str,
+        received_at: datetime,
+    ) -> None:
+        payload_json = canonical_json(_response_payload(fact))
+        payload_sha256 = hashlib.sha256(payload_json.encode()).hexdigest()
+        rows = self.database.query_all(
+            """
+            SELECT response_kind, payload_json, payload_sha256
+            FROM broker_responses
+            WHERE attempt_id = ?
+            ORDER BY response_id
+            """,
+            (attempt.attempt_id,),
+        )
+        if not rows:
+            self._complete_attempt(
+                attempt,
+                fact,
+                response_kind=response_kind,
+                received_at=received_at,
+            )
+            return
+        if len(rows) != 1 or tuple(rows[0]) != (response_kind, payload_json, payload_sha256):
+            raise PersistenceConflict("broker attempt response changed across recovery")
+        attempt_row = self.database.query_one(
+            "SELECT broker_order_id FROM broker_order_attempts WHERE attempt_id = ?",
+            (attempt.attempt_id,),
+        )
+        if attempt_row is None or attempt_row["broker_order_id"] != fact.broker_order_id:
+            raise PersistenceConflict("broker attempt response lost its broker order identity")
+
     def _record_returned_result(
         self,
         aggregate: OrderAggregate,
@@ -508,7 +560,12 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         if proven > fact.filled_shares.value:
             raise PersistenceConflict("broker cumulative fill contradicts confirmed fills")
         self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
-        self._complete_attempt(attempt, fact, response_kind=response_kind, received_at=received_at)
+        self._complete_attempt_idempotently(
+            attempt,
+            fact,
+            response_kind=response_kind,
+            received_at=received_at,
+        )
         current = self._apply_broker_economics(aggregate, fact, ordered, received_at=received_at)
         if proven < fact.filled_shares.value:
             return self.mark_attempt_unknown(
