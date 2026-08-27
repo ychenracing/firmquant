@@ -543,6 +543,7 @@ def test_live_execute_path_audits_result_and_rejects_safety_failure(
             return Result()
 
     with base.hook_case(tmp_path / "ok", mode=Mode.CANARY) as (hooks, _writer, _broker, _accounts):
+        base.complete_close(hooks)
         hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))
         monkeypatch.setattr(
             hooks,
@@ -569,6 +570,7 @@ def test_live_execute_path_audits_result_and_rejects_safety_failure(
             return UnsafeResult()
 
     with base.hook_case(tmp_path / "unsafe", mode=Mode.CANARY) as (hooks, _writer, _broker, _accounts):
+        base.complete_close(hooks)
         hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))
         monkeypatch.setattr(
             hooks,
@@ -606,31 +608,19 @@ def test_cycle_failure_paths_halt_with_specific_blockers(
         assert "EXECUTION_STEP_FAILED" in hooks.status.blockers
 
     with base.hook_case(
-        tmp_path / "eod",
+        tmp_path / "close",
         status=MarketSessionStatus.CLOSED,
         clock=lambda: base.POST_CLOSE,
     ) as (hooks, _writer, _broker, _accounts):
         base.ready(hooks)
-        monkeypatch.setattr(hooks, "_eod", lambda _session: (_ for _ in ()).throw(RuntimeError("eod")))
-        with pytest.raises(RuntimeError, match="eod"):
-            hooks.cycle(base.POST_CLOSE)
-        assert "EOD_RECONCILIATION_FAILED" in hooks.status.blockers
-
-    with base.hook_case(
-        tmp_path / "decision",
-        status=MarketSessionStatus.CLOSED,
-        clock=lambda: base.POST_CLOSE,
-    ) as (hooks, _writer, _broker, _accounts):
-        base.ready(hooks)
-        monkeypatch.setattr(hooks, "_eod", lambda _session: 0)
         monkeypatch.setattr(
             hooks,
-            "_post_close_decision",
-            lambda _session: (_ for _ in ()).throw(RuntimeError("decision")),
+            "_close_session",
+            lambda _session: (_ for _ in ()).throw(RuntimeError("close")),
         )
-        with pytest.raises(RuntimeError, match="decision"):
+        with pytest.raises(RuntimeError, match="close"):
             hooks.cycle(base.POST_CLOSE)
-        assert "POST_CLOSE_DECISION_FAILED" in hooks.status.blockers
+        assert "CLOSE_SESSION_FAILED" in hooks.status.blockers
 
 
 def test_signal_and_builder_validation_branches_are_fail_closed(
