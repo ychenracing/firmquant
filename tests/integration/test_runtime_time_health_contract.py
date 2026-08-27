@@ -209,12 +209,7 @@ def test_production_time_authority_wiring_has_single_implementation() -> None:
     module_source = inspect.getsource(production_services)
     hooks_source = inspect.getsource(production_services.ProductionServiceHooks)
     assert module_source.count("reconciliation: ReconciliationReceipt") == 1
-    assert (
-        hooks_source.count(
-            "self._active_execution_deadlines: ExecutionDeadlines | None = None"
-        )
-        == 1
-    )
+    assert hooks_source.count("self._active_execution_deadlines: ExecutionDeadlines | None = None") == 1
     for helper in (
         "def _monotonic(",
         "def _clock_receipt(",
