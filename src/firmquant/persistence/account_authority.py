@@ -13,7 +13,7 @@ from firmquant.domain.broker_facts import AccountType
 from firmquant.domain.values import Symbol
 
 from .audit import AuditLedger
-from .database import Database
+from .database import Database, TransactionRequired
 from .repositories import PersistenceConflict, canonical_json
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -186,57 +186,65 @@ class AccountBindingRepository:
         row = self._database.query_one("SELECT * FROM account_bindings WHERE singleton_id = 1")
         return None if row is None else self._from_row(row)
 
-    def bind(self, binding: AccountBinding) -> AccountBinding:
+    def bind_in_transaction(self, binding: AccountBinding) -> AccountBinding:
+        """Bind the singleton account inside the caller's existing SQLite transaction."""
+
         if not isinstance(binding, AccountBinding):
             raise TypeError("account binding must be typed")
+        if not self._database.in_transaction:
+            raise TransactionRequired("account binding requires an active SQLite transaction")
         existing = self.load()
         if existing is not None:
             if existing == binding:
                 return existing
             raise PersistenceConflict("account is already bound to a different authority identity")
-        with self._database.transaction():
-            self._database.write(
-                """
-                INSERT INTO account_bindings(
-                    binding_id, singleton_id, account_id_hash, account_type,
-                    broker_snapshot_sha256, account_state_sha256, uquant_commit,
-                    uquant_code_fingerprint, data_hash, data_as_of, data_symbols_json,
-                    payload_json, payload_sha256, created_at
-                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    binding.binding_id,
-                    binding.account_id_hash,
-                    binding.account_type.value,
-                    binding.broker_snapshot_sha256,
-                    binding.account_state_sha256,
-                    binding.uquant_commit,
-                    binding.uquant_code_fingerprint,
-                    binding.data_hash,
-                    binding.data_as_of,
-                    canonical_json(binding.data_symbols),
-                    binding.payload_json,
-                    binding.payload_sha256,
-                    binding.created_at.isoformat(),
-                ),
-            )
-            AuditLedger(self._database).append(
-                audit_event_id="account-binding." + binding.payload_sha256,
-                category="account.binding",
-                actor="account-bootstrap",
-                payload={
-                    "schema": "firmquant.account-binding-audit.v1",
-                    "binding_id": binding.binding_id,
-                    "account_hash": binding.account_id_hash,
-                    "broker_snapshot_sha256": binding.broker_snapshot_sha256,
-                    "account_state_sha256": binding.account_state_sha256,
-                    "uquant_commit": binding.uquant_commit,
-                    "uquant_code_fingerprint": binding.uquant_code_fingerprint,
-                    "data_hash": binding.data_hash,
-                },
-                created_at=binding.created_at,
-            )
+        self._database.write(
+            """
+            INSERT INTO account_bindings(
+                binding_id, singleton_id, account_id_hash, account_type,
+                broker_snapshot_sha256, account_state_sha256, uquant_commit,
+                uquant_code_fingerprint, data_hash, data_as_of, data_symbols_json,
+                payload_json, payload_sha256, created_at
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                binding.binding_id,
+                binding.account_id_hash,
+                binding.account_type.value,
+                binding.broker_snapshot_sha256,
+                binding.account_state_sha256,
+                binding.uquant_commit,
+                binding.uquant_code_fingerprint,
+                binding.data_hash,
+                binding.data_as_of,
+                canonical_json(binding.data_symbols),
+                binding.payload_json,
+                binding.payload_sha256,
+                binding.created_at.isoformat(),
+            ),
+        )
+        AuditLedger(self._database).append(
+            audit_event_id="account-binding." + binding.payload_sha256,
+            category="account.binding",
+            actor="account-bootstrap",
+            payload={
+                "schema": "firmquant.account-binding-audit.v1",
+                "binding_id": binding.binding_id,
+                "account_hash": binding.account_id_hash,
+                "broker_snapshot_sha256": binding.broker_snapshot_sha256,
+                "account_state_sha256": binding.account_state_sha256,
+                "uquant_commit": binding.uquant_commit,
+                "uquant_code_fingerprint": binding.uquant_code_fingerprint,
+                "data_hash": binding.data_hash,
+            },
+            created_at=binding.created_at,
+        )
         return binding
+
+    def bind(self, binding: AccountBinding) -> AccountBinding:
+        with self._database.transaction():
+            return self.bind_in_transaction(binding)
+
 
 
 @dataclass(frozen=True, slots=True)
