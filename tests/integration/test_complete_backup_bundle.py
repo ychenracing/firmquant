@@ -5,6 +5,9 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from uquant.account import economic_state_sha256, save_account
+from uquant.types import AccountState
+
 from firmquant.config import Settings
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.backup import BackupBundleInputs, backup_state, verify_backup
@@ -53,8 +56,14 @@ def test_complete_backup_restores_deployment_identity_and_contains_no_secret_mat
         )
         DecisionSnapshotRepository(database).append(decision)
     account = tmp_path / "account.json"
-    account.write_text('{"schema_version":1,"cash":1000}', encoding="utf-8")
-    account_sha = hashlib.sha256(account.read_bytes()).hexdigest()
+    account_state = AccountState.empty(1000.0)
+    account_state.data_hash = "c" * 64
+    account_state.data_hash_as_of = STRATEGY_SESSION.isoformat()
+    account_state.data_hash_symbols = ["sz300308"]
+    account_state.code_hash = "d" * 64
+    save_account(account_state, account)
+    account_file_sha = hashlib.sha256(account.read_bytes()).hexdigest()
+    account_economic_sha = economic_state_sha256(account_state)
     safety = tmp_path / "safety.json"
     calendar = tmp_path / "calendar.json"
     active = tmp_path / "active.json"
@@ -86,14 +95,14 @@ def test_complete_backup_restores_deployment_identity_and_contains_no_secret_mat
             created_at=datetime(2026, 8, 25, 9, tzinfo=UTC),
             complete_inputs=BackupBundleInputs(
                 settings=Settings(),
-                config_sha256="d" * 64,
+                config_sha256="e" * 64,
                 safety_manifest_path=safety,
                 calendar_manifest_path=calendar,
                 active_data_manifest_path=active,
                 strategy_data_manifest_path=strategy_data,
                 firmquant_commit="e" * 40,
                 uquant_commit="f" * 40,
-                account_sha256=account_sha,
+                account_sha256=account_economic_sha,
                 decision_id=decision.decision_id,
                 strategy_session=STRATEGY_SESSION,
             ),
@@ -104,7 +113,7 @@ def test_complete_backup_restores_deployment_identity_and_contains_no_secret_mat
     verification = verify_backup(receipt.bundle_path)
     assert verification.complete_bundle is True
     assert verification.decision_id == decision.decision_id
-    assert verification.account_state_sha256 == account_sha
+    assert verification.account_state_sha256 == account_file_sha
     assert {path.name for path in receipt.bundle_path.iterdir()} == {
         "firmquant.sqlite3",
         "account_state.json",
