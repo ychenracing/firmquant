@@ -1,0 +1,51 @@
+name: Runtime Test Style Fix
+
+on:
+  push:
+    branches:
+      - codex/runtime-time-health
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.repository == 'ychenracing/firmquant'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/runtime-time-health
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.33'
+      - run: uv sync --frozen --extra dev
+      - name: Normalize focused execution tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/unit/execution/test_runtime_time_health_execution.py')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace('from firmquant.domain.orders import OrderState\n', 'from firmquant.domain.states import RuntimeState\n')
+          text = text.replace('''            runtime_state=__import__(\n                "firmquant.domain.states", fromlist=["RuntimeState"]\n            ).RuntimeState.READY,\n''', '            runtime_state=RuntimeState.READY,\n')
+          path.write_text(text, encoding='utf-8')
+          PY
+          uv run ruff check --fix tests/unit/execution/test_runtime_time_health_execution.py
+          uv run ruff format tests/unit/execution/test_runtime_time_health_execution.py
+          uv run ruff check .
+          uv run ruff format --check .
+          rm .github/workflows/runtime-test-style-fix.yml
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          git config user.name 'firmquant-runtime-safety-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add tests/unit/execution/test_runtime_time_health_execution.py .github/workflows/runtime-test-style-fix.yml
+          git commit -m 'Normalize runtime execution safety tests'
+          git push origin HEAD:codex/runtime-time-health
