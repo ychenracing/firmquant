@@ -1,0 +1,46 @@
+name: tmp-clean-finalization-double-imports
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Clean test imports
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('tests/unit/reconciliation/test_account_authority_additional_edges.py')
+          text = p.read_text(encoding='utf-8')
+          old = 'import hashlib\nimport hashlib\n'
+          if text.count(old) != 1:
+              raise SystemExit('expected duplicate hashlib exactly once')
+          p.write_text(text.replace(old, 'import hashlib\n'), encoding='utf-8')
+
+          p = Path('tests/unit/reconciliation/test_account_coordinator.py')
+          text = p.read_text(encoding='utf-8')
+          old = 'from pathlib import Path\nfrom types import SimpleNamespace\n\nimport pytest\n'
+          new = 'from pathlib import Path\n\nimport pytest\n'
+          if text.count(old) != 1:
+              raise SystemExit('expected SimpleNamespace import anchor exactly once')
+          text = text.replace(old, new)
+          old = 'from firmquant.persistence.database import Database\nfrom firmquant.persistence.repositories import canonical_json\nfrom firmquant.persistence.recovery import RecoveryContradiction, UquantAccountStateStore\n'
+          new = 'from firmquant.persistence.database import Database\nfrom firmquant.persistence.recovery import RecoveryContradiction, UquantAccountStateStore\nfrom firmquant.persistence.repositories import canonical_json\n'
+          if text.count(old) != 1:
+              raise SystemExit('expected import order anchor exactly once')
+          p.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+          git rm .github/workflows/tmp-clean-finalization-double-imports.yml
+          git config user.name firmquant-agent
+          git config user.email firmquant-agent@users.noreply.github.com
+          git add tests/unit/reconciliation
+          git commit -m "test: clean finalization double imports"
+          git push origin HEAD:codex/account-authority-reconciliation
