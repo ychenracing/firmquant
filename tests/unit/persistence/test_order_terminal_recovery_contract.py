@@ -60,10 +60,13 @@ def test_partial_terminal_fact_imports_fill_before_preserving_true_terminal(
     assert recovered.state is expected_state
     assert recovered.filled_shares.value == 50
     assert database.scalar("SELECT count(*) FROM fills") == 1
-    assert database.scalar(
-        "SELECT status FROM broker_orders WHERE broker_order_id = ?",
-        (terminal.broker_order_id,),
-    ) == status.value
+    assert (
+        database.scalar(
+            "SELECT status FROM broker_orders WHERE broker_order_id = ?",
+            (terminal.broker_order_id,),
+        )
+        == status.value
+    )
 
 
 def test_same_fill_id_and_same_economics_is_idempotent_even_if_raw_payload_differs(
