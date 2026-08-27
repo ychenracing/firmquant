@@ -181,8 +181,9 @@ def test_bootstrap_recovers_file_applied_before_atomic_binding_finalization(
 
         account_path = tmp_path / "uquant-account.json"
         durable_hash = service._store.hash_file(account_path)
-        assert database.scalar("SELECT count(*) FROM account_bindings") == 1
-        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "FILE_COMMITTED"
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 0
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "PREPARED"
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.binding'") == 0
         assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.bootstrap'") == 0
 
         monkeypatch.setattr(AuditLedger, "append", original_append)
