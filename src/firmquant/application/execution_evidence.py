@@ -278,7 +278,9 @@ class PositionObservation:
         return {"symbol": self.symbol, "shares": self.shares}
 
 
-def _unique_symbols(values: tuple[TargetObservation, ...] | tuple[PositionObservation, ...], *, label: str) -> None:
+def _unique_symbols(
+    values: tuple[TargetObservation, ...] | tuple[PositionObservation, ...], *, label: str
+) -> None:
     symbols = tuple(item.symbol for item in values)
     if len(set(symbols)) != len(symbols):
         raise ValueError(f"{label} contain duplicate symbols")
@@ -340,7 +342,11 @@ class ExecutionObservation:
             ("data quality failures", self.data_quality_failures),
         ):
             _count(value, label=label)
-        if not isinstance(self.created_at, datetime) or self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+        if (
+            not isinstance(self.created_at, datetime)
+            or self.created_at.tzinfo is None
+            or self.created_at.utcoffset() is None
+        ):
             raise ValueError("observation time must be timezone-aware")
         target_symbols = {target.symbol for target in self.targets}
         ending = (
