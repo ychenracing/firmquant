@@ -11,7 +11,7 @@ import pytest
 import firmquant.market_data.generations as generations
 import firmquant.market_data.xtquant_history as history
 import firmquant.persistence.backup as backup
-from firmquant.config import Mode, Settings, load_settings
+from firmquant.config import Settings, load_settings
 from firmquant.domain.broker_facts import InstrumentFact, SecurityStatus, SecurityType
 from firmquant.domain.values import Price, Shares, Symbol
 from firmquant.market_data.xtquant_daily import DailyDataUpdateError, InstrumentSessionState
