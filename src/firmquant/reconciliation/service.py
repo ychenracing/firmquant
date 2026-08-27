@@ -75,16 +75,19 @@ def _finalization_sha256(value: str, *, label: str) -> None:
 
 
 def _receipt_identity(receipt: ReconciliationReceipt) -> str:
-    return "recon_" + hashlib.sha256(
-        canonical_json(
-            {
-                "kind": receipt.kind,
-                "details_sha256": receipt.details_sha256,
-                "started_at": receipt.started_at,
-                "completed_at": receipt.completed_at,
-            }
-        ).encode("utf-8")
-    ).hexdigest()
+    return (
+        "recon_"
+        + hashlib.sha256(
+            canonical_json(
+                {
+                    "kind": receipt.kind,
+                    "details_sha256": receipt.details_sha256,
+                    "started_at": receipt.started_at,
+                    "completed_at": receipt.completed_at,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 def _validate_receipt_integrity(receipt: ReconciliationReceipt) -> None:
