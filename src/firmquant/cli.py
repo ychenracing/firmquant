@@ -1,4 +1,4 @@
-"""Thin local CLI over audited application operations."""
+"""Thin local CLI over audited application operations and local runtime controls."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ import json
 import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
 from . import __version__
+from .application.control_channel import ControlCommand, ControlInbox, ControlStatus
 from .application.operations import (
     OperatorCommand,
     OperatorCommandDenied,
@@ -22,16 +23,19 @@ from .application.operations import (
     OperatorService,
     create_local_operator_service,
 )
-from .config import Mode
+from .application.runtime_control import RuntimeControlExecutor
+from .config import Mode, Settings, load_settings
+from .persistence.writer_lease import WriterLease, WriterLeaseBusy
 
 _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("init", "初始化本地 PAPER 状态目录"),
     ("doctor", "运行环境、身份与只读连接诊断"),
     ("run", "持续运行一个明确模式的 session"),
-    ("status", "显示运行状态和所有阻断原因"),
+    ("status", "显示运行状态、阻断原因或本机控制请求状态"),
     ("arm-live", "创建短时效、绑定部署身份的实盘 lease"),
     ("disarm", "撤销实盘 lease"),
     ("halt", "触发 kill switch 并停止新增订单"),
+    ("stop", "请求生产 daemon 停止新增工作并干净退出"),
     ("resume", "在显式复核后请求恢复"),
     ("reconcile", "执行完整券商与本地状态对账"),
     ("bootstrap-account", "一次性建立真实券商账户与 uquant AccountState 权威绑定"),
@@ -42,8 +46,14 @@ _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("replay", "确定性重放冻结事件"),
     ("backup", "创建一致性状态备份"),
     ("verify-backup", "执行备份恢复验证"),
-    ("cancel-system-orders", "请求取消 firmquant 拥有的未完成订单"),
+    ("cancel-system-orders", "请求安全取消 durable ledger 中 firmquant 拥有的活动订单"),
 )
+_CONTROL_COMMANDS = {
+    "halt": ControlCommand.HALT,
+    "disarm": ControlCommand.DISARM,
+    "cancel-system-orders": ControlCommand.CANCEL_SYSTEM_ORDERS,
+    "stop": ControlCommand.STOP,
+}
 
 type ServiceFactory = Callable[[Path], OperatorService]
 type ConfirmationReader = Callable[[str], str]
@@ -106,10 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
                 default=300,
                 help="短时 lease 秒数, 最多 900 秒",
             )
-        elif name in {"disarm", "halt"}:
+        elif name in _CONTROL_COMMANDS:
             subparser.add_argument(
                 "--reason",
-                help="可选操作说明; 仅保存摘要, 不保存原文",
+                help="可选操作说明; 控制请求仅保存摘要, 不保存原文",
             )
         elif name == "bootstrap-account":
             subparser.add_argument(
@@ -126,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
                 "--account-state",
                 type=Path,
                 help="可选 uquant AccountState 文件; 路径不会写入审计",
+            )
+        if name == "status":
+            subparser.add_argument(
+                "--request-id",
+                help="查询 ctrl_<sha256> 本机控制请求是否仍排队或已持久化处理",
             )
         if name in {"decisions", "report"}:
             subparser.add_argument(
@@ -212,6 +227,92 @@ def _render_denial(error: OperatorCommandDenied, *, output_json: bool) -> None:
         )
 
 
+def _load_control_settings(config_path: Path) -> tuple[Settings, Path]:
+    if config_path.is_symlink() or not config_path.is_file():
+        raise OperatorCommandDenied("CONFIGURATION_UNAVAILABLE")
+    try:
+        settings = load_settings(config_path)
+    except Exception as error:
+        raise OperatorCommandDenied("CONFIGURATION_INVALID") from error
+    raw_state = settings.paths.state_directory
+    state = raw_state if raw_state.is_absolute() else config_path.parent / raw_state
+    if state.is_symlink() or not state.is_dir():
+        raise OperatorCommandDenied("STATE_PATH_INVALID")
+    return settings, state
+
+
+def _queue_control(
+    *,
+    config_path: Path,
+    command: ControlCommand,
+    reason: str | None,
+) -> OperatorResult:
+    _, state = _load_control_settings(config_path)
+    request = ControlInbox(state).enqueue(command, reason=reason)
+    return OperatorResult(
+        message="本机控制请求已排队; daemon 尚未确认执行结果。",
+        payload={
+            "command": command.value,
+            "control_status": ControlStatus.QUEUED.value,
+            "request_id": request.request_id,
+        },
+    )
+
+
+def _control_status(*, config_path: Path, request_id: str) -> OperatorResult:
+    _, state = _load_control_settings(config_path)
+    observed = ControlInbox(state).status(request_id)
+    payload: dict[str, object] = {
+        "control_status": observed.status.value,
+        "request_id": observed.request_id,
+    }
+    if observed.command is not None:
+        payload["command"] = observed.command.value
+    if observed.processed_at is not None:
+        payload["processed_at"] = observed.processed_at.isoformat()
+    if observed.outcome is not None:
+        payload["outcome"] = dict(observed.outcome)
+    message = (
+        "本机控制请求仍在排队; 尚未确认执行。"
+        if observed.status is ControlStatus.QUEUED
+        else "本机控制请求状态已读取。"
+    )
+    return OperatorResult(message=message, payload=payload)
+
+
+def _direct_stop_or_queue(*, config_path: Path, reason: str | None) -> OperatorResult:
+    settings, state = _load_control_settings(config_path)
+    inbox = ControlInbox(state)
+    database_path = state / "firmquant.sqlite3"
+    try:
+        with WriterLease.acquire(database_path, owner="operator-stop") as writer:
+            request = inbox.enqueue(ControlCommand.STOP, reason=reason)
+            executor = RuntimeControlExecutor(
+                mode=settings.mode,
+                writer=writer,
+                broker=None,
+                clock=lambda: datetime.now(UTC),
+            )
+            inbox.process_pending(executor.execute)
+            executor.finalize_stop()
+            observed = inbox.status(request.request_id)
+    except WriterLeaseBusy:
+        return _queue_control(
+            config_path=config_path,
+            command=ControlCommand.STOP,
+            reason=reason,
+        )
+    return OperatorResult(
+        message="本机 STOP 已完成持久化; 当前没有活动 daemon writer。",
+        payload={
+            "command": ControlCommand.STOP.value,
+            "control_status": observed.status.value,
+            "request_id": request.request_id,
+            "runtime_state": "DISARMED",
+        },
+    )
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -224,27 +325,54 @@ def main(
 
     _configure_utf8_output()
     arguments = build_parser().parse_args(argv)
-    request = _request(arguments)
-    terminal = sys.stdin.isatty() if interactive_terminal is None else interactive_terminal
-    reader = getpass.getpass if confirmation_reader is None else confirmation_reader
-    observed_environment = os.environ if environment is None else environment
-    interaction = OperatorInteraction(
-        interactive_terminal=terminal,
-        confirmation_reader=reader,
-        environment=observed_environment,
-    )
+    output_json = bool(getattr(arguments, "output_json", False))
+    config_path = cast(Path, arguments.config)
+    raw_command = cast(str, arguments.command)
+
     try:
-        service = service_factory(cast(Path, arguments.config))
+        request_id = cast(str | None, getattr(arguments, "request_id", None))
+        if raw_command == "status" and request_id is not None:
+            result = _control_status(config_path=config_path, request_id=request_id)
+            _render(result, output_json=output_json)
+            return result.exit_code
+        if raw_command == "stop":
+            result = _direct_stop_or_queue(
+                config_path=config_path,
+                reason=cast(str | None, getattr(arguments, "reason", None)),
+            )
+            _render(result, output_json=output_json)
+            return result.exit_code
+
+        request = _request(arguments)
+        terminal = sys.stdin.isatty() if interactive_terminal is None else interactive_terminal
+        reader = getpass.getpass if confirmation_reader is None else confirmation_reader
+        observed_environment = os.environ if environment is None else environment
+        interaction = OperatorInteraction(
+            interactive_terminal=terminal,
+            confirmation_reader=reader,
+            environment=observed_environment,
+        )
+        service = service_factory(config_path)
         if not isinstance(service, OperatorService):
             raise TypeError("service factory returned an invalid operator service")
-        result = service.execute(request, interaction)
+        try:
+            result = service.execute(request, interaction)
+        except WriterLeaseBusy:
+            control_command = _CONTROL_COMMANDS.get(raw_command)
+            if control_command is None:
+                raise
+            result = _queue_control(
+                config_path=config_path,
+                command=control_command,
+                reason=request.reason,
+            )
         if not isinstance(result, OperatorResult):
             raise TypeError("operator service returned an invalid result")
     except OperatorCommandDenied as error:
-        _render_denial(error, output_json=request.output_json)
+        _render_denial(error, output_json=output_json)
         return 2
     except Exception as error:
-        if request.output_json:
+        if output_json:
             print(
                 json.dumps(
                     {
@@ -264,7 +392,7 @@ def main(
                 file=sys.stderr,
             )
         return 2
-    _render(result, output_json=request.output_json)
+    _render(result, output_json=output_json)
     return result.exit_code
 
 
