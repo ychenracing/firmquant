@@ -64,6 +64,7 @@ def ensure_account_authority_schema(database: Database) -> None:
 
     apply_migrations(database)
 
+
 @dataclass(frozen=True, slots=True)
 class AccountBinding:
     binding_id: str
