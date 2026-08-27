@@ -7,10 +7,11 @@ from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 from firmquant.broker.gateway import (
     BrokerGateway,
-    BrokerOrderAbsenceVerifier,
+    BrokerOrderAbsenceProof,
     BrokerOrderCommand,
 )
 from firmquant.domain.broker_facts import PriceType, Side
@@ -89,22 +90,21 @@ class ProductionRecoveryService(RecoveryService):
         now: datetime,
     ) -> OrderRecoveryReceipt | None:
         gateway = self._gateway
-        if attempt.command_kind != "SUBMIT" or not isinstance(gateway, BrokerOrderAbsenceVerifier):
+        verifier = None if gateway is None else getattr(gateway, "prove_order_not_accepted", None)
+        if attempt.command_kind != "SUBMIT" or not callable(verifier):
             return None
         durable = self._durable_submit_command(attempt)
         if durable is None:
             return None
         command, started_at = durable
         try:
-            proof = gateway.prove_order_not_accepted(command)
+            observed = cast(Callable[[BrokerOrderCommand], object], verifier)(command)
         except Exception:
             return None
-        if (
-            proof is None
-            or proof.command != command
-            or proof.captured_at < started_at
-            or proof.captured_at > now
-        ):
+        if not isinstance(observed, BrokerOrderAbsenceProof):
+            return None
+        proof = observed
+        if proof.command != command or proof.captured_at < started_at or proof.captured_at > now:
             return None
         aggregate = self._orders.load(attempt.execution_id)
         if aggregate is None:
