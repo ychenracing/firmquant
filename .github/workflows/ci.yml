@@ -8,7 +8,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FIRMQ_CI: "1"
@@ -17,50 +17,6 @@ env:
   UV_FROZEN: "1"
 
 jobs:
-  runtime-coverage-repair:
-    name: Runtime coverage repair
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/runtime-time-health'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: codex/runtime-time-health
-          fetch-depth: 0
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - name: Set up uv
-        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
-        with:
-          version: "0.11.33"
-          enable-cache: true
-      - name: Sync locked environment
-        run: uv sync --frozen --extra dev
-      - name: Apply coverage and CLI repair
-        run: uv run python scripts/runtime_coverage_repair.py && uv run python scripts/runtime_coverage_fix.py
-      - name: Verify affected scope
-        run: >-
-          uv run ruff check --fix src/firmquant/cli.py scripts/check_docs.py tests/unit/test_runtime_time_health_coverage.py
-          && uv run ruff format src/firmquant/cli.py scripts/check_docs.py tests/unit/test_runtime_time_health_coverage.py
-          && uv run mypy src scripts
-          && uv run pytest tests/unit/test_runtime_time_health_coverage.py tests/integration/test_runtime_time_health_contract.py -q
-          && uv run python scripts/check_docs.py
-      - name: Commit product and coverage tests
-        shell: bash
-        run: |
-          if git diff --quiet; then
-            echo 'No runtime coverage repair required.'
-            exit 0
-          fi
-          git config user.name 'firmquant-runtime-safety-bot'
-          git config user.email 'actions@users.noreply.github.com'
-          git add src/firmquant/cli.py scripts/check_docs.py tests/unit/test_runtime_time_health_coverage.py
-          git commit -m 'Close runtime safety coverage and CLI contracts'
-          git push origin HEAD:codex/runtime-time-health
-
   quality:
     name: Python 3.12 / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
