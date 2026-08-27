@@ -75,3 +75,15 @@ broker sync 的 prepare 阶段只在深拷贝上执行 uquant account-sync，不
 备份使用 SQLite online backup 生成一致性数据库，连同 manifest 和可选 uquant AccountState 写入临时 bundle；全部摘要、schema、审计链和账户文件验证后原子发布。`verify-backup` 在隔离临时目录恢复，不覆盖生产文件。备份失败或验证失败不删除源数据，也不能作为继续交易的理由。
 
 恢复后使用 [运行指南](OPERATIONS.md) 的 `status`、`reconcile`、控制 receipt 和报告证据复核；实盘恢复还需重新 arm。
+
+## 收盘 checkpoint 与最终恢复 bundle
+
+收盘闭环使用单一有序 checkpoint 链：`EOD_RECONCILED → DATA_VALIDATED → DECISION_COMMITTED → REPORT_PUBLISHED → BACKUP_VERIFIED → COMPLETED`。每一步都写入 append-only `CLOSE_SESSION` audit receipt，要求所有前驱已经存在；相同 evidence 重放幂等，不同 evidence 冲突失败关闭。`COMPLETED` 是唯一“当日收盘完整”的权威标记，旧的 EOD/reconciliation/report 单项证据都不能代替它。
+
+进程可在任意边界崩溃。重启时先查找最近 incomplete close session，并从第一项缺失 checkpoint 继续：已经持久化的 EOD reconciliation、数据 manifest、冻结 DecisionSnapshot、报告或 backup 不重复产生；已经完成的 session 再次进入直接幂等返回。尤其是 `DECISION_COMMITTED` 之后崩溃时，恢复必须复用同一个 immutable DecisionSnapshot/AccountState identity，不能再次运行新的经济决策；`REPORT_PUBLISHED` 或 `BACKUP_VERIFIED` 之后崩溃也只完成后续步骤。任一步异常都不会写伪造 `COMPLETED`。
+
+历史数据 rewrite promotion 另有 `pending-promotion.json` crash marker。崩溃发生在新 generation 建立后、active pointer 切换前或切换后但 source receipt 尚未发布时，重启只允许验证同一 candidate/old/new digest 后完成该 promotion；active pointer 指向第三个 generation、candidate 被改写或 digest 不一致都停止。旧 generation 永远保留，便于恢复和取证。
+
+最终 schema-v2 backup bundle 必须同时包含 SQLite、严格 uquant AccountState、已验证 production config、XtQuant safety manifest、权威 trading calendar、active data generation manifest、当日 strategy-data manifest 和 deployment record。deployment record 绑定 firmquant/uquant commit、config hash、AccountState economic hash、calendar/data identity、strategy session 与当天 decision id；bundle manifest 对每个成员单独 SHA-256，并封存 operational schema 与 audit head。验证过程在隔离目录打开数据库、执行 integrity/schema/audit 校验，加载 AccountState/config/calendar/safety manifest，并确认数据库确实包含同一 frozen decision。
+
+backup 先在临时目录完整构造和验证，再 atomic rename 发布；进程在构造/验证阶段退出不会留下可被识别为正式 backup 的半成品。bundle 不保存 `ARM_MAC_KEY`、密码、token、webhook token 或 MiniQMT userdata。恢复时若任一成员 hash、账户 economic hash、deployment identity、calendar/data identity、audit head 或 decision id 不一致，整个 bundle 视为不可恢复证据，不能用部分成员覆盖生产状态。

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import firmquant.application.production_services as ps
+from firmquant.application.close_checkpoint import CloseStep
 from firmquant.application.production_events import ProductionEventJournal
 from firmquant.application.production_services import (
     ProductionServiceHooks,
@@ -242,6 +243,10 @@ def deployment_caps() -> DeploymentCaps:
 def settings_for(root: Path, mode: Mode) -> tuple[Settings, Path]:
     for name in ("state", "data", "reports", "backups", "source", "userdata"):
         (root / name).mkdir(parents=True, exist_ok=True)
+    (root / "data" / "sz300308.csv").write_text(
+        "date,open,high,low,close,volume,amount\n2026-08-24,10,10,10,10,1000,10000\n",
+        encoding="utf-8",
+    )
     safety = root / "safety.json"
     safety.write_text("{}", encoding="utf-8")
     config = root / "firmquant.toml"
@@ -378,6 +383,16 @@ def ready(hooks: ProductionServiceHooks) -> None:
     hooks._transition(RuntimeState.STARTING, reason="test startup")
     hooks._transition(RuntimeState.RECONCILING, reason="test reconciliation")
     hooks._transition(RuntimeState.READY, reason="test ready")
+
+
+def complete_close(hooks: ProductionServiceHooks, session: date = STRATEGY_SESSION) -> None:
+    for step in CloseStep:
+        hooks._close.append(
+            session,
+            step,
+            evidence={"step": step.value},
+            created_at=NOW,
+        )
 
 
 def test_helpers_fail_closed_and_normalize_authority_facts(tmp_path: Path) -> None:
@@ -678,6 +693,7 @@ def test_shadow_execution_records_hypothetical_orders_and_never_writes(
         assert evidence.observed_sessions == 2
         assert evidence.hypothetical_orders == len(plan.orders) * 2
 
+        complete_close(hooks)
         hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))
         monkeypatch.setattr(
             hooks,
@@ -694,11 +710,19 @@ def test_shadow_execution_records_hypothetical_orders_and_never_writes(
         assert broker.submitted_commands == ()
 
 
-def test_execute_fails_closed_for_ambiguous_or_invalid_market_facts(
+def test_execute_distinguishes_missing_decision_from_valid_frozen_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with hook_case(tmp_path) as (hooks, _writer, _broker, _accounts):
+        decision = decision_snapshot()
+        hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))
+        with pytest.raises(ProductionServicesUnavailable, match="MISSING_DECISION"):
+            hooks._execute(EXECUTION_SESSION)
+        assert "MISSING_DECISION" in hooks.status.blockers
+
+    with hook_case(tmp_path / "completed") as (hooks, _writer, _broker, _accounts):
+        complete_close(hooks)
         decision = decision_snapshot()
         hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision, decision))
         with pytest.raises(ProductionServicesUnavailable, match="MULTIPLE"):
@@ -725,7 +749,8 @@ def test_execute_fails_closed_for_ambiguous_or_invalid_market_facts(
             hooks._execute(EXECUTION_SESSION)
 
         hooks._decisions = SimpleNamespace(for_session=lambda _session: ())
-        assert hooks._execute(EXECUTION_SESSION) == 0
+        with pytest.raises(ProductionServicesUnavailable, match="MISSING_DECISION"):
+            hooks._execute(EXECUTION_SESSION)
 
 
 def test_risk_helpers_track_external_activity_notionals_and_drawdown(
@@ -761,8 +786,7 @@ def test_cycle_uses_authoritative_calendar_and_fail_closed_state_machine(
         clock=lambda: POST_CLOSE,
     ) as (hooks, _writer, _broker, _accounts):
         ready(hooks)
-        monkeypatch.setattr(hooks, "_eod", lambda _session: 1)
-        monkeypatch.setattr(hooks, "_post_close_decision", lambda _session: 1)
+        monkeypatch.setattr(hooks, "_close_session", lambda _session: (1, 1))
         result = hooks.cycle(POST_CLOSE)
         assert result.eod == 1
         assert result.decisions == 1
@@ -780,19 +804,46 @@ def test_cycle_uses_authoritative_calendar_and_fail_closed_state_machine(
         assert hooks.status.state is RuntimeState.HALTED
 
 
-def test_eod_runs_reconciliation_report_backup_and_is_idempotent(
+def test_close_session_orders_decision_before_report_and_backup_and_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with hook_case(tmp_path) as (hooks, _writer, _broker, _accounts):
+        events: list[str] = []
+        decision = decision_snapshot()
+        snapshot = execution_snapshot().broker_snapshot
+        hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))
+        hooks._data_generations = SimpleNamespace(
+            active=lambda: SimpleNamespace(path=hooks._settings.paths.data_directory)
+        )
+        hooks._data_root = hooks._settings.paths.data_directory
         monkeypatch.setattr(
             hooks,
             "_reconcile",
             lambda _kind: (
-                SimpleNamespace(reconciliation_id="recon_" + "e" * 64),
-                execution_snapshot().broker_snapshot,
+                events.append("reconcile") or SimpleNamespace(reconciliation_id="recon_" + "e" * 64),
+                snapshot,
                 Account(),
             ),
+        )
+        monkeypatch.setattr(
+            hooks._data_updater,
+            "update",
+            lambda _symbols, *, through: (
+                events.append("data")
+                or SimpleNamespace(
+                    manifest_sha256="d" * 64,
+                    governance_manifest_sha256="g" * 64,
+                    data_generation_id="gen-test",
+                    fetch_attempts=1,
+                )
+            ),
+        )
+        hooks._data_reloader = lambda _root: events.append("reload")
+        monkeypatch.setattr(
+            hooks,
+            "_post_close_decision",
+            lambda *_args, **_kwargs: events.append("decision") or 1,
         )
 
         class Builder:
@@ -800,25 +851,35 @@ def test_eod_runs_reconciliation_report_backup_and_is_idempotent(
                 pass
 
             def build(self, _session):
-                return SimpleNamespace(report_id="report-1")
+                events.append("report")
+                return SimpleNamespace(decision_id=decision.decision_id)
 
         class Renderer:
             def write(self, _report, _directory):
-                return SimpleNamespace(report_id="report-1")
+                return SimpleNamespace(
+                    report_id="report-1",
+                    json_sha256="1" * 64,
+                    markdown_sha256="2" * 64,
+                )
 
         monkeypatch.setattr(ps, "DatabaseDailyReportBuilder", Builder)
         monkeypatch.setattr(ps, "DailyReportRenderer", Renderer)
         monkeypatch.setattr(
             ps,
             "backup_state",
-            lambda *_args, **_kwargs: SimpleNamespace(
-                backup_id="backup-1",
-                manifest_sha256="a" * 64,
+            lambda *_args, **_kwargs: (
+                events.append("backup") or SimpleNamespace(backup_id="backup-1", manifest_sha256="a" * 64)
             ),
         )
-        assert hooks._eod(EXECUTION_SESSION) == 1
-        assert hooks._eod(EXECUTION_SESSION) == 0
-        assert hooks._audited("production-eod:" + EXECUTION_SESSION.isoformat())
+
+        assert hooks._close_session(EXECUTION_SESSION) == (1, 1)
+        assert events == ["reconcile", "data", "reload", "decision", "report", "backup"]
+        assert hooks._close.completed(EXECUTION_SESSION) is not None
+        assert hooks._close.load(EXECUTION_SESSION, CloseStep.REPORT_PUBLISHED) is not None
+        assert hooks._close.load(EXECUTION_SESSION, CloseStep.BACKUP_VERIFIED) is not None
+        before = list(events)
+        assert hooks._close_session(EXECUTION_SESSION) == (0, 0)
+        assert events == before
 
 
 def test_builder_is_fail_closed_and_composes_single_daemon_path(

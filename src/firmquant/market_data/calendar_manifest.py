@@ -1,13 +1,14 @@
-"""Strict local manifest loader for an operator-reviewed exchange trading calendar."""
+"""Strict governance for an operator-reviewed exchange trading calendar."""
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from firmquant.market_data.calendar import AuthoritativeTradingCalendar
+from firmquant.market_data.calendar import AuthoritativeTradingCalendar, CalendarValidationError
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FIELDS = {
@@ -18,6 +19,14 @@ _FIELDS = {
     "covered_end",
     "sessions",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class CalendarUpdateReceipt:
+    previous_sha256: str
+    proposed_sha256: str
+    used_through: date
+    covered_through: date
 
 
 def load_trading_calendar_manifest(path: Path) -> AuthoritativeTradingCalendar:
@@ -63,4 +72,34 @@ def load_trading_calendar_manifest(path: Path) -> AuthoritativeTradingCalendar:
     )
 
 
-__all__ = ("load_trading_calendar_manifest",)
+def validate_calendar_update(
+    *,
+    current: AuthoritativeTradingCalendar,
+    proposed: AuthoritativeTradingCalendar,
+    used_through: date,
+) -> CalendarUpdateReceipt:
+    if type(used_through) is not date:
+        raise CalendarValidationError("used-through calendar session must be a date")
+    if proposed.covered_from > current.covered_from:
+        raise CalendarValidationError("proposed calendar drops prior authoritative coverage")
+    if proposed.covered_through < current.covered_through:
+        raise CalendarValidationError("proposed calendar shortens authoritative coverage")
+    if not proposed.covered_from <= used_through <= proposed.covered_through:
+        raise CalendarValidationError("proposed calendar does not cover already used sessions")
+    current_used = tuple(item for item in current.trading_sessions if item <= used_through)
+    proposed_used = tuple(item for item in proposed.trading_sessions if item <= used_through)
+    if current_used != proposed_used:
+        raise CalendarValidationError("proposed calendar rewrites an already used session")
+    return CalendarUpdateReceipt(
+        previous_sha256=current.sha256,
+        proposed_sha256=proposed.sha256,
+        used_through=used_through,
+        covered_through=proposed.covered_through,
+    )
+
+
+__all__ = (
+    "CalendarUpdateReceipt",
+    "load_trading_calendar_manifest",
+    "validate_calendar_update",
+)

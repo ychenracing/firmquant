@@ -17,7 +17,7 @@ from firmquant.application.workflows import (
 from firmquant.config import Mode
 from firmquant.domain.broker_facts import MarketSessionStatus
 from firmquant.domain.states import RuntimeState, RuntimeStatus
-from firmquant.market_data.calendar import AuthoritativeTradingCalendar
+from firmquant.market_data.calendar import AuthoritativeTradingCalendar, CalendarCoverageError
 from firmquant.market_data.validation import (
     DataValidationError,
     StrategyDataValidator,
@@ -220,7 +220,7 @@ class SessionCoordinator:
         if state is None or state.completed_outcome is None:
             raise SessionWorkflowError(
                 "completed decision receipt is unavailable",
-                blocker="DECISION_RECEIPT_INVALID",
+                blocker="MISSING_DECISION",
             )
         decision = self._services.load_frozen_decision(strategy_session)
         outcome = self._seal_decision(
@@ -398,6 +398,11 @@ class SessionCoordinator:
                     target_session=strategy_session,
                     now=now,
                 )
+            except CalendarCoverageError as exc:
+                raise SessionWorkflowError(
+                    "previous trading session is outside calendar coverage",
+                    blocker="CALENDAR_COVERAGE",
+                ) from exc
             except DataValidationError as exc:
                 raise SessionWorkflowError(
                     "strategy data validation failed",
@@ -460,7 +465,13 @@ class SessionCoordinator:
                     raise SessionWorkflowError("execution recovery returned invalid evidence")
                 self._finish_step("next-day execution recovered", at=self._now())
                 return recovered
-            strategy_session = self._calendar.previous_trading_session(execution_session)
+            try:
+                strategy_session = self._calendar.previous_trading_session(execution_session)
+            except CalendarCoverageError as exc:
+                raise SessionWorkflowError(
+                    "previous trading session is outside calendar coverage",
+                    blocker="CALENDAR_COVERAGE",
+                ) from exc
             decision = self._linked_decision(strategy_session)
             market = self._market_status(
                 session=execution_session,

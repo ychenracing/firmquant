@@ -14,6 +14,7 @@ from typing import cast
 
 from . import __version__
 from .application.control_channel import ControlCommand, ControlInbox, ControlStatus
+from .application.data_calendar_control import DataCalendarControlError, DataCalendarController
 from .application.operations import (
     OperatorCommand,
     OperatorCommandDenied,
@@ -49,6 +50,10 @@ _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("replay", "确定性重放冻结事件"),
     ("backup", "创建一致性状态备份"),
     ("verify-backup", "执行备份恢复验证"),
+    ("data-candidates", "查看隔离的历史数据重写候选"),
+    ("verify-data-candidate", "重新验证历史数据重写候选完整性"),
+    ("approve-data-candidate", "交互式批准并原子切换历史数据 generation"),
+    ("calendar-update", "交互式验证并更新权威交易日历"),
     ("cancel-system-orders", "请求安全取消 durable ledger 中 firmquant 拥有的活动订单"),
 )
 _CONTROL_COMMANDS = {
@@ -140,6 +145,19 @@ def build_parser() -> argparse.ArgumentParser:
                 "--account-state",
                 type=Path,
                 help="可选 uquant AccountState 文件; 路径不会写入审计",
+            )
+        elif name in {"verify-data-candidate", "approve-data-candidate"}:
+            subparser.add_argument(
+                "--candidate-id",
+                required=True,
+                help="candidate-<sha> 历史数据重写候选标识",
+            )
+        elif name == "calendar-update":
+            subparser.add_argument(
+                "--manifest",
+                type=Path,
+                required=True,
+                help="待验证的完整 trading-calendar.json",
             )
         if name == "status":
             subparser.add_argument(
@@ -394,6 +412,82 @@ def _direct_stop_or_queue(*, config_path: Path, reason: str | None) -> OperatorR
     )
 
 
+def _governance_result(
+    *,
+    arguments: argparse.Namespace,
+    config_path: Path,
+    terminal: bool,
+    reader: ConfirmationReader,
+    environment: Mapping[str, str],
+) -> OperatorResult | None:
+    command = cast(str, arguments.command)
+    if command not in {
+        "data-candidates",
+        "verify-data-candidate",
+        "approve-data-candidate",
+        "calendar-update",
+    }:
+        return None
+    controller = DataCalendarController(config_path)
+    try:
+        if command == "data-candidates":
+            payload = controller.list_candidates()
+            message = "历史数据重写候选已读取。"
+        elif command == "verify-data-candidate":
+            payload = controller.verify_candidate(cast(str, arguments.candidate_id))
+            message = "历史数据重写候选已重新验证。"
+        elif command == "approve-data-candidate":
+            payload = controller.approve_candidate(
+                cast(str, arguments.candidate_id),
+                interactive_terminal=terminal,
+                confirmation_reader=reader,
+                environment=environment,
+            )
+            message = "历史数据 generation 已经显式批准并原子切换。"
+        else:
+            payload = controller.update_calendar(
+                cast(Path, arguments.manifest),
+                interactive_terminal=terminal,
+                confirmation_reader=reader,
+                environment=environment,
+            )
+            message = "权威交易日历已验证并更新。"
+    except DataCalendarControlError as error:
+        raise OperatorCommandDenied(error.reason_code) from error
+    return OperatorResult(message=message, payload=payload)
+
+
+def _attach_calendar_coverage(
+    result: OperatorResult,
+    *,
+    raw_command: str,
+    config_path: Path,
+) -> OperatorResult:
+    if raw_command not in {"status", "doctor", "report"}:
+        return result
+    try:
+        coverage = DataCalendarController(config_path).calendar_status()
+    except DataCalendarControlError as error:
+        coverage = {
+            "state": "INVALID",
+            "blocker": error.reason_code,
+        }
+    payload = dict(result.payload)
+    payload["calendar_coverage"] = dict(coverage)
+    blocker = coverage.get("blocker")
+    exit_code = result.exit_code
+    if raw_command == "status" and isinstance(blocker, str):
+        raw_blockers = payload.get("blockers", [])
+        blockers = (
+            [item for item in raw_blockers if isinstance(item, str)] if isinstance(raw_blockers, list) else []
+        )
+        payload["blockers"] = sorted(set(blockers) | {blocker})
+    if raw_command == "doctor" and coverage.get("state") in {"EXPIRED", "INVALID"}:
+        payload["passed"] = False
+        exit_code = 2
+    return OperatorResult(message=result.message, payload=payload, exit_code=exit_code)
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -434,10 +528,22 @@ def main(
             _render(result, output_json=output_json)
             return result.exit_code
 
-        request = _request(arguments)
         terminal = sys.stdin.isatty() if interactive_terminal is None else interactive_terminal
         reader = getpass.getpass if confirmation_reader is None else confirmation_reader
         observed_environment = os.environ if environment is None else environment
+        if local_control_plane:
+            governance = _governance_result(
+                arguments=arguments,
+                config_path=config_path,
+                terminal=terminal,
+                reader=reader,
+                environment=observed_environment,
+            )
+            if governance is not None:
+                _render(governance, output_json=output_json)
+                return governance.exit_code
+
+        request = _request(arguments)
         interaction = OperatorInteraction(
             interactive_terminal=terminal,
             confirmation_reader=reader,
@@ -459,6 +565,12 @@ def main(
             )
         if not isinstance(result, OperatorResult):
             raise TypeError("operator service returned an invalid result")
+        if local_control_plane:
+            result = _attach_calendar_coverage(
+                result,
+                raw_command=raw_command,
+                config_path=config_path,
+            )
     except OperatorCommandDenied as error:
         _render_denial(error, output_json=output_json)
         return 2

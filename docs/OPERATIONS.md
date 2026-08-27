@@ -45,7 +45,7 @@ WriterLease 当前可获得时，CLI 允许本机直接处理风险缩减命令�
 四个控制命令的语义固定：
 
 - `halt`：立即阻止后续策略 submit，撤销 active arm lease，持久化 HALTED 与 `KILL_SWITCH` blocker；不自动撤单，也不自动市价清仓。需要撤销系统活动订单时显式执行 `cancel-system-orders`。
-- `disarm`：撤销 arm lease 并停止新的实盘授权；不修改 broker order terminal truth，也不把 UNKNOWN 伪造成已取消。
+- `disarm`：撤销 arm lease并停止新的实盘授权；不修改 broker order terminal truth，也不把 UNKNOWN 伪造成已取消。
 - `cancel-system-orders`：只尝试撤销 durable ledger 能证明 ownership=SYSTEM、broker id 已知且仍活动的订单；输出逐项 cancelled/terminal/unknown/denied 结果。UNKNOWN 不会被重复 cancel。
 - `stop`：停止新增工作，撤销 arm，进入 STOPPING；broker 断开后才持久化 DISARMED 并干净退出。它不是清仓命令。
 
@@ -107,3 +107,23 @@ PAPER、REPLAY、SHADOW 验证环境不允许真实 broker write。REPLAY 的重
 正常 `stop` 先持久化 STOPPING，停止新增工作；只有 broker 已断开后才持久化 DISARMED 并返回 clean-stop receipt。SIGINT/SIGTERM 的 handler 只设置内存停止标志，daemon 随后在单 writer 循环中转换为同一 STOP 语义；signal handler 本身不写 SQLite、不调用券商。Windows 不存在的 signal 路径安全跳过。
 
 紧急情况先 `halt` 阻止新的 submit；若需要降低未成交委托风险，再显式执行 `cancel-system-orders`。不在券商状态未知时手工重复 submit/cancel，不自动追价，也不自动市价清仓。恢复流程见 [RECOVERY.md](RECOVERY.md)。
+
+## 收盘数据、交易日历与 operator 命令
+
+生产收盘流程不再把 EOD、决策、报告和 backup 当作互相独立的手工动作。daemon 在权威 trading session 收盘后执行唯一 close-session：EOD broker capture/reconciliation → 有界更新并验证策略数据 → 生成/提交唯一冻结 DecisionSnapshot 与 uquant AccountState → 生成包含该 decision 的 session report → 创建最终一致性 backup → 写 `COMPLETED` close receipt。报告和正式 backup 永远位于 decision 之后；任一步失败都会 HALT 且不产生伪造 completed receipt。重启从第一项缺失 checkpoint 继续，完整 session 重入幂等。
+
+数据获取默认使用小而固定的有界 retry policy，不在 daemon 中无限等待。每个失败 attempt 只保存错误类型和摘要 hash；到 deadline 后 close-session 进入 `CLOSE_SESSION_FAILED`/HALT。操作员先恢复行情/SDK/网络事实，再通过正常 `resume`/reconciliation 流程重试，不能手工改 receipt 或伪造 bar。
+
+`status`、`doctor` 和日报同时显示 calendar coverage。`CALENDAR_COVERAGE_WARNING` 表示剩余覆盖低于安全阈值，需在到期前准备 reviewed manifest；`CALENDAR_COVERAGE_EXPIRED` 阻止策略决策和新 submit。更新日历使用 `calendar-update <manifest>`，必须在本机交互终端、DISARMED、无活动 arm/order/UNKNOWN 下执行；新 manifest 不能修改已经使用的过去 session，更新成功会写 audit receipt 并保留旧文件副本。
+
+历史 prefix rewrite 不走普通 append 路径。常用命令为：
+
+- `data-candidates --json`：列出 state directory 中的隔离候选及 changed symbols/sessions、old/new digest、first difference、row counts、source/time；
+- `verify-data-candidate <candidate-id> --json`：重新验证 candidate manifest 和所有数据成员 hash；
+- `approve-data-candidate <candidate-id>`：仅在交互终端显式确认后 promotion，且批准前再次检查 DISARMED、无 active arm/order/UNKNOWN 与 candidate identity 未变化。
+
+promotion 使用 immutable generation + atomic active pointer；旧 generation 保留。candidate 被改写、active generation 已变化或 pending promotion identity 冲突时全部失败关闭。运行时 candidate、promotion receipt 和数据差异文件只保存在配置的 state directory，不进入 Git 仓库。
+
+次日执行在解析上一 trading session 后，要求该 session 同时存在 `CloseStep.COMPLETED` 和唯一冻结 decision。缺任一项都记录 `MISSING_DECISION` blocker 并 HALT；只有已经存在合法冻结 decision 且其订单列表为空时才报告 `NO_INTENT` 并正常零执行。日历无法解析 previous session 时使用 calendar/decision blocker，不再静默返回 0。
+
+最终 backup schema-v2 含 SQLite、uquant AccountState、生产配置、XtQuant safety manifest、trading calendar、active data source、当天 strategy-data manifest、deployment record、所有成员 hash 和 audit head。`verify-backup` 在隔离目录验证数据库、账户、配置、日历、deployment identity 和当天 frozen decision；任何 secret、MiniQMT userdata 或半成品 bundle 都不允许成为正式恢复点。

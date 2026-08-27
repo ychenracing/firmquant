@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from firmquant.domain.broker_facts import BrokerOrderStatus, Side
 from firmquant.domain.values import Symbol
+from firmquant.market_data.calendar import AuthoritativeTradingCalendar, CalendarCoverageState
 from firmquant.persistence.database import Database
 
 _QUANTUM = Decimal("0.0001")
@@ -318,6 +319,10 @@ class DailyReport:
     reconciliation_blockers: tuple[str, ...]
     runtime_state: str
     health_blockers: tuple[str, ...]
+    intent_state: str = "INTENT"
+    calendar_coverage_state: str = "UNKNOWN"
+    calendar_covered_through: date | None = None
+    calendar_remaining_days: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.session) is not date:
@@ -352,16 +357,37 @@ class DailyReport:
         if self.reconciliation_passed != (not self.reconciliation_blockers):
             raise ReportError("report reconciliation result contradicts blockers")
         _text(self.runtime_state, label="report runtime state")
+        if self.intent_state not in {"INTENT", "NO_INTENT", "MISSING_DECISION"}:
+            raise ReportError("report intent state is invalid")
+        if self.calendar_coverage_state not in {"HEALTHY", "WARNING", "EXPIRED", "UNKNOWN"}:
+            raise ReportError("report calendar coverage state is invalid")
+        if self.calendar_covered_through is not None and type(self.calendar_covered_through) is not date:
+            raise ReportError("report calendar coverage end must be a date")
+        if self.calendar_remaining_days is not None and (
+            isinstance(self.calendar_remaining_days, bool)
+            or not isinstance(self.calendar_remaining_days, int)
+        ):
+            raise ReportError("report calendar remaining days must be integer")
 
     def _identity_payload(self) -> dict[str, object]:
         return {
-            "schema": "firmquant.daily-report.v1",
+            "schema": "firmquant.daily-report.v2",
             "session": self.session.isoformat(),
             "strategy_session": (
                 None if self.strategy_session is None else self.strategy_session.isoformat()
             ),
             "generated_at": self.generated_at.isoformat(),
             "decision_id": self.decision_id,
+            "intent_state": self.intent_state,
+            "calendar_coverage": {
+                "state": self.calendar_coverage_state,
+                "covered_through": (
+                    None
+                    if self.calendar_covered_through is None
+                    else self.calendar_covered_through.isoformat()
+                ),
+                "remaining_days": self.calendar_remaining_days,
+            },
             "funds": {
                 "available_cash": _render_decimal(self.available_cash),
                 "total_assets": _render_decimal(self.total_assets),
@@ -436,6 +462,9 @@ class DailyReportRenderer:
             f"- 报告 ID: `{report.report_id}`",
             f"- 策略 session: `{report.strategy_session}`",
             f"- 决策 ID: `{report.decision_id}`",
+            f"- 意图状态: `{report.intent_state}`",
+            f"- 日历覆盖: `{report.calendar_coverage_state}` ",
+            f"(through={report.calendar_covered_through}, remaining_days={report.calendar_remaining_days})",
             f"- 运行状态: `{report.runtime_state}`",
             "",
             "## 资金与总仓",
@@ -550,13 +579,22 @@ class DailyReportRenderer:
 class DatabaseDailyReportBuilder:
     """Build one report exclusively from validated, durable operational evidence."""
 
-    def __init__(self, database: Database, *, clock: Callable[[], datetime]) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        clock: Callable[[], datetime],
+        calendar: AuthoritativeTradingCalendar | None = None,
+    ) -> None:
         if not isinstance(database, Database):
             raise TypeError("daily report builder requires Database")
         if not callable(clock):
             raise TypeError("daily report builder clock must be callable")
         self._database = database
         self._clock = clock
+        if calendar is not None and not isinstance(calendar, AuthoritativeTradingCalendar):
+            raise TypeError("daily report calendar must be authoritative")
+        self._calendar = calendar
 
     @staticmethod
     def _decision_targets(
@@ -743,6 +781,15 @@ class DatabaseDailyReportBuilder:
             upstream_reasons,
             decision_created_at,
         ) = self._decision_targets(decision_row)
+        if decision_row is None:
+            intent_state = "MISSING_DECISION"
+        else:
+            decision_payload = _parse_json_object(decision_row["payload_json"], label="decision payload")
+            upstream_payload = _json_object(
+                decision_payload.get("uquant_payload"), label="uquant decision payload"
+            )
+            raw_orders = _json_array(upstream_payload.get("orders"), label="uquant decision orders")
+            intent_state = "NO_INTENT" if not raw_orders else "INTENT"
         snapshot = self._database.query_one(
             """
             SELECT b.snapshot_id, b.captured_at, c.available_cash, c.total_assets
@@ -852,6 +899,18 @@ class DatabaseDailyReportBuilder:
                 if value is not None
             ),
         ]
+        calendar_state = "UNKNOWN"
+        calendar_covered_through: date | None = None
+        calendar_remaining_days: int | None = None
+        if self._calendar is not None:
+            coverage = self._calendar.coverage_status(session, warning_days=10)
+            calendar_state = coverage.state.value
+            calendar_covered_through = coverage.covered_through
+            calendar_remaining_days = coverage.remaining_days
+            if coverage.state is CalendarCoverageState.WARNING:
+                health_blockers = tuple(sorted(set(health_blockers) | {"CALENDAR_COVERAGE_WARNING"}))
+            elif coverage.state is CalendarCoverageState.EXPIRED:
+                health_blockers = tuple(sorted(set(health_blockers) | {"CALENDAR_COVERAGE_EXPIRED"}))
         generated_at = max(evidence_times)
         observed_clock = self._clock()
         _aware(observed_clock)
@@ -874,6 +933,10 @@ class DatabaseDailyReportBuilder:
             reconciliation_blockers=reconciliation_blockers,
             runtime_state=runtime_state,
             health_blockers=health_blockers,
+            intent_state=intent_state,
+            calendar_coverage_state=calendar_state,
+            calendar_covered_through=calendar_covered_through,
+            calendar_remaining_days=calendar_remaining_days,
         )
 
 

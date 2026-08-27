@@ -47,7 +47,7 @@ def _date(value: date, *, label: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class SeriesSeal:
-    """Hashes required to prove that an updated series only appended rows."""
+    """Hashes required to prove append-only data or an explicitly suspended unchanged series."""
 
     series_id: str
     kind: DataKind
@@ -58,6 +58,8 @@ class SeriesSeal:
     full_sha256: str
     verified_prefix_row_count: int
     verified_prefix_sha256: str
+    suspension_session: date | None = None
+    suspension_evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -86,11 +88,20 @@ class SeriesSeal:
             raise DataValidationError("verified prefix must be shorter than the full series")
         _digest(self.full_sha256, label="series full digest")
         _digest(self.verified_prefix_sha256, label="series prefix digest")
+        if (self.suspension_session is None) != (self.suspension_evidence_sha256 is None):
+            raise DataValidationError("suspension session and evidence must be provided together")
+        if self.suspension_session is not None:
+            _date(self.suspension_session, label="series suspension session")
+            if self.kind is not DataKind.EQUITY:
+                raise DataValidationError("index series cannot carry suspension evidence")
+            if self.suspension_session <= self.last_session:
+                raise DataValidationError("suspension session must follow the latest observed bar")
+            _digest(self.suspension_evidence_sha256 or "", label="series suspension evidence")
 
 
 @dataclass(frozen=True, slots=True)
 class DataManifest:
-    """Immutable manifest for the exact daily data consumed by uquant."""
+    """Immutable manifest for exact bars plus explicit suspension evidence consumed by uquant."""
 
     latest_common_session: date
     captured_at: datetime
@@ -111,14 +122,25 @@ class DataManifest:
         identities = [item.series_id for item in self.series]
         if len(identities) != len(set(identities)):
             raise DataValidationError("data manifest contains duplicate series")
-        if any(item.last_session != self.latest_common_session for item in self.series):
-            raise DataValidationError("series do not share the declared latest common session")
+        for item in self.series:
+            if item.last_session == self.latest_common_session:
+                if item.suspension_session is not None:
+                    raise DataValidationError("complete series cannot carry suspension evidence")
+                continue
+            if item.kind is DataKind.INDEX:
+                raise DataValidationError("index series does not reach the latest common session")
+            if (
+                item.last_session > self.latest_common_session
+                or item.suspension_session != self.latest_common_session
+                or item.suspension_evidence_sha256 is None
+            ):
+                raise DataValidationError("series do not share the declared latest common session")
 
     @property
     def sha256(self) -> str:
         return canonical_sha256(
             {
-                "schema": "firmquant.strategy-data-manifest.v1",
+                "schema": "firmquant.strategy-data-manifest.v2",
                 "latest_common_session": self.latest_common_session,
                 "captured_at": self.captured_at,
                 "provider": self.provider,
@@ -133,6 +155,8 @@ class DataManifest:
                         "full_sha256": item.full_sha256,
                         "verified_prefix_row_count": item.verified_prefix_row_count,
                         "verified_prefix_sha256": item.verified_prefix_sha256,
+                        "suspension_session": item.suspension_session,
+                        "suspension_evidence_sha256": item.suspension_evidence_sha256,
                     }
                     for item in sorted(self.series, key=lambda value: value.series_id)
                 ],
@@ -155,7 +179,7 @@ class ExecutionFactsReceipt:
 
 
 class StrategyDataValidator:
-    """Preserve uquant data semantics and reject every historical rewrite."""
+    """Preserve uquant data semantics and allow only evidence-backed suspension gaps."""
 
     def __init__(self, *, max_manifest_age: timedelta) -> None:
         if not isinstance(max_manifest_age, timedelta):
@@ -191,16 +215,32 @@ class StrategyDataValidator:
             raise DataValidationError("strategy data series set changed")
         for series_id, current_series in current_by_id.items():
             prior = previous_by_id[series_id]
-            if current_series.kind is DataKind.EQUITY:
-                expected_adjustment = Adjustment.FORWARD_ADJUSTED
-            else:
-                expected_adjustment = Adjustment.UNADJUSTED
+            expected_adjustment = (
+                Adjustment.FORWARD_ADJUSTED
+                if current_series.kind is DataKind.EQUITY
+                else Adjustment.UNADJUSTED
+            )
             if current_series.adjustment is not expected_adjustment:
                 raise DataValidationError("strategy data adjustment contract changed")
             if current_series.kind is not prior.kind or current_series.adjustment is not prior.adjustment:
                 raise DataValidationError("strategy data series semantics changed")
             if current_series.first_session != prior.first_session:
                 raise DataValidationError("strategy data historical start drifted")
+
+            suspended_unchanged = (
+                current_series.kind is DataKind.EQUITY
+                and current_series.suspension_session == target_session
+                and current_series.suspension_evidence_sha256 is not None
+                and current_series.last_session == prior.last_session
+                and current_series.row_count == prior.row_count
+                and current_series.full_sha256 == prior.full_sha256
+            )
+            if suspended_unchanged:
+                continue
+            if current_series.last_session != target_session:
+                raise DataValidationError("trading series does not reach target session")
+            if current_series.suspension_session is not None:
+                raise DataValidationError("trading series retains stale suspension evidence")
             if current_series.row_count <= prior.row_count:
                 raise DataValidationError("strategy data update did not append rows")
             if current_series.verified_prefix_row_count != prior.row_count:
