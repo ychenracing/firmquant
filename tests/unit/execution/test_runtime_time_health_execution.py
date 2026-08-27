@@ -10,7 +10,7 @@ from firmquant.broker.fake import BrokerOperation, ScriptedOutcome
 from firmquant.broker.gateway import BrokerHealth, BrokerOrderCommand
 from firmquant.broker.normalization import normalize_order
 from firmquant.domain.broker_facts import BrokerOrderStatus, MarketSessionStatus
-from firmquant.domain.orders import OrderState
+from firmquant.domain.states import RuntimeState
 from firmquant.execution.live_controller import (
     ExecutionDeadlines,
     ExecutionWindowPolicy,
@@ -93,9 +93,7 @@ def _capability(broker, clock: MutableClock):
             lease=lease,
             binding=binding,
             now=clock(),
-            runtime_state=__import__(
-                "firmquant.domain.states", fromlist=["RuntimeState"]
-            ).RuntimeState.READY,
+            runtime_state=RuntimeState.READY,
             broker_health=BrokerHealth(
                 connected=True,
                 read_healthy=True,
