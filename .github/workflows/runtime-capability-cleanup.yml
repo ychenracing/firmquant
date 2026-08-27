@@ -1,0 +1,56 @@
+name: Runtime Capability Cleanup
+
+on:
+  push:
+    branches:
+      - codex/runtime-time-health
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.repository == 'ychenracing/firmquant'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/runtime-time-health
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.33'
+      - run: uv sync --frozen --extra dev
+      - name: Deduplicate clock authorization wiring
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/firmquant/risk/capability.py')
+          text = path.read_text(encoding='utf-8')
+          validation = '''        if self.clock_receipt is not None and not isinstance(self.clock_receipt, ClockReceipt):\n            raise DomainTypeError("write context clock receipt must be ClockReceipt or null")\n'''
+          auth = '''        if operation in {WriteOperation.SUBMIT, WriteOperation.CANCEL}:\n            receipt = context.clock_receipt\n            if receipt is None:\n                reasons.append("CLOCK_DRIFT_UNVERIFIED")\n            else:\n                maximum_drift_ms = context.settings.execution.max_clock_drift_seconds * 1000\n                if receipt.drift_milliseconds > maximum_drift_ms:\n                    reasons.append("CLOCK_DRIFT_LIMIT")\n                if receipt.system_time > context.now:\n                    reasons.append("CLOCK_RECEIPT_TIME_IN_FUTURE")\n                elif context.now - receipt.system_time > context.max_quote_age:\n                    reasons.append("CLOCK_RECEIPT_STALE")\n'''
+          if text.count(validation) != 3:
+              raise SystemExit(f'unexpected clock validation count: {text.count(validation)}')
+          if text.count(auth) != 3:
+              raise SystemExit(f'unexpected clock authorization count: {text.count(auth)}')
+          text = text.replace(validation, '', 2)
+          text = text.replace(auth, '', 2)
+          path.write_text(text, encoding='utf-8')
+          PY
+          uv run ruff format src/firmquant/risk/capability.py
+          uv run ruff check .
+          uv run ruff format --check .
+          rm .github/workflows/runtime-capability-cleanup.yml
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          git config user.name 'firmquant-runtime-safety-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/firmquant/risk/capability.py .github/workflows/runtime-capability-cleanup.yml
+          git commit -m 'Deduplicate runtime clock authorization'
+          git push origin HEAD:codex/runtime-time-health
