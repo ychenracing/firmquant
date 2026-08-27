@@ -197,3 +197,57 @@ def test_bootstrap_recovers_file_applied_before_atomic_binding_finalization(
         assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.bootstrap'") == 1
     finally:
         database.close()
+
+
+def test_bootstrap_file_recovery_revalidates_current_broker_identity_and_economics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    service = _service(tmp_path, database)
+    original_append = AuditLedger.append
+    original_snapshot = _empty_snapshot()
+
+    def crash_during_finalization(self, **kwargs):
+        if kwargs.get("category") == "account.bootstrap":
+            raise SystemExit("simulated crash during bootstrap finalization")
+        return original_append(self, **kwargs)
+
+    try:
+        monkeypatch.setattr(AuditLedger, "append", crash_during_finalization)
+        with pytest.raises(SystemExit, match="simulated crash"):
+            service.bootstrap(original_snapshot)
+        monkeypatch.setattr(AuditLedger, "append", original_append)
+
+        account_path = tmp_path / "uquant-account.json"
+        durable_hash = service._store.hash_file(account_path)
+        wrong_account = replace(
+            original_snapshot,
+            account=replace(original_snapshot.account, account_id_hash="f" * 64),
+            raw_payload_sha256="c" * 64,
+        )
+        with pytest.raises(AccountBootstrapDenied, match="ACCOUNT_BOOTSTRAP_RECOVERY_MISMATCH"):
+            _service(tmp_path, database).bootstrap(wrong_account)
+
+        cash_drift = replace(
+            original_snapshot,
+            account=replace(
+                original_snapshot.account,
+                available_cash=Money(Decimal("999")),
+                total_assets=Money(Decimal("999")),
+            ),
+            raw_payload_sha256="d" * 64,
+        )
+        with pytest.raises(AccountBootstrapDenied, match="SEED_CASH_MISMATCH"):
+            _service(tmp_path, database).bootstrap(cash_drift)
+
+        assert service._store.hash_file(account_path) == durable_hash
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "PREPARED"
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 0
+
+        recovered = _service(tmp_path, database).bootstrap(original_snapshot)
+        assert recovered.account_state_sha256 == durable_hash
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "BINDING_COMMITTED"
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 1
+    finally:
+        database.close()
