@@ -1,0 +1,68 @@
+name: tmp-fix-finalization-doubles
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Align coordinator test doubles
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(f'{path}: expected anchor exactly once')
+              p.write_text(text.replace(old, new), encoding='utf-8')
+
+          path = 'tests/unit/reconciliation/test_account_coordinator.py'
+          replace_once(path, 'from dataclasses import replace\n', 'import hashlib\nfrom dataclasses import replace\n')
+          replace_once(
+              path,
+              'from firmquant.persistence.database import Database\n',
+              'from firmquant.persistence.database import Database\nfrom firmquant.persistence.repositories import canonical_json\n',
+          )
+          replace_once(
+              path,
+              'from firmquant.reconciliation.models import ReconciliationKind\n',
+              'from firmquant.reconciliation.models import ReconciliationKind, ReconciliationReceipt\n',
+          )
+          old = '''    def evaluate(self, kind, facts):\n        self.calls.append((kind, facts))\n        if self.before_return is not None:\n            self.before_return()\n        return SimpleNamespace(\n            reconciliation_id="recon_" + "a" * 64,\n            kind=kind,\n            passed=self.passed,\n            blockers=self.blockers,\n        )\n'''
+          new = '''    def evaluate(self, kind, facts):\n        self.calls.append((kind, facts))\n        if self.before_return is not None:\n            self.before_return()\n        details_json = canonical_json({"test": "account-coordinator"})\n        details_sha256 = hashlib.sha256(details_json.encode("utf-8")).hexdigest()\n        identity = canonical_json(\n            {\n                "kind": kind,\n                "details_sha256": details_sha256,\n                "started_at": NOW,\n                "completed_at": NOW,\n            }\n        )\n        return ReconciliationReceipt(\n            reconciliation_id="recon_" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),\n            kind=kind,\n            snapshot_id=facts.broker_snapshot.snapshot_id,\n            started_at=NOW,\n            completed_at=NOW,\n            passed=self.passed,\n            blockers=self.blockers,\n            operator_actions=(),\n            details_json=details_json,\n            details_sha256=details_sha256,\n        )\n'''
+          replace_once(path, old, new)
+
+          path = 'tests/unit/reconciliation/test_account_authority_additional_edges.py'
+          replace_once(path, 'from dataclasses import replace\n', 'import hashlib\nfrom dataclasses import replace\n')
+          replace_once(
+              path,
+              'from firmquant.reconciliation.models import ReconciliationKind\n',
+              'from firmquant.reconciliation.models import ReconciliationKind, ReconciliationReceipt\n',
+          )
+          old = '''    def commit_broker_snapshot(self, _prepared, *, finalize=None):\n        if finalize is not None:\n            finalize()\n        return self.commit_result\n'''
+          new = '''    def commit_broker_snapshot(\n        self,\n        _prepared,\n        *,\n        finalize=None,\n        finalization_payload=None,\n    ):\n        assert finalization_payload is not None\n        if finalize is not None:\n            finalize()\n        return self.commit_result\n'''
+          replace_once(path, old, new)
+          old = '''class _PassingReconciler:\n    def evaluate(self, _kind, _facts):\n        return SimpleNamespace(passed=True, blockers=())\n\n    def commit(self, _receipt, *, broker_snapshot_sha256):\n        assert len(broker_snapshot_sha256) == 64\n'''
+          new = '''class _PassingReconciler:\n    def evaluate(self, kind, facts):\n        details_json = canonical_json({"test": "account-authority-edges"})\n        details_sha256 = hashlib.sha256(details_json.encode("utf-8")).hexdigest()\n        identity = canonical_json(\n            {\n                "kind": kind,\n                "details_sha256": details_sha256,\n                "started_at": NOW,\n                "completed_at": NOW,\n            }\n        )\n        return ReconciliationReceipt(\n            reconciliation_id="recon_" + hashlib.sha256(identity.encode("utf-8")).hexdigest(),\n            kind=kind,\n            snapshot_id=facts.broker_snapshot.snapshot_id,\n            started_at=NOW,\n            completed_at=NOW,\n            passed=True,\n            blockers=(),\n            operator_actions=(),\n            details_json=details_json,\n            details_sha256=details_sha256,\n        )\n\n    def commit(self, _receipt, *, broker_snapshot_sha256):\n        assert len(broker_snapshot_sha256) == 64\n'''
+          replace_once(path, old, new)
+
+          path = 'tests/unit/reconciliation/test_reconciliation_commit_boundary.py'
+          old = '''    def commit_broker_snapshot(self, _prepared, *, finalize=None):\n        del finalize\n        raise RecoveryContradiction("injected account commit failure")\n'''
+          new = '''    def commit_broker_snapshot(\n        self,\n        _prepared,\n        *,\n        finalize=None,\n        finalization_payload=None,\n    ):\n        del finalize, finalization_payload\n        raise RecoveryContradiction("injected account commit failure")\n'''
+          replace_once(path, old, new)
+          PY
+          git rm .github/workflows/tmp-fix-finalization-doubles.yml
+          git config user.name firmquant-agent
+          git config user.email firmquant-agent@users.noreply.github.com
+          git add tests/unit/reconciliation
+          git commit -m "test: align reconciliation finalization doubles"
+          git push origin HEAD:codex/account-authority-reconciliation
