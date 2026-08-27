@@ -11,7 +11,7 @@ from firmquant.domain.orders import OrderState
 from firmquant.persistence.account_authority import AccountBinding, AccountBindingRepository
 from firmquant.persistence.database import Database
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
-from firmquant.risk.capability import CancelOnlyCapabilityFactory
+from firmquant.risk.cancel_only import CancelOnlyCapabilityFactory
 from tests.fixtures.recovery_cases import (
     NOW,
     acknowledge_locally,
@@ -53,9 +53,7 @@ def _capability(database: Database, broker, *, mode: Mode = Mode.CANARY):
     )
 
 
-def test_cancel_only_type_has_no_submit_and_cancels_system_order_while_halted_or_disarmed(
-    tmp_path: Path,
-) -> None:
+def test_cancel_only_type_has_no_submit_and_cancels_system_order_without_arm(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     try:
         case, acknowledged, acknowledged_fact = _open_case(database)
@@ -80,7 +78,7 @@ def test_cancel_only_type_has_no_submit_and_cancels_system_order_while_halted_or
         database.close()
 
 
-def test_cancel_only_does_not_require_arm_or_quote_freshness(tmp_path: Path) -> None:
+def test_cancel_only_does_not_require_unexpired_arm_or_quote_freshness(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     try:
         case, acknowledged, acknowledged_fact = _open_case(database)
@@ -118,9 +116,8 @@ def test_cancel_only_does_not_require_arm_or_quote_freshness(tmp_path: Path) -> 
         result = _capability(database, broker).cancel_system_orders()
         assert result.cancelled_order_ids == (acknowledged.broker_order_id,)
         assert broker.cancelled_order_ids == (acknowledged.broker_order_id,)
-        assert MonotonicExecutionLedgerRepository(database).load(
-            case.aggregate.intent.execution_id
-        ).state is OrderState.CANCELLED
+        current = MonotonicExecutionLedgerRepository(database).load(case.aggregate.intent.execution_id)
+        assert current is not None and current.state is OrderState.CANCELLED
     finally:
         database.close()
 
