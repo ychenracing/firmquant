@@ -6,7 +6,7 @@ import hashlib
 import importlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -14,7 +14,6 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from firmquant.application.execution_evidence import BlockerCode
 from firmquant.application.production_identity import current_clean_firmquant_commit
 from firmquant.build_identity import load_locked_source_identity, verify_uquant_source_checkout
 from firmquant.domain.broker_facts import (
@@ -103,9 +102,7 @@ class ReplaySummary:
     def payload(self) -> dict[str, object]:
         return {
             "schema": "firmquant.execution-aware-replay.v1",
-            "theoretical_uquant_cumulative_return": _decimal_text(
-                self.theoretical_uquant_cumulative_return
-            ),
+            "theoretical_uquant_cumulative_return": _decimal_text(self.theoretical_uquant_cumulative_return),
             "firmquant_execution_aware_cumulative_return": _decimal_text(
                 self.firmquant_execution_aware_cumulative_return
             ),
@@ -480,7 +477,11 @@ def _decision_snapshot(
         }
     )
     input_fingerprint = canonical_sha256(
-        {"schema": "firmquant.execution-replay-decision-input.v1", "request": request, "account": before_sha256}
+        {
+            "schema": "firmquant.execution-replay-decision-input.v1",
+            "request": request,
+            "account": before_sha256,
+        }
     )
     return DecisionSnapshot.create(
         strategy_session=session,
@@ -523,7 +524,11 @@ def _replay_costs(config: Any) -> ReplayCosts:
     )
 
 
-def _replay_orders(plan: ExecutionPlan, account: ReplayAccount, costs: ReplayCosts) -> tuple[ReplayOrder, ...]:
+def _replay_orders(
+    plan: ExecutionPlan,
+    account: ReplayAccount,
+    max_volume_participation: Decimal,
+) -> tuple[ReplayOrder, ...]:
     total_buy_cash = sum(
         (
             item.limit_price.value * Decimal(item.authorized_shares.value)
@@ -539,7 +544,7 @@ def _replay_orders(plan: ExecutionPlan, account: ReplayAccount, costs: ReplayCos
             side=ReplaySide(item.side.value),
             shares=item.authorized_shares.value,
             limit_price=item.limit_price.value,
-            max_volume_participation=Decimal(str(cast(Any, costs).commission_rate * 0 + Decimal("0.005"))),
+            max_volume_participation=max_volume_participation,
             depends_on_sell_proceeds=item.side is Side.BUY and cash_dependency,
         )
         for item in plan.orders
@@ -637,7 +642,11 @@ def run_execution_replay(
                 session=session,
             )
             plan = planner.plan(pending, facts)
-            orders = _replay_orders(plan, replay_account, costs)
+            orders = _replay_orders(
+                plan,
+                replay_account,
+                Decimal(str(engine.cfg.max_volume_participation)),
+            )
             if orders:
                 result = execute_session(replay_account, orders, execution_bars, costs)
                 replay_account = result.ending_account

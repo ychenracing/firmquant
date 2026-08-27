@@ -48,7 +48,7 @@ class RuntimeEvidenceError(RuntimeError):
 
 class _UquantExecutionConfig(Protocol):
     max_volume_participation: float
-    slippage_bps: float
+    slippage: float
 
 
 def _uquant_execution_config() -> _UquantExecutionConfig:
@@ -75,7 +75,7 @@ def shadow_execution_policy(manifest: XtQuantSafetyManifest) -> ExecutionPolicy:
         ),
         fill_model=FillModel(
             max_volume_participation=Decimal(str(config.max_volume_participation)),
-            slippage_bps=Decimal(str(config.slippage_bps)),
+            slippage_bps=Decimal(str(config.slippage)) * Decimal("10000"),
         ),
     )
 
@@ -661,23 +661,23 @@ def finalize_canary_observation(
             )
     valid_execution_ids = tuple(item for item in execution_ids if item.startswith("exec_"))
     submit_count = cancel_count = 0
-    if valid_execution_ids:
-        placeholders = ",".join("?" for _ in valid_execution_ids)
+    for execution_id in valid_execution_ids:
         submit = database.scalar(
             "SELECT count(*) FROM order_commands c JOIN broker_order_attempts a ON a.attempt_id=c.attempt_id "
-            f"WHERE c.command_kind='SUBMIT' AND a.execution_id IN ({placeholders})",
-            valid_execution_ids,
+            "WHERE c.command_kind='SUBMIT' AND a.execution_id = ?",
+            (execution_id,),
         )
         cancel = database.scalar(
             "SELECT count(*) FROM order_commands c JOIN broker_order_attempts a ON a.attempt_id=c.attempt_id "
-            f"WHERE c.command_kind='CANCEL' AND a.execution_id IN ({placeholders})",
-            valid_execution_ids,
+            "WHERE c.command_kind='CANCEL' AND a.execution_id = ?",
+            (execution_id,),
         )
         if isinstance(submit, bool) or not isinstance(submit, int):
             raise RuntimeEvidenceError("CANARY submit count is invalid")
         if isinstance(cancel, bool) or not isinstance(cancel, int):
             raise RuntimeEvidenceError("CANARY cancel count is invalid")
-        submit_count, cancel_count = submit, cancel
+        submit_count += submit
+        cancel_count += cancel
     external = database.scalar(
         "SELECT count(*) FROM broker_orders WHERE session_date = ? AND ownership IN ('EXTERNAL','UNKNOWN')",
         (session.isoformat(),),

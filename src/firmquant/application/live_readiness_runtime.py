@@ -155,7 +155,9 @@ def _latest_backup_matches(
 
 
 def _heartbeat(database: Database, now: datetime) -> tuple[bool, bool, float | None]:
-    row = database.query_one("SELECT observed_at,control_request_state FROM production_heartbeat WHERE singleton_id=1")
+    row = database.query_one(
+        "SELECT observed_at,control_request_state FROM production_heartbeat WHERE singleton_id=1"
+    )
     if row is None:
         return False, False, None
     try:
@@ -299,16 +301,24 @@ def collect_live_readiness(
         "SELECT count(*) FROM execution_intents WHERE state IN (?,?,?)",
         _UNRESOLVED_INTENT_STATES,
     )
-    unresolved = unresolved_value if isinstance(unresolved_value, int) and not isinstance(unresolved_value, bool) else -1
+    unresolved = (
+        unresolved_value
+        if isinstance(unresolved_value, int) and not isinstance(unresolved_value, bool)
+        else -1
+    )
     external_value = database.scalar(
         "SELECT count(*) FROM broker_orders WHERE ownership IN ('EXTERNAL','UNKNOWN') "
         "AND status IN (?,?,?,?)",
         _ACTIVE_ORDER_STATES,
     )
-    external_active = external_value if isinstance(external_value, int) and not isinstance(external_value, bool) else -1
+    external_active = (
+        external_value if isinstance(external_value, int) and not isinstance(external_value, bool) else -1
+    )
 
     unknown_value = database.scalar("SELECT count(*) FROM execution_intents WHERE state='UNKNOWN'")
-    unknown_count = unknown_value if isinstance(unknown_value, int) and not isinstance(unknown_value, bool) else -1
+    unknown_count = (
+        unknown_value if isinstance(unknown_value, int) and not isinstance(unknown_value, bool) else -1
+    )
     duplicate_orders_value = database.scalar(
         "SELECT count(*) FROM (SELECT decision_id,uquant_order_id FROM execution_intents "
         "GROUP BY decision_id,uquant_order_id HAVING count(*) > 1)"
