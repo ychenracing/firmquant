@@ -58,6 +58,7 @@ class _DecisionContract(Protocol):
 
 class ProductionEngineContract(Protocol):
     cfg: object
+    data: object
     _code_hash: str | None
 
     def decide(
