@@ -154,6 +154,25 @@ class CloseCheckpointStore:
     def completed(self, session: date) -> CloseCheckpoint | None:
         return self.load(session, CloseStep.COMPLETED)
 
+    def latest_incomplete_session(self) -> date | None:
+        rows = self._database.query_all(
+            "SELECT payload_json FROM audit_events WHERE category = 'CLOSE_SESSION' ORDER BY sequence"
+        )
+        observed: set[date] = set()
+        completed: set[date] = set()
+        for row in rows:
+            payload = _decode(row["payload_json"])
+            try:
+                session = date.fromisoformat(str(payload["session"]))
+                step = CloseStep(str(payload["step"]))
+            except (KeyError, ValueError) as error:
+                raise CloseCheckpointError("stored close-session identity is invalid") from error
+            observed.add(session)
+            if step is CloseStep.COMPLETED:
+                completed.add(session)
+        incomplete = observed - completed
+        return max(incomplete) if incomplete else None
+
     def latest_completed_session(self) -> date | None:
         row = self._database.query_one(
             "SELECT payload_json FROM audit_events WHERE category = 'CLOSE_SESSION' "

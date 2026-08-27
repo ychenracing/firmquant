@@ -58,7 +58,15 @@ def test_calendar_update_cannot_rewrite_any_already_used_session(tmp_path: Path)
         manifest(
             tmp_path / "proposed.json",
             end="2026-09-04",
-            sessions=["2026-08-21", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31", "2026-09-01"],
+            sessions=[
+                "2026-08-21",
+                "2026-08-25",
+                "2026-08-26",
+                "2026-08-27",
+                "2026-08-28",
+                "2026-08-31",
+                "2026-09-01",
+            ],
         )
     )
 

@@ -83,9 +83,7 @@ class InstrumentSessionStatus:
             "source": self.source,
             "raw_payload_sha256": self.raw_payload_sha256,
         }
-        return hashlib.sha256(
-            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-        ).hexdigest()
+        return hashlib.sha256(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,8 +243,7 @@ def _read_existing(path: Path) -> tuple[DailyBar, ...]:
                     close=_decimal(row["close"], label="existing close"),
                     volume=int(volume_value),
                     amount=_decimal(
-                        row.get("amount")
-                        or _decimal(row["close"], label="existing close") * volume_value,
+                        row.get("amount") or _decimal(row["close"], label="existing close") * volume_value,
                         label="existing amount",
                     ),
                 )
@@ -420,14 +417,10 @@ class XtQuantDailyDataUpdater:
             if latest < through:
                 fact = statuses[symbol]
                 if _canonical_symbol(fact.symbol) != symbol or fact.session != through:
-                    raise DailyDataUpdateError(
-                        f"{symbol} authoritative status does not match target session"
-                    )
+                    raise DailyDataUpdateError(f"{symbol} authoritative status does not match target session")
                 age = now.astimezone(UTC) - fact.observed_at.astimezone(UTC)
                 if age < timedelta(0) or age > self._max_status_age:
-                    raise DailyDataUpdateError(
-                        f"{symbol} authoritative instrument status is stale"
-                    )
+                    raise DailyDataUpdateError(f"{symbol} authoritative instrument status is stale")
                 if fact.state not in {
                     InstrumentSessionState.SUSPENDED,
                     InstrumentSessionState.NON_TRADING,
@@ -554,9 +547,7 @@ class XtQuantDailyDataUpdater:
                 raise DailyDataUpdateError("uquant manifest symbol identity does not match updated data")
             observed_common = min(item.latest_observed_session for item in observations)
             if date.fromisoformat(manifest.end) != observed_common:
-                raise DailyDataUpdateError(
-                    "uquant manifest does not match observed strategy-data coverage"
-                )
+                raise DailyDataUpdateError("uquant manifest does not match observed strategy-data coverage")
             for symbol, destination in destinations.items():
                 source = staging / f"{symbol}.csv"
                 destination.parent.mkdir(parents=True, exist_ok=True)

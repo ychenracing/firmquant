@@ -10,7 +10,6 @@ from firmquant.market_data.validation import (
     StrategyDataValidator,
 )
 
-
 PREVIOUS = date(2026, 8, 24)
 TARGET = date(2026, 8, 25)
 NOW = datetime(2026, 8, 25, 7, 10, tzinfo=UTC)
@@ -37,13 +36,17 @@ def test_validator_accepts_unchanged_suspended_equity_and_requires_resume_append
         latest_common_session=PREVIOUS,
         captured_at=NOW - timedelta(days=1),
         provider="xtquant",
-        series=(seal(suspended=False, last=PREVIOUS, rows=10, digest="a" * 64, prefix_rows=9, prefix="0" * 64),),
+        series=(
+            seal(suspended=False, last=PREVIOUS, rows=10, digest="a" * 64, prefix_rows=9, prefix="0" * 64),
+        ),
     )
     suspended = DataManifest(
         latest_common_session=TARGET,
         captured_at=NOW,
         provider="xtquant",
-        series=(seal(suspended=True, last=PREVIOUS, rows=10, digest="a" * 64, prefix_rows=9, prefix="0" * 64),),
+        series=(
+            seal(suspended=True, last=PREVIOUS, rows=10, digest="a" * 64, prefix_rows=9, prefix="0" * 64),
+        ),
     )
 
     receipt = StrategyDataValidator(max_manifest_age=timedelta(minutes=5)).validate(

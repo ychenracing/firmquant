@@ -19,6 +19,7 @@ from firmquant.market_data.calendar_manifest import load_trading_calendar_manife
 
 from .audit import AuditLedger
 from .database import Database, PersistenceError
+from .recovery import UquantAccountStateStore
 from .repositories import canonical_json
 from .schema import CURRENT_SCHEMA_VERSION
 
@@ -377,7 +378,11 @@ def _verify_complete_bundle(
         raise BackupVerificationError("complete backup deployment identity changed")
     decision_id = _text(deployment, "decision_id", label="deployment")
     account_sha256 = _text(deployment, "account_sha256", label="deployment")
-    if account_sha256 != member_hashes["account_state.json"]:
+    try:
+        authority_hash = UquantAccountStateStore().hash_file(bundle / "account_state.json")
+    except Exception as exc:
+        raise BackupVerificationError("complete backup account authority is invalid") from exc
+    if account_sha256 != authority_hash:
         raise BackupVerificationError("complete backup account identity is inconsistent")
     if _text(deployment, "calendar_sha256", label="deployment") != member_hashes["trading_calendar.json"]:
         raise BackupVerificationError("complete backup calendar identity is inconsistent")
@@ -477,8 +482,6 @@ def _complete_members(
         for path in temporary_bundle.iterdir()
         if path.is_file() and path.name != "manifest.json"
     }
-    if member_hashes["account_state.json"] != inputs.account_sha256:
-        raise BackupError("account state changed before complete backup capture")
     deployment = {
         "schema": "firmquant.deployment-record.v1",
         "firmquant_commit": inputs.firmquant_commit,

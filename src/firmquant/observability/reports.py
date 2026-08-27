@@ -318,6 +318,7 @@ class DailyReport:
     reconciliation_blockers: tuple[str, ...]
     runtime_state: str
     health_blockers: tuple[str, ...]
+    intent_state: str = "INTENT"
 
     def __post_init__(self) -> None:
         if type(self.session) is not date:
@@ -352,6 +353,8 @@ class DailyReport:
         if self.reconciliation_passed != (not self.reconciliation_blockers):
             raise ReportError("report reconciliation result contradicts blockers")
         _text(self.runtime_state, label="report runtime state")
+        if self.intent_state not in {"INTENT", "NO_INTENT", "MISSING_DECISION"}:
+            raise ReportError("report intent state is invalid")
 
     def _identity_payload(self) -> dict[str, object]:
         return {
@@ -362,6 +365,7 @@ class DailyReport:
             ),
             "generated_at": self.generated_at.isoformat(),
             "decision_id": self.decision_id,
+            "intent_state": self.intent_state,
             "funds": {
                 "available_cash": _render_decimal(self.available_cash),
                 "total_assets": _render_decimal(self.total_assets),
@@ -436,6 +440,7 @@ class DailyReportRenderer:
             f"- 报告 ID: `{report.report_id}`",
             f"- 策略 session: `{report.strategy_session}`",
             f"- 决策 ID: `{report.decision_id}`",
+            f"- 意图状态: `{report.intent_state}`",
             f"- 运行状态: `{report.runtime_state}`",
             "",
             "## 资金与总仓",
@@ -743,6 +748,15 @@ class DatabaseDailyReportBuilder:
             upstream_reasons,
             decision_created_at,
         ) = self._decision_targets(decision_row)
+        if decision_row is None:
+            intent_state = "MISSING_DECISION"
+        else:
+            decision_payload = _parse_json_object(decision_row["payload_json"], label="decision payload")
+            upstream_payload = _json_object(
+                decision_payload.get("uquant_payload"), label="uquant decision payload"
+            )
+            raw_orders = _json_array(upstream_payload.get("orders"), label="uquant decision orders")
+            intent_state = "NO_INTENT" if not raw_orders else "INTENT"
         snapshot = self._database.query_one(
             """
             SELECT b.snapshot_id, b.captured_at, c.available_cash, c.total_assets
@@ -874,6 +888,7 @@ class DatabaseDailyReportBuilder:
             reconciliation_blockers=reconciliation_blockers,
             runtime_state=runtime_state,
             health_blockers=health_blockers,
+            intent_state=intent_state,
         )
 
 

@@ -761,8 +761,7 @@ def test_cycle_uses_authoritative_calendar_and_fail_closed_state_machine(
         clock=lambda: POST_CLOSE,
     ) as (hooks, _writer, _broker, _accounts):
         ready(hooks)
-        monkeypatch.setattr(hooks, "_eod", lambda _session: 1)
-        monkeypatch.setattr(hooks, "_post_close_decision", lambda _session: 1)
+        monkeypatch.setattr(hooks, "_close_session", lambda _session: (1, 1))
         result = hooks.cycle(POST_CLOSE)
         assert result.eod == 1
         assert result.decisions == 1

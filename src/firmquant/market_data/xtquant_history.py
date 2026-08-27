@@ -201,7 +201,9 @@ class OfficialXtQuantDailyHistoryProvider(DailyHistoryProvider):
             try:
                 fact = self._instrument_lookup(parsed)
             except Exception as error:
-                raise DailyDataUpdateError(f"XtQuant instrument status is unavailable for {symbol}") from error
+                raise DailyDataUpdateError(
+                    f"XtQuant instrument status is unavailable for {symbol}"
+                ) from error
             if not isinstance(fact, InstrumentFact) or fact.symbol != parsed:
                 raise DailyDataUpdateError(f"XtQuant instrument identity mismatch for {symbol}")
             if fact.session_date != session:

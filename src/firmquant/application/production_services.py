@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
+from firmquant.application.close_checkpoint import CloseCheckpointStore, CloseStep
 from firmquant.application.event_pump import DomainEventPump
 from firmquant.application.production_daemon import (
     ProductionCycleResult,
@@ -50,6 +51,7 @@ from firmquant.execution.planner import ExecutionBrokerSnapshot, ExecutionPlan, 
 from firmquant.execution.policy import FeeSchedule
 from firmquant.market_data.calendar import AuthoritativeTradingCalendar, CalendarCoverageError
 from firmquant.market_data.calendar_manifest import load_trading_calendar_manifest
+from firmquant.market_data.generations import DataGenerationStore
 from firmquant.market_data.xtquant_daily import DailyDataUpdateReceipt, XtQuantDailyDataUpdater
 from firmquant.market_data.xtquant_history import OfficialXtQuantDailyHistoryProvider
 from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyReportBuilder
@@ -58,7 +60,7 @@ from firmquant.persistence.account_authority import (
     ReviewedAccountAdjustmentRepository,
 )
 from firmquant.persistence.audit import AuditLedger
-from firmquant.persistence.backup import backup_state
+from firmquant.persistence.backup import BackupBundleInputs, backup_state
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
 from firmquant.persistence.production_recovery import ProductionRecoveryService
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
@@ -264,10 +266,8 @@ def _data_identity_matches(account: object, data_directory: Path) -> bool:
         manifest = factory(data_directory).manifest(tuple(symbols), as_of=as_of)
     except Exception:
         return False
-    return (
-        getattr(manifest, "digest", None) == digest
-        and getattr(manifest, "end", None) == as_of
-        and tuple(getattr(manifest, "symbols", ())) == tuple(symbols)
+    return getattr(manifest, "digest", None) == digest and tuple(getattr(manifest, "symbols", ())) == tuple(
+        symbols
     )
 
 
@@ -322,6 +322,9 @@ class ProductionServiceHooks:
         safety_manifest: XtQuantSafetyManifest,
         clock: Callable[[], datetime],
         monotonic_clock: Callable[[], float] = time_module.monotonic,
+        data_generation_store: DataGenerationStore | None = None,
+        data_root: Path | None = None,
+        data_reloader: Callable[[Path], None] | None = None,
     ) -> None:
         self._config_path = config_path
         self._settings = settings
@@ -338,6 +341,10 @@ class ProductionServiceHooks:
         self._safety = safety_manifest
         self._clock = clock
         self._monotonic_clock = monotonic_clock
+        self._data_generations = data_generation_store
+        self._data_root = Path(data_root) if data_root is not None else settings.paths.data_directory
+        self._data_reloader = data_reloader
+        self._close = CloseCheckpointStore(self._database)
         self._last_monotonic: float | None = None
         self._disconnect_started_monotonic: float | None = None
         self._last_quote_at: datetime | None = None
@@ -523,10 +530,7 @@ class ProductionServiceHooks:
                 uquant_code_identity_matches=(
                     payload.get("code_hash") in {"", identity.economic_code_fingerprint}
                 ),
-                data_identity_matches=_data_identity_matches(
-                    account,
-                    self._settings.paths.data_directory,
-                ),
+                data_identity_matches=_data_identity_matches(account, self._data_root),
                 config_identity_matches=(
                     configuration_sha256(self._config_path) == self._identity.config_sha256
                 ),
@@ -586,6 +590,17 @@ class ProductionServiceHooks:
                 blockers=blockers or ("RECOVERY_FAILED",),
             )
             raise ProductionServicesUnavailable("PRODUCTION_RECOVERY_FAILED")
+        incomplete_close = self._close.latest_incomplete_session()
+        if incomplete_close is not None:
+            try:
+                self._close_session(incomplete_close)
+            except Exception as error:
+                self._transition(
+                    RuntimeState.HALTED,
+                    reason="incomplete close-session recovery failed",
+                    blockers=("CLOSE_SESSION_RECOVERY_FAILED",),
+                )
+                raise ProductionServicesUnavailable("CLOSE_SESSION_RECOVERY_FAILED") from error
         account = self._broker.query_account()
         run_readonly_production_smoke(
             broker=self._broker,
@@ -653,7 +668,14 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable("RECONCILIATION_RECEIPT_MISSING")
         return str(row["reconciliation_id"])
 
-    def _post_close_decision(self, session: date) -> int:
+    def _post_close_decision(
+        self,
+        session: date,
+        *,
+        data_manifest_sha256: str | None = None,
+        broker_snapshot_sha256: str | None = None,
+        reconciliation_id: str | None = None,
+    ) -> int:
         existing = self._decisions.for_session(session)
         if existing:
             if len(existing) != 1:
@@ -696,19 +718,25 @@ class ProductionServiceHooks:
                 },
             )
             return 0
-        symbols = tuple(sorted(set(self._universe.deployment_symbols) | set(_REFERENCE_SYMBOLS)))
-        update = self._data_updater.update(symbols, through=session)
-        snapshot = self._capture()
+        if data_manifest_sha256 is None:
+            symbols = tuple(sorted(set(self._universe.deployment_symbols) | set(_REFERENCE_SYMBOLS)))
+            update = self._data_updater.update(symbols, through=session)
+            data_manifest_sha256 = update.manifest_sha256
+            if self._data_reloader is not None:
+                self._data_reloader(self._data_root)
+        if broker_snapshot_sha256 is None:
+            broker_snapshot_sha256 = self._capture().raw_payload_sha256
+        if reconciliation_id is None:
+            reconciliation_id = self._latest_passed_reconciliation(ReconciliationKind.EOD)
         account = self._accounts.load()
-        reconciliation_id = self._latest_passed_reconciliation(ReconciliationKind.EOD)
         decision = self._strategy.decide_once(
             DecisionRequest(
                 strategy_session=session,
                 symbols=self._universe.deployment_symbols,
                 account=account,
                 firmquant_commit=self._identity.firmquant_commit,
-                data_manifest_sha256=update.manifest_sha256,
-                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+                data_manifest_sha256=data_manifest_sha256,
+                broker_snapshot_sha256=broker_snapshot_sha256,
                 created_at=self._now(),
             )
         )
@@ -724,10 +752,11 @@ class ProductionServiceHooks:
             "production-decision:" + decision.decision_id,
             "PRODUCTION_DECISION",
             {
-                "schema": "firmquant.production-decision.v1",
+                "schema": "firmquant.production-decision.v2",
                 "decision_id": decision.decision_id,
                 "session": session,
-                "data_manifest_sha256": update.manifest_sha256,
+                "data_manifest_sha256": data_manifest_sha256,
+                "broker_snapshot_sha256": broker_snapshot_sha256,
                 "reconciliation_id": reconciliation_id,
             },
         )
@@ -934,7 +963,7 @@ class ProductionServiceHooks:
             unexplained_position_change=("UNEXPLAINED_POSITION_CHANGE" in reconciliation.blockers),
             corporate_action_suspected=("CORPORATE_ACTION_SUSPECTED" in reconciliation.blockers),
             clock_drift=timedelta(milliseconds=clock_receipt.drift_milliseconds),
-            data_identity_matches=_data_identity_matches(account_state, self._settings.paths.data_directory),
+            data_identity_matches=_data_identity_matches(account_state, self._data_root),
             config_identity_matches=(configuration_sha256(self._config_path) == self._identity.config_sha256),
             unresolved_order_count=_count(
                 self._database.scalar(
@@ -1140,11 +1169,16 @@ class ProductionServiceHooks:
     def _execute(self, session: date) -> int:
         try:
             strategy_session = self._calendar.previous_trading_session(session)
-        except CalendarCoverageError:
-            return 0
+        except CalendarCoverageError as error:
+            self.halt("CALENDAR_COVERAGE_DECISION_BLOCKER")
+            raise ProductionServicesUnavailable("CALENDAR_COVERAGE_DECISION_BLOCKER") from error
+        if self._close.completed(strategy_session) is None:
+            self.halt("MISSING_DECISION")
+            raise ProductionServicesUnavailable("MISSING_DECISION")
         decisions = self._decisions.for_session(strategy_session)
         if not decisions:
-            return 0
+            self.halt("MISSING_DECISION")
+            raise ProductionServicesUnavailable("MISSING_DECISION")
         if len(decisions) != 1:
             raise ProductionServicesUnavailable("MULTIPLE_FROZEN_DECISIONS")
         decision = decisions[0]
@@ -1240,32 +1274,144 @@ class ProductionServiceHooks:
         )
         return 1
 
-    def _eod(self, session: date) -> int:
-        event_id = "production-eod:" + session.isoformat()
-        if self._audited(event_id):
-            return 0
-        receipt, _, _ = self._reconcile(ReconciliationKind.EOD)
-        report = DatabaseDailyReportBuilder(self._database, clock=self._clock).build(session)
-        rendered = DailyReportRenderer().write(report, self._settings.paths.report_directory)
-        backup = backup_state(
-            self._database,
-            self._settings.paths.backup_directory,
-            account_state_path=self._accounts.path,
+    @staticmethod
+    def _checkpoint_text(evidence: Mapping[str, object], key: str) -> str:
+        value = evidence.get(key)
+        if not isinstance(value, str) or not value:
+            raise ProductionServicesUnavailable("CLOSE_SESSION_CHECKPOINT_INVALID")
+        return value
+
+    def _close_session(self, session: date) -> tuple[int, int]:
+        if self._close.completed(session) is not None:
+            return 0, 0
+
+        eod = self._close.load(session, CloseStep.EOD_RECONCILED)
+        if eod is None:
+            receipt, snapshot, _ = self._reconcile(ReconciliationKind.EOD)
+            eod = self._close.append(
+                session,
+                CloseStep.EOD_RECONCILED,
+                evidence={
+                    "reconciliation_id": receipt.reconciliation_id,
+                    "broker_snapshot_sha256": snapshot.raw_payload_sha256,
+                    "broker_snapshot_id": snapshot.snapshot_id,
+                },
+                created_at=self._now(),
+            )
+
+        data = self._close.load(session, CloseStep.DATA_VALIDATED)
+        if data is None:
+            symbols = tuple(sorted(set(self._universe.deployment_symbols) | set(_REFERENCE_SYMBOLS)))
+            update = self._data_updater.update(symbols, through=session)
+            if self._data_reloader is not None:
+                self._data_reloader(self._data_root)
+            data = self._close.append(
+                session,
+                CloseStep.DATA_VALIDATED,
+                evidence={
+                    "data_manifest_sha256": update.manifest_sha256,
+                    "governance_manifest_sha256": update.governance_manifest_sha256,
+                    "data_generation_id": update.data_generation_id,
+                    "fetch_attempts": update.fetch_attempts,
+                },
+                created_at=self._now(),
+            )
+
+        decision_count = 0
+        decision_cp = self._close.load(session, CloseStep.DECISION_COMMITTED)
+        if decision_cp is None:
+            decision_count = self._post_close_decision(
+                session,
+                data_manifest_sha256=self._checkpoint_text(data.evidence, "data_manifest_sha256"),
+                broker_snapshot_sha256=self._checkpoint_text(eod.evidence, "broker_snapshot_sha256"),
+                reconciliation_id=self._checkpoint_text(eod.evidence, "reconciliation_id"),
+            )
+            decisions = self._decisions.for_session(session)
+            if len(decisions) != 1:
+                raise ProductionServicesUnavailable("FROZEN_DECISION_NOT_UNIQUE")
+            decision = decisions[0]
+            decision_cp = self._close.append(
+                session,
+                CloseStep.DECISION_COMMITTED,
+                evidence={
+                    "decision_id": decision.decision_id,
+                    "decision_payload_sha256": decision.payload_sha256,
+                    "account_after_sha256": decision.account_after_sha256,
+                },
+                created_at=self._now(),
+            )
+        decision_id = self._checkpoint_text(decision_cp.evidence, "decision_id")
+
+        report_cp = self._close.load(session, CloseStep.REPORT_PUBLISHED)
+        if report_cp is None:
+            report = DatabaseDailyReportBuilder(self._database, clock=self._clock).build(session)
+            if report.decision_id != decision_id:
+                raise ProductionServicesUnavailable("REPORT_DECISION_IDENTITY_MISMATCH")
+            rendered = DailyReportRenderer().write(report, self._settings.paths.report_directory)
+            report_cp = self._close.append(
+                session,
+                CloseStep.REPORT_PUBLISHED,
+                evidence={
+                    "report_id": rendered.report_id,
+                    "json_sha256": rendered.json_sha256,
+                    "markdown_sha256": rendered.markdown_sha256,
+                    "decision_id": decision_id,
+                },
+                created_at=self._now(),
+            )
+
+        backup_cp = self._close.load(session, CloseStep.BACKUP_VERIFIED)
+        if backup_cp is None:
+            if self._data_generations is None:
+                raise ProductionServicesUnavailable("ACTIVE_DATA_GENERATION_UNAVAILABLE")
+            generation = self._data_generations.active()
+            safety_path = self._settings.broker.safety_manifest_path
+            if safety_path is None:
+                raise ProductionServicesUnavailable("XTQUANT_SAFETY_MANIFEST_MISSING")
+            strategy_manifest = self._data_root / ".firmquant-data-manifest.json"
+            backup = backup_state(
+                self._database,
+                self._settings.paths.backup_directory,
+                account_state_path=self._accounts.path,
+                created_at=self._now(),
+                complete_inputs=BackupBundleInputs(
+                    settings=self._settings,
+                    config_sha256=self._identity.config_sha256,
+                    safety_manifest_path=safety_path,
+                    calendar_manifest_path=self._settings.paths.data_directory / _CALENDAR_FILE,
+                    active_data_manifest_path=generation.path / "generation.json",
+                    strategy_data_manifest_path=strategy_manifest,
+                    firmquant_commit=self._identity.firmquant_commit,
+                    uquant_commit=self._identity.uquant_commit,
+                    account_sha256=self._accounts.store.hash_file(self._accounts.path),
+                    decision_id=decision_id,
+                    strategy_session=session,
+                ),
+            )
+            backup_cp = self._close.append(
+                session,
+                CloseStep.BACKUP_VERIFIED,
+                evidence={
+                    "backup_id": backup.backup_id,
+                    "backup_manifest_sha256": backup.manifest_sha256,
+                    "decision_id": decision_id,
+                },
+                created_at=self._now(),
+            )
+
+        self._close.append(
+            session,
+            CloseStep.COMPLETED,
+            evidence={
+                "decision_id": decision_id,
+                "report_id": self._checkpoint_text(report_cp.evidence, "report_id"),
+                "backup_id": self._checkpoint_text(backup_cp.evidence, "backup_id"),
+                "reconciliation_id": self._checkpoint_text(eod.evidence, "reconciliation_id"),
+                "data_manifest_sha256": self._checkpoint_text(data.evidence, "data_manifest_sha256"),
+            },
             created_at=self._now(),
         )
-        self._audit(
-            event_id,
-            "PRODUCTION_EOD",
-            {
-                "schema": "firmquant.production-eod.v1",
-                "session": session,
-                "reconciliation_id": receipt.reconciliation_id,
-                "report_id": rendered.report_id,
-                "backup_id": backup.backup_id,
-                "backup_manifest_sha256": backup.manifest_sha256,
-            },
-        )
-        return 1
+        return decision_count, 1
 
     def cycle(self, now: datetime) -> ProductionCycleResult:
         if self._status.state is not RuntimeState.READY:
@@ -1298,20 +1444,13 @@ class ProductionServiceHooks:
                 self._active_execution_deadlines = None
             self._transition(RuntimeState.READY, reason="execution step completed")
         elif market_status is MarketSessionStatus.CLOSED and shanghai.time() >= _POST_CLOSE:
-            self._transition(RuntimeState.RECONCILING, reason="end-of-day reconciliation")
+            self._transition(RuntimeState.RECONCILING, reason="close-session checkpoint")
             try:
-                eod = self._eod(session)
+                decisions, eod = self._close_session(session)
             except Exception:
-                self.halt("EOD_RECONCILIATION_FAILED")
+                self.halt("CLOSE_SESSION_FAILED")
                 raise
-            self._transition(RuntimeState.READY, reason="end-of-day reconciliation completed")
-            self._transition(RuntimeState.EXECUTING, reason="post-close strategy decision")
-            try:
-                decisions = self._post_close_decision(session)
-            except Exception:
-                self.halt("POST_CLOSE_DECISION_FAILED")
-                raise
-            self._transition(RuntimeState.READY, reason="post-close strategy decision completed")
+            self._transition(RuntimeState.READY, reason="close-session checkpoint completed")
         return ProductionCycleResult(decisions, executions, eod)
 
     def heartbeat(self, heartbeat: ProductionHeartbeat) -> None:
@@ -1612,20 +1751,31 @@ def build_production_runtime(
         database=writer.database,
         clock=clock,
     )
+    observed_now = clock()
+    if observed_now.tzinfo is None or observed_now.utcoffset() is None:
+        raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
+    generations = DataGenerationStore(settings.paths.state_directory)
+    active_data = generations.ensure_active(
+        settings.paths.data_directory,
+        source="configured-production-data",
+        created_at=observed_now,
+    )
     try:
         xtdata = importlib.import_module("xtquant.xtdata")
     except (ImportError, ModuleNotFoundError) as error:
         raise ProductionServicesUnavailable("XTQUANT_HISTORY_API_UNAVAILABLE") from error
     data_updater = XtQuantDailyDataUpdater(
-        root=settings.paths.data_directory,
+        root=active_data.path,
+        state_root=settings.paths.state_directory / "market-data",
         provider=OfficialXtQuantDailyHistoryProvider(
             xtdata=xtdata,
             volume_multipliers=safety.volume_multipliers,
+            instrument_lookup=broker.query_instrument,
         ),
+        clock=clock,
+        required_complete_symbols=frozenset(_REFERENCE_SYMBOLS),
+        generation_store=generations,
     )
-    observed_now = clock()
-    if observed_now.tzinfo is None or observed_now.utcoffset() is None:
-        raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
     universe = UniversePolicy.from_uquant(
         configured_symbols=None,
         as_of=observed_now.astimezone(_SHANGHAI).date(),
@@ -1635,15 +1785,26 @@ def build_production_runtime(
         path=settings.paths.state_directory / _ACCOUNT_FILE,
         clock=clock,
     )
+    engine = _load_engine(source_checkout, active_data.path)
     strategy = StrategyAdapter(
-        engine=_load_engine(source_checkout, settings.paths.data_directory),
+        engine=engine,
         database=writer.database,
         source_checkout=source_checkout,
         universe_policy=universe,
     )
+
+    def reload_data(path: Path) -> None:
+        try:
+            module = importlib.import_module("uquant.data")
+            factory = vars(module).get("DataStore")
+            if not callable(factory):
+                raise TypeError
+            replacement = factory(path)
+            engine.data = replacement
+        except Exception as error:
+            raise ProductionServicesUnavailable("UQUANT_DATA_RELOAD_FAILED") from error
+
     pump = DomainEventPump(capacity=4096, clock=clock)
-    monotonic_clock = time_module.monotonic
-    monotonic_clock = time_module.monotonic
     monotonic_clock = time_module.monotonic
     hooks = ProductionServiceHooks(
         config_path=config_path.resolve(),
@@ -1660,6 +1821,9 @@ def build_production_runtime(
         safety_manifest=safety,
         clock=clock,
         monotonic_clock=monotonic_clock,
+        data_generation_store=generations,
+        data_root=active_data.path,
+        data_reloader=reload_data,
     )
     stop = _StopFlag()
     _install_stop_handlers(stop)
