@@ -416,6 +416,92 @@ _APPEND_ONLY_TRIGGERS: Final = tuple(
     )
 )
 
+_ACCOUNT_AUTHORITY_SCHEMA: Final = (
+    """
+    CREATE TABLE account_bindings (
+        binding_id TEXT PRIMARY KEY,
+        singleton_id INTEGER NOT NULL UNIQUE CHECK (singleton_id = 1),
+        account_id_hash TEXT NOT NULL CHECK (length(account_id_hash) = 64),
+        account_type TEXT NOT NULL CHECK (account_type = 'CASH'),
+        broker_snapshot_sha256 TEXT NOT NULL CHECK (length(broker_snapshot_sha256) = 64),
+        account_state_sha256 TEXT NOT NULL CHECK (length(account_state_sha256) = 64),
+        uquant_commit TEXT NOT NULL CHECK (length(uquant_commit) = 40),
+        uquant_code_fingerprint TEXT NOT NULL CHECK (length(uquant_code_fingerprint) = 64),
+        data_hash TEXT NOT NULL CHECK (length(data_hash) = 64),
+        data_as_of TEXT NOT NULL,
+        data_symbols_json TEXT NOT NULL CHECK (json_valid(data_symbols_json)),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+        created_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE account_bootstrap_operations (
+        operation_id TEXT PRIMARY KEY,
+        stage TEXT NOT NULL CHECK (stage IN (
+            'PREPARED','FILE_COMMITTED','BINDING_COMMITTED','CONTRADICTION'
+        )),
+        account_state_sha256 TEXT NOT NULL CHECK (length(account_state_sha256) = 64),
+        broker_snapshot_sha256 TEXT NOT NULL CHECK (length(broker_snapshot_sha256) = 64),
+        binding_payload_json TEXT NOT NULL CHECK (json_valid(binding_payload_json)),
+        binding_payload_sha256 TEXT NOT NULL CHECK (length(binding_payload_sha256) = 64),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE TABLE reviewed_account_adjustments (
+        adjustment_id TEXT PRIMARY KEY,
+        account_id_hash TEXT NOT NULL CHECK (length(account_id_hash) = 64),
+        symbol TEXT NOT NULL,
+        session_date TEXT NOT NULL,
+        adjustment_type TEXT NOT NULL,
+        coverage_kind TEXT NOT NULL,
+        broker_snapshot_sha256 TEXT NOT NULL CHECK (length(broker_snapshot_sha256) = 64),
+        difference_sha256 TEXT NOT NULL CHECK (length(difference_sha256) = 64),
+        audit_summary_sha256 TEXT NOT NULL CHECK (length(audit_summary_sha256) = 64),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+        created_at TEXT NOT NULL
+    ) STRICT
+    """,
+    """
+    CREATE INDEX reviewed_account_adjustments_lookup_idx
+    ON reviewed_account_adjustments(
+        account_id_hash, symbol, session_date, coverage_kind,
+        broker_snapshot_sha256, difference_sha256
+    )
+    """,
+    """
+    CREATE TRIGGER account_bindings_reject_update
+    BEFORE UPDATE ON account_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'account_bindings is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER account_bindings_reject_delete
+    BEFORE DELETE ON account_bindings
+    BEGIN
+        SELECT RAISE(ABORT, 'account_bindings is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER reviewed_account_adjustments_reject_update
+    BEFORE UPDATE ON reviewed_account_adjustments
+    BEGIN
+        SELECT RAISE(ABORT, 'reviewed_account_adjustments is append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER reviewed_account_adjustments_reject_delete
+    BEFORE DELETE ON reviewed_account_adjustments
+    BEGIN
+        SELECT RAISE(ABORT, 'reviewed_account_adjustments is append-only');
+    END
+    """,
+)
+
 MIGRATIONS: Final = (
     Migration.create(
         version=1,
@@ -441,6 +527,11 @@ MIGRATIONS: Final = (
             END
             """,
         ),
+    ),
+    Migration.create(
+        version=3,
+        name="account_authority",
+        statements=_ACCOUNT_AUTHORITY_SCHEMA,
     ),
 )
 CURRENT_SCHEMA_VERSION: Final = MIGRATIONS[-1].version

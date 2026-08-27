@@ -34,7 +34,7 @@ class Reconciler:
         self.before_return = before_return
         self.calls: list[tuple[object, object]] = []
 
-    def run(self, kind, facts):
+    def evaluate(self, kind, facts):
         self.calls.append((kind, facts))
         if self.before_return is not None:
             self.before_return()
@@ -44,6 +44,9 @@ class Reconciler:
             passed=self.passed,
             blockers=self.blockers,
         )
+
+    def commit(self, _receipt, *, broker_snapshot_sha256):
+        assert len(broker_snapshot_sha256) == 64
 
 
 def _seeded_account():

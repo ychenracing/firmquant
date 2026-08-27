@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import datetime
 
 from firmquant.domain.broker_facts import (
@@ -84,7 +85,7 @@ class ReconciliationService:
         self._clock = clock
         self._audit = AuditLedger(database)
 
-    def run(
+    def evaluate(
         self,
         kind: ReconciliationKind,
         facts: ReconciliationFacts,
@@ -152,7 +153,34 @@ class ReconciliationService:
             details_json=details_json,
             details_sha256=details_sha256,
         )
-        self._append(receipt, broker_snapshot_sha256=facts.broker_snapshot.raw_payload_sha256)
+        return receipt
+
+    def commit(
+        self,
+        receipt: ReconciliationReceipt,
+        *,
+        broker_snapshot_sha256: str,
+    ) -> None:
+        if not isinstance(receipt, ReconciliationReceipt):
+            raise DomainTypeError("reconciliation commit requires ReconciliationReceipt")
+        if (
+            not isinstance(broker_snapshot_sha256, str)
+            or len(broker_snapshot_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in broker_snapshot_sha256)
+        ):
+            raise DomainValidationError("reconciliation broker snapshot hash must be SHA-256")
+        self._append(receipt, broker_snapshot_sha256=broker_snapshot_sha256)
+
+    def run(
+        self,
+        kind: ReconciliationKind,
+        facts: ReconciliationFacts,
+    ) -> ReconciliationReceipt:
+        receipt = self.evaluate(kind, facts)
+        self.commit(
+            receipt,
+            broker_snapshot_sha256=facts.broker_snapshot.raw_payload_sha256,
+        )
         return receipt
 
     def _compare_identity(
@@ -384,7 +412,8 @@ class ReconciliationService:
             receipt.details_json,
             receipt.details_sha256,
         )
-        with self._database.transaction():
+        transaction = nullcontext() if self._database.in_transaction else self._database.transaction()
+        with transaction:
             existing = self._database.query_one(
                 "SELECT kind, started_at, completed_at, passed, blockers_json, "
                 "details_json, details_sha256 FROM reconciliation_runs "

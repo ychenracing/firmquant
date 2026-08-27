@@ -554,13 +554,18 @@ class _FakeAccounts:
     def prepare_broker_snapshot(self, _snapshot):
         return self.prepared
 
-    def commit_broker_snapshot(self, _prepared):
+    def commit_broker_snapshot(self, _prepared, *, finalize=None):
+        if finalize is not None:
+            finalize()
         return self.commit_result
 
 
 class _PassingReconciler:
-    def run(self, _kind, _facts):
+    def evaluate(self, _kind, _facts):
         return SimpleNamespace(passed=True, blockers=())
+
+    def commit(self, _receipt, *, broker_snapshot_sha256):
+        assert len(broker_snapshot_sha256) == 64
 
 
 def _fake_coordinator(accounts: object | None = None) -> AccountReconciliationCoordinator:

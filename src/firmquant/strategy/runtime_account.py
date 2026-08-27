@@ -191,11 +191,18 @@ class RuntimeAccountRepository:
             path_sha256=path_sha256,
         )
 
-    def commit_broker_snapshot(self, prepared: PreparedAccountSync) -> str:
-        """CAS-commit one reviewed preparation, resuming the same durable identity idempotently."""
+    def commit_broker_snapshot(
+        self,
+        prepared: PreparedAccountSync,
+        *,
+        finalize: Callable[[], None] | None = None,
+    ) -> str:
+        """CAS-commit one reviewed preparation and its SQLite finalization atomically."""
 
         if not isinstance(prepared, PreparedAccountSync):
             raise TypeError("broker account commit requires PreparedAccountSync")
+        if finalize is not None and not callable(finalize):
+            raise TypeError("broker account finalizer must be callable or None")
         if self._store.hash_state(prepared.prepared_account) != prepared.account_after_sha256:
             raise RecoveryContradiction("prepared broker account changed before commit")
         operation_id = self._operation_id(prepared)
@@ -214,7 +221,7 @@ class RuntimeAccountRepository:
                 operation_id=operation_id,
             )
         operation.commit_file(now=now)
-        operation.commit_receipt(now=now)
+        operation.commit_receipt(now=now, finalize=finalize)
         if self._store.hash_file(self._path) != prepared.account_after_sha256:
             raise RecoveryContradiction("durable broker sync account hash differs from preparation")
         return prepared.account_after_sha256

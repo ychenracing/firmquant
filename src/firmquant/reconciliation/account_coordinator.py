@@ -34,15 +34,27 @@ class _AccountRepository(Protocol):
 
     def prepare_broker_snapshot(self, snapshot: BrokerSnapshot) -> PreparedAccountSync: ...
 
-    def commit_broker_snapshot(self, prepared: PreparedAccountSync) -> str: ...
+    def commit_broker_snapshot(
+        self,
+        prepared: PreparedAccountSync,
+        *,
+        finalize: Callable[[], None] | None = None,
+    ) -> str: ...
 
 
 class _Reconciler(Protocol):
-    def run(
+    def evaluate(
         self,
         kind: ReconciliationKind,
         facts: ReconciliationFacts,
     ) -> ReconciliationReceipt: ...
+
+    def commit(
+        self,
+        receipt: ReconciliationReceipt,
+        *,
+        broker_snapshot_sha256: str,
+    ) -> None: ...
 
 
 class AccountReconciliationBlocked(RuntimeError):
@@ -157,11 +169,15 @@ class AccountReconciliationCoordinator:
         if facts.operational_ledger != operational_ledger:
             raise RecoveryContradiction("final reconciliation ledger changed after preflight")
 
-        receipt = self._reconciler.run(kind, facts)
+        receipt = self._reconciler.evaluate(kind, facts)
         if not receipt.passed:
             raise AccountReconciliationBlocked(tuple(receipt.blockers))
 
         if prepared.account_after_sha256 == prepared.account_before_sha256:
+            self._reconciler.commit(
+                receipt,
+                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            )
             return AccountReconciliationResult(
                 receipt=receipt,
                 account=prepared.prepared_account,
@@ -171,7 +187,13 @@ class AccountReconciliationCoordinator:
                 committed=False,
             )
 
-        committed = self._accounts.commit_broker_snapshot(prepared)
+        committed = self._accounts.commit_broker_snapshot(
+            prepared,
+            finalize=lambda: self._reconciler.commit(
+                receipt,
+                broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            ),
+        )
         if committed != prepared.account_after_sha256:
             raise RecoveryContradiction("committed account hash differs from reviewed preparation")
         return AccountReconciliationResult(

@@ -321,8 +321,15 @@ class AccountOperation:
                 (actual_after, now.isoformat(), self.operation_id),
             )
 
-    def commit_receipt(self, *, now: datetime) -> None:
+    def commit_receipt(
+        self,
+        *,
+        now: datetime,
+        finalize: Callable[[], None] | None = None,
+    ) -> None:
         _aware(now, label="account receipt commit time")
+        if finalize is not None and not callable(finalize):
+            raise DomainTypeError("account receipt finalizer must be callable or None")
         if _path_sha256(self.account_path) != self.path_sha256:
             self._mark_contradiction(None, now=now)
             raise RecoveryContradiction("account state path identity changed")
@@ -357,6 +364,8 @@ class AccountOperation:
                 },
                 created_at=now,
             )
+            if finalize is not None:
+                finalize()
 
 
 class RecoveryService:
@@ -473,17 +482,36 @@ class RecoveryService:
                     classification = AccountRecoveryClassification.NOT_APPLIED
                 elif actual == expected_after:
                     classification = AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING
-            target_stage = (
-                "CONTRADICTION"
-                if classification is AccountRecoveryClassification.CONTRADICTION
-                else "RECEIPT_COMMITTED"
-            )
+            operation_kind = str(row["operation_kind"])
+            original_stage = str(row["stage"])
+            persisted_actual = actual
+            if classification is AccountRecoveryClassification.CONTRADICTION:
+                target_stage = "CONTRADICTION"
+            elif operation_kind == "BROKER_SYNC":
+                if (
+                    classification is AccountRecoveryClassification.NOT_APPLIED
+                    and original_stage == "PREPARED"
+                ):
+                    target_stage = "PREPARED"
+                    persisted_actual = None
+                    blockers.add("ACCOUNT_COMMIT_RETRY_REQUIRED")
+                elif (
+                    classification is AccountRecoveryClassification.FILE_APPLIED_RECEIPT_MISSING
+                    and original_stage in {"PREPARED", "FILE_COMMITTED"}
+                ):
+                    target_stage = "FILE_COMMITTED"
+                    blockers.add("ACCOUNT_FINALIZATION_REQUIRED")
+                else:
+                    target_stage = "CONTRADICTION"
+                    classification = AccountRecoveryClassification.CONTRADICTION
+            else:
+                target_stage = "RECEIPT_COMMITTED"
             with self._database.transaction():
                 self._database.write(
                     "UPDATE account_operations SET stage = ?, "
                     "actual_account_after_sha256 = ?, updated_at = ? "
                     "WHERE operation_id = ?",
-                    (target_stage, actual, now.isoformat(), operation_id),
+                    (target_stage, persisted_actual, now.isoformat(), operation_id),
                 )
                 self._append_account_recovery_audit(
                     operation_id=operation_id,
