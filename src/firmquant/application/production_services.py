@@ -1286,6 +1286,7 @@ class ProductionServiceHooks:
             return 0, 0
 
         eod = self._close.load(session, CloseStep.EOD_RECONCILED)
+        eod_created_now = eod is None
         if eod is None:
             receipt, snapshot, _ = self._reconcile(ReconciliationKind.EOD)
             eod = self._close.append(
@@ -1320,11 +1321,17 @@ class ProductionServiceHooks:
         decision_count = 0
         decision_cp = self._close.load(session, CloseStep.DECISION_COMMITTED)
         if decision_cp is None:
+            decision_snapshot_sha256 = self._checkpoint_text(eod.evidence, "broker_snapshot_sha256")
+            decision_reconciliation_id = self._checkpoint_text(eod.evidence, "reconciliation_id")
+            if not eod_created_now:
+                fresh_receipt, fresh_snapshot, _ = self._reconcile(ReconciliationKind.EOD)
+                decision_snapshot_sha256 = fresh_snapshot.raw_payload_sha256
+                decision_reconciliation_id = fresh_receipt.reconciliation_id
             decision_count = self._post_close_decision(
                 session,
                 data_manifest_sha256=self._checkpoint_text(data.evidence, "data_manifest_sha256"),
-                broker_snapshot_sha256=self._checkpoint_text(eod.evidence, "broker_snapshot_sha256"),
-                reconciliation_id=self._checkpoint_text(eod.evidence, "reconciliation_id"),
+                broker_snapshot_sha256=decision_snapshot_sha256,
+                reconciliation_id=decision_reconciliation_id,
             )
             decisions = self._decisions.for_session(session)
             if len(decisions) != 1:
@@ -1380,6 +1387,7 @@ class ProductionServiceHooks:
                 created_at=self._now(),
                 complete_inputs=BackupBundleInputs(
                     settings=self._settings,
+                    config_path=self._config_path,
                     config_sha256=self._identity.config_sha256,
                     safety_manifest_path=safety_path,
                     calendar_manifest_path=self._settings.paths.data_directory / _CALENDAR_FILE,
