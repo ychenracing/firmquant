@@ -199,9 +199,7 @@ class ProductionDaemon(ProductionRuntime):
 
     def _drain_events(self) -> int:
         processed = 0
-        while processed < self._max_events_per_cycle and self._pump.dispatch_one(
-            self._hooks.handle_event
-        ):
+        while processed < self._max_events_per_cycle and self._pump.dispatch_one(self._hooks.handle_event):
             processed += 1
         return processed
 
