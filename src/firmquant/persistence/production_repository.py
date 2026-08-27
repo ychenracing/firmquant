@@ -157,7 +157,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             if fact.event_sequence < stored_sequence:
                 raise PersistenceConflict("broker order event sequence regressed")
             if fact.event_sequence == stored_sequence and (
-                fact.status.value != str(existing["status"]) or fact.filled_shares.value != previous_filled
+                fact.status.value != str(existing["status"])
+                or fact.filled_shares.value != previous_filled
             ):
                 raise PersistenceConflict("broker order sequence was reused for different truth")
         self.database.write(
@@ -452,7 +453,9 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             return self.transition(
                 current,
                 CancelConfirmed(
-                    event_id=_stable_event_id("recovery-cancelled", fact.broker_order_id, fact.event_sequence),
+                    event_id=_stable_event_id(
+                        "recovery-cancelled", fact.broker_order_id, fact.event_sequence
+                    ),
                     broker_order_id=fact.broker_order_id,
                 ),
                 occurred_at=received_at,
