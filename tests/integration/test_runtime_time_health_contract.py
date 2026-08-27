@@ -10,10 +10,21 @@ import pytest
 import firmquant.scheduling.clock as scheduling_clock
 from firmquant.application.operations import LocalOperatorService, OperatorCommand
 from firmquant.application.production_daemon import ProductionHeartbeat
+from firmquant.broker.production_factory import ReadOnlyXtQuantGateway
+from firmquant.broker.production_smoke import ReadOnlyProductionSmokeBroker
 from firmquant.config import ExecutionRuntimeSettings
-from firmquant.execution.live_controller import LiveExecutionController
-from firmquant.persistence.writer_lease import WriterLease, WriterLeaseLost
+from firmquant.execution.live_controller import ExecutionDeadlines, LiveExecutionController
+from firmquant.persistence.writer_lease import (
+    WriterLease,
+    WriterLeaseGuard,
+    WriterLeaseLost,
+)
 from firmquant.risk.gate import ExecutionRiskContext, RiskLimits
+from firmquant.scheduling.clock import (
+    RuntimeClockDiscontinuity,
+    RuntimeClockMonitor,
+    RuntimeClockObservation,
+)
 
 
 def test_expired_writer_lease_cannot_renew(tmp_path: Path) -> None:
@@ -52,15 +63,72 @@ def test_writer_generation_takeover_cannot_renew(tmp_path: Path) -> None:
         lease.release()
 
 
+def test_writer_lease_guard_renews_on_monotonic_interval_and_never_revives(tmp_path: Path) -> None:
+    started = datetime(2026, 8, 27, 1, tzinfo=UTC)
+    wall = [started]
+    monotonic = [0.0]
+    lease = WriterLease.acquire(
+        tmp_path / "firmquant.sqlite3",
+        owner="keepalive",
+        ttl=timedelta(seconds=5),
+        clock=lambda: wall[0],
+    )
+    guard = WriterLeaseGuard(
+        lease,
+        monotonic_clock=lambda: monotonic[0],
+        renew_interval=timedelta(seconds=1),
+    )
+    try:
+        wall[0] = started + timedelta(seconds=1)
+        monotonic[0] = 1.0
+        guard.check()
+        assert lease.expires_at == started + timedelta(seconds=6)
+
+        wall[0] = started + timedelta(seconds=6)
+        monotonic[0] = 2.0
+        with pytest.raises(WriterLeaseLost, match="expired"):
+            guard.check()
+        wall[0] = started + timedelta(seconds=2)
+        monotonic[0] = 3.0
+        with pytest.raises(WriterLeaseLost, match="previously lost"):
+            guard.check()
+    finally:
+        lease.release()
+
+
 def test_live_controller_requires_keepalive_monotonic_clock_and_global_deadlines() -> None:
     parameters = inspect.signature(LiveExecutionController).parameters
     assert {"lease_guard", "monotonic_clock", "execution_deadlines"} <= set(parameters)
+    deadlines = ExecutionDeadlines(10.0, 20.0, 30.0)
+    assert deadlines.latest_new_submit < deadlines.latest_cancel_initiation
+    assert deadlines.latest_cancel_initiation < deadlines.absolute_completion
+    with pytest.raises(ValueError):
+        ExecutionDeadlines(20.0, 10.0, 30.0)
 
 
 def test_clock_module_exposes_reference_provider_and_discontinuity_monitor() -> None:
     assert hasattr(scheduling_clock, "ClockReferenceProvider")
     assert hasattr(scheduling_clock, "RuntimeClockMonitor")
     assert hasattr(scheduling_clock, "MonotonicDeadline")
+
+
+def test_runtime_clock_monitor_detects_wall_rollback_and_sleep_resume_gap() -> None:
+    started = datetime(2026, 8, 27, 1, tzinfo=UTC)
+    rollback = RuntimeClockMonitor(
+        max_observation_gap=timedelta(seconds=5),
+        max_wall_monotonic_divergence=timedelta(seconds=1),
+    )
+    rollback.observe(RuntimeClockObservation(started, 0.0))
+    with pytest.raises(RuntimeClockDiscontinuity, match="WALL_CLOCK_ROLLBACK"):
+        rollback.observe(RuntimeClockObservation(started - timedelta(seconds=2), 1.0))
+
+    resume = RuntimeClockMonitor(
+        max_observation_gap=timedelta(seconds=5),
+        max_wall_monotonic_divergence=timedelta(seconds=1),
+    )
+    resume.observe(RuntimeClockObservation(started, 0.0))
+    with pytest.raises(RuntimeClockDiscontinuity, match="RUNTIME_OBSERVATION_GAP"):
+        resume.observe(RuntimeClockObservation(started + timedelta(seconds=10), 10.0))
 
 
 def test_heartbeat_contract_contains_verifiable_process_and_authority_facts() -> None:
@@ -99,6 +167,14 @@ def test_status_contract_does_not_report_unknown_broker_placeholder() -> None:
     assert '"broker_connection": "UNKNOWN"' not in source
     assert "heartbeat_age" in source
     assert "STALE" in source
+    assert "NOT_RUNNING" in source
+
+
+def test_production_diagnostic_types_have_no_broker_write_surface() -> None:
+    assert not hasattr(ReadOnlyXtQuantGateway, "submit_order")
+    assert not hasattr(ReadOnlyXtQuantGateway, "cancel_order")
+    assert not hasattr(ReadOnlyProductionSmokeBroker, "submit_order")
+    assert not hasattr(ReadOnlyProductionSmokeBroker, "cancel_order")
 
 
 def test_readonly_smoke_is_explicit_operator_command() -> None:
