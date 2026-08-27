@@ -142,6 +142,36 @@ class BrokerOrderCommand:
             raise DomainTypeError("broker command strategy session must be date")
 
 
+@dataclass(frozen=True, slots=True)
+class BrokerOrderAbsenceProof:
+    """Authoritative proof that one exact durable submit was never broker-accepted."""
+
+    command: BrokerOrderCommand
+    snapshot_id: str
+    session_date: date
+    captured_at: datetime
+    broker_event_watermark: int
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command, BrokerOrderCommand):
+            raise DomainTypeError("absence proof command must be BrokerOrderCommand")
+        _canonical_text(self.snapshot_id, label="absence proof snapshot id")
+        if isinstance(self.session_date, datetime) or not isinstance(self.session_date, date):
+            raise DomainTypeError("absence proof session date must be date")
+        if self.session_date != self.command.strategy_session:
+            raise DomainValidationError("absence proof session differs from durable command")
+        _aware(self.captured_at, label="absence proof captured_at")
+        if isinstance(self.broker_event_watermark, bool) or not isinstance(
+            self.broker_event_watermark, int
+        ):
+            raise DomainTypeError("absence proof broker watermark must be integer")
+        if self.broker_event_watermark < 0:
+            raise DomainValidationError("absence proof broker watermark must be nonnegative")
+        if not isinstance(self.evidence_sha256, str) or _SHA256.fullmatch(self.evidence_sha256) is None:
+            raise DomainValidationError("absence proof evidence must be SHA-256")
+
+
 @runtime_checkable
 class BrokerEventSink(Protocol):
     """Thread-safe callback target; implementations may only validate and enqueue."""
@@ -180,6 +210,15 @@ class BrokerGateway(Protocol):
     def subscribe(self, callback_sink: BrokerEventSink) -> None: ...
 
 
+@runtime_checkable
+class BrokerOrderAbsenceVerifier(Protocol):
+    """Optional read capability; an empty ordinary order query is never sufficient proof."""
+
+    def prove_order_not_accepted(
+        self, command: BrokerOrderCommand
+    ) -> BrokerOrderAbsenceProof | None: ...
+
+
 __all__ = (
     "BrokerDisconnected",
     "BrokerEventSink",
@@ -187,6 +226,8 @@ __all__ = (
     "BrokerGateway",
     "BrokerGatewayError",
     "BrokerHealth",
+    "BrokerOrderAbsenceProof",
+    "BrokerOrderAbsenceVerifier",
     "BrokerOrderCommand",
     "BrokerWriteForbidden",
 )
