@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -192,7 +192,8 @@ def test_calendar_status_warns_expires_and_controlled_update_is_audited(
     assert expired["blocker"] == "CALENDAR_COVERAGE_EXPIRED"
 
     proposed_path = tmp_path / "calendar-proposed.json"
-    proposed_sessions = current_sessions + [
+    proposed_sessions = [
+        *current_sessions,
         "2026-08-31",
         "2026-09-01",
         "2026-09-02",
