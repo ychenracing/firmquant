@@ -40,11 +40,37 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          path = Path('src/firmquant/execution/replay_runner.py')
-          raw = path.read_bytes()
+          runner = Path('src/firmquant/execution/replay_runner.py')
+          raw = runner.read_bytes()
           if b'\x00' not in raw:
               raise SystemExit('expected replay runner NUL byte is absent')
-          path.write_bytes(raw.replace(b'\x00', b'\\0'))
+          runner.write_bytes(raw.replace(b'\x00', b'\\0'))
+
+          script = Path('scripts/add_immutable_planning_blockers.py')
+          text = script.read_text(encoding='utf-8')
+          marker = '''replace_once(
+              RUNTIME,
+              "        planned_orders=tuple(order_observations),\\n        targets=targets,\\n",
+              "        planned_orders=tuple(order_observations),\\n"
+              "        planning_blockers=_planning_blockers(plan),\\n"
+              "        targets=targets,\\n",
+              label="shadow blocker construction",
+          )
+          '''
+          if marker not in text:
+              raise SystemExit('immutable blocker construction marker is missing')
+          replacement = '''_runtime_text = RUNTIME.read_text(encoding="utf-8")
+          _old = "        planned_orders=tuple(order_observations),\\n        targets=targets,\\n"
+          _new = (
+              "        planned_orders=tuple(order_observations),\\n"
+              "        planning_blockers=_planning_blockers(plan),\\n"
+              "        targets=targets,\\n"
+          )
+          if _runtime_text.count(_old) != 2:
+              raise RuntimeError("SHADOW/CANARY blocker construction must have exactly two matches")
+          RUNTIME.write_text(_runtime_text.replace(_old, _new), encoding="utf-8")
+          '''
+          script.write_text(text.replace(marker, replacement, 1), encoding='utf-8')
           PY
           python scripts/add_immutable_planning_blockers.py
       - name: Normalize exact touched surface
