@@ -409,21 +409,22 @@ def main(
     output_json = bool(getattr(arguments, "output_json", False))
     config_path = cast(Path, arguments.config)
     raw_command = cast(str, arguments.command)
+    local_control_plane = service_factory is create_local_operator_service
 
     try:
         request_id = cast(str | None, getattr(arguments, "request_id", None))
-        if raw_command == "status" and request_id is not None:
+        if local_control_plane and raw_command == "status" and request_id is not None:
             result = _control_status(config_path=config_path, request_id=request_id)
             _render(result, output_json=output_json)
             return result.exit_code
-        if raw_command == "stop":
+        if local_control_plane and raw_command == "stop":
             result = _direct_stop_or_queue(
                 config_path=config_path,
                 reason=cast(str | None, getattr(arguments, "reason", None)),
             )
             _render(result, output_json=output_json)
             return result.exit_code
-        if raw_command == "cancel-system-orders":
+        if local_control_plane and raw_command == "cancel-system-orders":
             result = _direct_cancel_or_queue(
                 config_path=config_path,
                 reason=cast(str | None, getattr(arguments, "reason", None)),
