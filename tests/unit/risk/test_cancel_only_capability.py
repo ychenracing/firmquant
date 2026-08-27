@@ -169,9 +169,7 @@ def test_cancel_unknown_is_durable_and_never_repeated(tmp_path: Path) -> None:
         assert second.cancelled_order_ids == ()
         assert second.unknown_order_ids == ()
         assert broker.cancelled_order_ids == (acknowledged.broker_order_id,)
-        assert database.scalar(
-            "SELECT count(*) FROM broker_order_attempts WHERE state = 'UNKNOWN'"
-        ) == 1
+        assert database.scalar("SELECT count(*) FROM broker_order_attempts WHERE state = 'UNKNOWN'") == 1
     finally:
         database.close()
 
@@ -189,9 +187,7 @@ def test_cancel_only_revalidates_account_and_broker_identity_before_write(tmp_pa
         database.close()
         database = Database.open(tmp_path / "identity.sqlite3")
         _, _, acknowledged_fact = _open_case(database)
-        broker = fake_recovery_broker(
-            orders=(replace(acknowledged_fact, client_order_id="different-order"),)
-        )
+        broker = fake_recovery_broker(orders=(replace(acknowledged_fact, client_order_id="different-order"),))
         _bind_account(database, broker.query_account().account_id_hash)
         result = _capability(database, broker).cancel_system_orders()
         assert result.denied_order_ids == (acknowledged_fact.broker_order_id,)
