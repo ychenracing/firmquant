@@ -680,6 +680,7 @@ def _seeded_account():
 
 
 def _runtime_repository(tmp_path: Path, *, clock=lambda: NOW):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     database = Database.open(tmp_path / "firmquant.sqlite3")
     state_path = tmp_path / "uquant-account.json"
     store = UquantAccountStateStore()
