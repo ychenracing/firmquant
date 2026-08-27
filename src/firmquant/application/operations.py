@@ -19,7 +19,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Never, Protocol, runtime_checkable
 
+from firmquant.broker.production_smoke import run_readonly_production_smoke
 from firmquant.broker.replay import RecordedReplayBroker
+from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
 from firmquant.build_identity import load_locked_source_identity
 from firmquant.config import Mode, PathSettings, Settings, load_settings
 from firmquant.domain.states import RuntimeState, RuntimeStatus
@@ -107,6 +109,7 @@ class OperatorCommand(StrEnum):
     BACKUP = "backup"
     VERIFY_BACKUP = "verify-backup"
     CANCEL_SYSTEM_ORDERS = "cancel-system-orders"
+    SMOKE_READONLY = "smoke-readonly"
 
 
 class OperatorCommandDenied(RuntimeError):
@@ -432,6 +435,7 @@ class LocalOperatorService:
             OperatorCommand.BACKUP: lambda: self._backup(request),
             OperatorCommand.VERIFY_BACKUP: lambda: self._verify_backup(request),
             OperatorCommand.CANCEL_SYSTEM_ORDERS: lambda: self._cancel_system_orders(),
+            OperatorCommand.SMOKE_READONLY: lambda: self._smoke_readonly(),
         }
         return handlers[request.command]()
 
@@ -587,6 +591,11 @@ class LocalOperatorService:
             repository_root=Path(__file__).resolve().parents[3],
             clock=self._clock,
             clock_drift_seconds=None,
+            safety_manifest_path=(
+                None
+                if settings.broker.safety_manifest_path is None
+                else self._resolved(settings.broker.safety_manifest_path)
+            ),
         )
         results = doctor.run()
         payload = {
@@ -1769,6 +1778,58 @@ class LocalOperatorService:
                 "schema_version": verification.schema_version,
                 "verified": True,
             },
+        )
+
+    def _smoke_readonly(self) -> OperatorResult:
+        settings = self._settings()
+        if settings.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            raise OperatorCommandDenied("MODE_NOT_PRODUCTION_XTQUANT")
+        if self._doctor_broker_provider is None:
+            raise OperatorCommandDenied("BROKER_CLIENT_UNAVAILABLE")
+        manifest_path = settings.broker.safety_manifest_path
+        if manifest_path is None:
+            raise OperatorCommandDenied("XTQUANT_SAFETY_MANIFEST_MISSING")
+        try:
+            manifest = XtQuantSafetyManifest.load(self._resolved(manifest_path))
+            identity = StrategyIdentity.locked()
+            identity.verify()
+            broker = self._doctor_broker_provider()
+            if broker is None:
+                raise OperatorCommandDenied("BROKER_CLIENT_UNAVAILABLE")
+        except OperatorCommandDenied:
+            raise
+        except Exception as error:
+            raise OperatorCommandDenied("READONLY_SMOKE_PREREQUISITES_UNAVAILABLE") from error
+        database_path = self._database_path(settings)
+        with WriterLease.acquire(
+            database_path,
+            owner="smoke-readonly",
+            clock=self._clock,
+        ) as writer:
+            connected_here = False
+            try:
+                health = broker.health()
+                if not health.connected:
+                    broker.connect()
+                    connected_here = True
+                receipt = run_readonly_production_smoke(
+                    broker=broker,
+                    database=writer.database,
+                    probe_symbol=manifest.probe_symbol,
+                    firmquant_commit=self._firmquant_commit(),
+                    uquant_commit=identity.uquant_commit,
+                    config_sha256=self._configuration_sha256(),
+                    safety_manifest_sha256=manifest.sha256,
+                    clock=self._clock,
+                )
+            finally:
+                if connected_here:
+                    broker.disconnect()
+        if receipt.real_order_calls != 0:
+            raise OperatorCommandDenied("READONLY_SMOKE_WRITE_CALL_DETECTED")
+        return OperatorResult(
+            message="生产只读 smoke 已完成并持久化证据，券商写调用为 0。",
+            payload={**receipt.payload(), "receipt_sha256": receipt.sha256},
         )
 
     def _cancel_system_orders(self) -> OperatorResult:

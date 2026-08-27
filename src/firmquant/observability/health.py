@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
@@ -19,12 +19,24 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from firmquant.broker.gateway import BrokerHealth
 from firmquant.broker.xtquant import XtQuantSdkDiagnosis, diagnose_xtquant_sdk
+from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
 from firmquant.build_identity import load_locked_source_identity
 from firmquant.config import BrokerAdapter, Mode, Settings
-from firmquant.domain.broker_facts import AccountType, BrokerAccountFact
+from firmquant.domain.broker_facts import (
+    AccountType,
+    BrokerAccountFact,
+    BrokerFillFact,
+    BrokerOrderFact,
+    BrokerPositionFact,
+    InstrumentFact,
+    MarketSessionStatus,
+    QuoteFact,
+)
+from firmquant.domain.values import Symbol
 from firmquant.persistence.database import Database
 from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
 from firmquant.persistence.writer_lease import writer_lock_available
+from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockValidationError
 from firmquant.security.secrets import SecretBytes, SecretProvider
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.universe import UniversePolicy
@@ -61,7 +73,7 @@ class DoctorConfigurationError(RuntimeError):
 
 
 class ReadOnlyDoctorBroker(Protocol):
-    """Narrow broker surface: a doctor can inspect facts but cannot reach writes."""
+    """Complete read authority surface; submit/cancel are deliberately absent."""
 
     def connect(self) -> None: ...
 
@@ -70,6 +82,18 @@ class ReadOnlyDoctorBroker(Protocol):
     def health(self) -> BrokerHealth: ...
 
     def query_account(self) -> BrokerAccountFact: ...
+
+    def query_positions(self) -> tuple[BrokerPositionFact, ...]: ...
+
+    def query_orders(self) -> tuple[BrokerOrderFact, ...]: ...
+
+    def query_fills(self) -> tuple[BrokerFillFact, ...]: ...
+
+    def query_instrument(self, symbol: Symbol) -> InstrumentFact: ...
+
+    def query_quote(self, symbol: Symbol) -> QuoteFact: ...
+
+    def query_market_status(self) -> MarketSessionStatus: ...
 
 
 def _canonical_details(
@@ -235,6 +259,7 @@ class Doctor:
         required_secret_names: tuple[str, ...] = (),
         data_manifest_path: Path | None = None,
         data_manifest_validator: ManifestValidator | None = None,
+        safety_manifest_path: Path | None = None,
         repository_root: Path | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         clock_drift_seconds: Decimal | None = None,
@@ -271,7 +296,13 @@ class Doctor:
         )
         manifest_validator = data_manifest_validator or _structural_manifest
         real_mode = settings.mode in {Mode.CANARY, Mode.LIVE}
+        production_mode = settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
         xtquant_required = settings.broker.adapter is BrokerAdapter.XTQUANT
+        safety_manifest: XtQuantSafetyManifest | None = None
+        if xtquant_required:
+            manifest_source = safety_manifest_path or settings.broker.safety_manifest_path
+            if manifest_source is not None:
+                safety_manifest = XtQuantSafetyManifest.load(Path(manifest_source))
 
         def python_dependencies() -> CheckEvidence:
             dependencies = ("firmquant", "uquant", "pydantic", "tzdata")
@@ -426,6 +457,41 @@ class Doctor:
             current = clock()
             if current.tzinfo is None or current.utcoffset() is None:
                 raise ValueError("doctor clock is not timezone-aware")
+            if production_mode:
+                if broker is None or safety_manifest is None:
+                    return _evidence(
+                        False,
+                        "CLOCK_DRIFT_UNVERIFIED",
+                        timezone=timezone.key,
+                        drift_verified=False,
+                    )
+                try:
+                    with _broker_read_session(broker):
+                        quote = broker.query_quote(safety_manifest.probe_symbol)
+                    receipt = ClockGuard(
+                        max_drift=timedelta(milliseconds=int(maximum_clock_drift_seconds * 1000))
+                    ).verify(
+                        ClockObservation(
+                            system_time=current,
+                            reference_time=quote.event_time,
+                            local_timezone=settings.timezone,
+                        )
+                    )
+                except ClockValidationError:
+                    return _evidence(
+                        False,
+                        "CLOCK_DRIFT_EXCEEDED",
+                        timezone=timezone.key,
+                        drift_verified=True,
+                    )
+                return _evidence(
+                    True,
+                    "TIMEZONE_CLOCK_VERIFIED",
+                    timezone=timezone.key,
+                    drift_verified=True,
+                    drift_milliseconds=receipt.drift_milliseconds,
+                    clock_receipt_sha256=receipt.sha256,
+                )
             if (
                 clock_drift_seconds is None
                 or not isinstance(clock_drift_seconds, Decimal)
@@ -453,7 +519,11 @@ class Doctor:
             passed = diagnosis.available or not xtquant_required
             return _evidence(
                 passed,
-                "BROKER_SDK_READY" if passed else "BROKER_SDK_UNAVAILABLE",
+                "BROKER_SDK_READY"
+                if passed
+                else "XTQUANT_SDK_UNAVAILABLE"
+                if xtquant_required
+                else "BROKER_SDK_UNAVAILABLE",
                 adapter=settings.broker.adapter.value,
                 required=xtquant_required,
                 available=diagnosis.available,
@@ -478,20 +548,58 @@ class Doctor:
         def readonly_account() -> CheckEvidence:
             if broker is None:
                 return _evidence(False, "READONLY_ACCOUNT_UNAVAILABLE", configured=False)
+            if production_mode and safety_manifest is None:
+                return _evidence(False, "XTQUANT_SAFETY_MANIFEST_UNAVAILABLE", configured=True)
+            probe = (
+                safety_manifest.probe_symbol
+                if safety_manifest is not None
+                else Symbol.parse("000001.SZ")
+            )
             with _broker_read_session(broker):
                 account = broker.query_account()
-                passed = (
-                    isinstance(account, BrokerAccountFact)
-                    and account.account_type is AccountType.CASH
-                    and account.available_cash.value >= 0
-                )
-                return _evidence(
-                    passed,
-                    "READONLY_ACCOUNT_VERIFIED" if passed else "READONLY_ACCOUNT_INVALID",
-                    configured=True,
-                    account_type=account.account_type.value,
-                    cash_nonnegative=account.available_cash.value >= 0,
-                )
+                positions = broker.query_positions()
+                orders = broker.query_orders()
+                fills = broker.query_fills()
+                market_status = broker.query_market_status()
+                instrument = broker.query_instrument(probe)
+                quote = broker.query_quote(probe)
+                health = broker.health()
+            alias_configured = settings.broker.account_alias is not None or not production_mode
+            manifest_verified = safety_manifest is not None or not production_mode
+            passed = (
+                isinstance(account, BrokerAccountFact)
+                and account.account_type is AccountType.CASH
+                and account.available_cash.value >= 0
+                and isinstance(positions, tuple)
+                and all(isinstance(item, BrokerPositionFact) for item in positions)
+                and isinstance(orders, tuple)
+                and all(isinstance(item, BrokerOrderFact) for item in orders)
+                and isinstance(fills, tuple)
+                and all(isinstance(item, BrokerFillFact) for item in fills)
+                and isinstance(market_status, MarketSessionStatus)
+                and isinstance(instrument, InstrumentFact)
+                and isinstance(quote, QuoteFact)
+                and alias_configured
+                and manifest_verified
+                and health.connected
+                and health.read_healthy
+            )
+            return _evidence(
+                passed,
+                "READONLY_ACCOUNT_VERIFIED" if passed else "READONLY_ACCOUNT_INVALID",
+                configured=True,
+                account_type=account.account_type.value,
+                cash_nonnegative=account.available_cash.value >= 0,
+                position_count=len(positions),
+                order_count=len(orders),
+                fill_count=len(fills),
+                market_status=market_status.value,
+                instrument_symbol=instrument.symbol.canonical,
+                quote_symbol=quote.symbol.canonical,
+                account_alias_configured=alias_configured,
+                safety_manifest_verified=manifest_verified,
+                real_order_calls=0,
+            )
 
         def compliance() -> CheckEvidence:
             confirmed = (
