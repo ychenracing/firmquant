@@ -537,7 +537,10 @@ def test_backup_input_and_config_identity_guards(tmp_path: Path) -> None:
     with pytest.raises(backup.BackupError, match="cannot be validated"):
         backup._validated_config_bytes(invalid)
 
-    mismatch = _backup_inputs(tmp_path / "mismatch", settings=Settings(mode=Mode.SHADOW))
+    mismatch = _backup_inputs(
+        tmp_path / "mismatch",
+        settings=Settings(paths={"state_directory": Path("different-state")}),
+    )
     with pytest.raises(backup.BackupError, match="validated settings changed"):
         backup._validated_config_bytes(mismatch)
 
