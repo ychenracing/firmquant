@@ -4,14 +4,13 @@ import hashlib
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from firmquant.persistence.account_authority import AccountBinding, AccountBindingRepository
 from firmquant.persistence.database import Database
-from firmquant.persistence.repositories import canonical_json
 from firmquant.persistence.recovery import RecoveryContradiction, UquantAccountStateStore
+from firmquant.persistence.repositories import canonical_json
 from firmquant.reconciliation.account_coordinator import (
     AccountReconciliationBlocked,
     AccountReconciliationCoordinator,
