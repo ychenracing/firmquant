@@ -25,7 +25,7 @@ jobs:
         with:
           version: '0.11.33'
       - run: uv sync --frozen --extra dev
-      - name: Repair mode-scoped doctor and retired replacement contracts
+      - name: Repair mode-scoped doctor and clock-authority test facts
         shell: bash
         run: |
           python - <<'PY'
@@ -52,6 +52,42 @@ jobs:
               raise SystemExit(f'heartbeat insert shape changed: {text.count(marker)}')
           heartbeat_test.write_text(text.replace(marker, replacement, 1), encoding='utf-8')
 
+          capability_test = Path('tests/unit/risk/test_capability.py')
+          text = capability_test.read_text(encoding='utf-8')
+          import_anchor = 'from firmquant.risk.kill_switch import KillSwitch\n'
+          import_replacement = (
+              import_anchor
+              + 'from firmquant.scheduling.clock import ClockGuard, ClockObservation\n'
+          )
+          if text.count(import_anchor) != 1:
+              raise SystemExit('capability clock import anchor changed')
+          text = text.replace(import_anchor, import_replacement, 1)
+          context_tail = '''        cash_and_positions_safe=True,\n        frequency_within_limits=True,\n    )\n'''
+          context_replacement = '''        cash_and_positions_safe=True,\n        frequency_within_limits=True,\n        clock_receipt=ClockGuard(max_drift=timedelta(seconds=2)).verify(\n            ClockObservation(\n                system_time=NOW,\n                reference_time=NOW,\n                local_timezone="Asia/Shanghai",\n            )\n        ),\n    )\n'''
+          if text.count(context_tail) != 1:
+              raise SystemExit(f'capability healthy context tail changed: {text.count(context_tail)}')
+          capability_test.write_text(text.replace(context_tail, context_replacement, 1), encoding='utf-8')
+
+          daemon_test = Path('tests/unit/application/test_production_daemon.py')
+          text = daemon_test.read_text(encoding='utf-8')
+          init_anchor = '        self.value = datetime(2026, 8, 25, 1, 30, tzinfo=UTC)\n'
+          if text.count(init_anchor) != 1:
+              raise SystemExit('daemon fake clock init anchor changed')
+          text = text.replace(init_anchor, init_anchor + '        self.elapsed = 0.0\n', 1)
+          sleep_old = '''    def sleep(self, seconds: float) -> None:\n        self.value += timedelta(seconds=seconds)\n'''
+          sleep_new = '''    def sleep(self, seconds: float) -> None:\n        self.value += timedelta(seconds=seconds)\n        self.elapsed += seconds\n\n    def monotonic(self) -> float:\n        return self.elapsed\n'''
+          if text.count(sleep_old) != 1:
+              raise SystemExit('daemon fake clock sleep block changed')
+          text = text.replace(sleep_old, sleep_new, 1)
+          daemon_anchor = '            clock=clock,\n            sleep=clock.sleep,\n'
+          if text.count(daemon_anchor) != 3:
+              raise SystemExit(f'daemon construction clock anchor changed: {text.count(daemon_anchor)}')
+          text = text.replace(
+              daemon_anchor,
+              '            clock=clock,\n            monotonic_clock=clock.monotonic,\n            sleep=clock.sleep,\n',
+          )
+          daemon_test.write_text(text, encoding='utf-8')
+
           path = Path('src/firmquant/observability/health.py')
           text = path.read_text(encoding='utf-8')
           old = '''        def readonly_account() -> CheckEvidence:\n            if broker is None:\n                return _evidence(False, "READONLY_ACCOUNT_UNAVAILABLE", configured=False)\n            if production_mode and safety_manifest is None:\n                return _evidence(False, "XTQUANT_SAFETY_MANIFEST_UNAVAILABLE", configured=True)\n            probe = safety_manifest.probe_symbol if safety_manifest is not None else Symbol.parse("000001.SZ")\n            with _broker_read_session(broker):\n                account = broker.query_account()\n                positions = broker.query_positions()\n                orders = broker.query_orders()\n                fills = broker.query_fills()\n                market_status = broker.query_market_status()\n                instrument = broker.query_instrument(probe)\n                quote = broker.query_quote(probe)\n                health = broker.health()\n            alias_configured = settings.broker.account_alias is not None or not production_mode\n            manifest_verified = safety_manifest is not None or not production_mode\n            passed = (\n                isinstance(account, BrokerAccountFact)\n                and account.account_type is AccountType.CASH\n                and account.available_cash.value >= 0\n                and isinstance(positions, tuple)\n                and all(isinstance(item, BrokerPositionFact) for item in positions)\n                and isinstance(orders, tuple)\n                and all(isinstance(item, BrokerOrderFact) for item in orders)\n                and isinstance(fills, tuple)\n                and all(isinstance(item, BrokerFillFact) for item in fills)\n                and isinstance(market_status, MarketSessionStatus)\n                and isinstance(instrument, InstrumentFact)\n                and isinstance(quote, QuoteFact)\n                and alias_configured\n                and manifest_verified\n                and health.connected\n                and health.read_healthy\n            )\n            return _evidence(\n                passed,\n                "READONLY_ACCOUNT_VERIFIED" if passed else "READONLY_ACCOUNT_INVALID",\n                configured=True,\n                account_type=account.account_type.value,\n                cash_nonnegative=account.available_cash.value >= 0,\n                position_count=len(positions),\n                order_count=len(orders),\n                fill_count=len(fills),\n                market_status=market_status.value,\n                instrument_symbol=instrument.symbol.canonical,\n                quote_symbol=quote.symbol.canonical,\n                account_alias_configured=alias_configured,\n                safety_manifest_verified=manifest_verified,\n                real_order_calls=0,\n            )\n'''
@@ -64,11 +100,15 @@ jobs:
             src/firmquant/observability/health.py \
             tests/fixtures/risk_cases.py \
             tests/unit/risk/test_gate.py \
+            tests/unit/risk/test_capability.py \
+            tests/unit/application/test_production_daemon.py \
             tests/unit/application/test_runtime_health_status.py
           uv run ruff format \
             src/firmquant/observability/health.py \
             tests/fixtures/risk_cases.py \
             tests/unit/risk/test_gate.py \
+            tests/unit/risk/test_capability.py \
+            tests/unit/application/test_production_daemon.py \
             tests/unit/application/test_runtime_health_status.py
           uv run mypy src scripts
           uv run pytest \
@@ -91,7 +131,9 @@ jobs:
           git add src/firmquant/observability/health.py \
                   tests/fixtures/risk_cases.py \
                   tests/unit/risk/test_gate.py \
+                  tests/unit/risk/test_capability.py \
+                  tests/unit/application/test_production_daemon.py \
                   tests/unit/application/test_runtime_health_status.py \
                   .github/workflows/runtime-targeted-repair.yml
-          git commit -m 'Repair runtime doctor and retired risk contracts'
+          git commit -m 'Repair runtime doctor and clock authority contracts'
           git push origin HEAD:codex/runtime-time-health
