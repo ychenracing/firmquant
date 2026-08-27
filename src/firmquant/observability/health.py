@@ -548,9 +548,24 @@ class Doctor:
         def readonly_account() -> CheckEvidence:
             if broker is None:
                 return _evidence(False, "READONLY_ACCOUNT_UNAVAILABLE", configured=False)
-            if production_mode and safety_manifest is None:
+            if not production_mode:
+                with _broker_read_session(broker):
+                    account = broker.query_account()
+                passed = (
+                    isinstance(account, BrokerAccountFact)
+                    and account.account_type is AccountType.CASH
+                    and account.available_cash.value >= 0
+                )
+                return _evidence(
+                    passed,
+                    "READONLY_ACCOUNT_VERIFIED" if passed else "READONLY_ACCOUNT_INVALID",
+                    configured=True,
+                    account_type=account.account_type.value,
+                    cash_nonnegative=account.available_cash.value >= 0,
+                )
+            if safety_manifest is None:
                 return _evidence(False, "XTQUANT_SAFETY_MANIFEST_UNAVAILABLE", configured=True)
-            probe = safety_manifest.probe_symbol if safety_manifest is not None else Symbol.parse("000001.SZ")
+            probe = safety_manifest.probe_symbol
             with _broker_read_session(broker):
                 account = broker.query_account()
                 positions = broker.query_positions()
@@ -560,8 +575,7 @@ class Doctor:
                 instrument = broker.query_instrument(probe)
                 quote = broker.query_quote(probe)
                 health = broker.health()
-            alias_configured = settings.broker.account_alias is not None or not production_mode
-            manifest_verified = safety_manifest is not None or not production_mode
+            alias_configured = settings.broker.account_alias is not None
             passed = (
                 isinstance(account, BrokerAccountFact)
                 and account.account_type is AccountType.CASH
@@ -576,7 +590,6 @@ class Doctor:
                 and isinstance(instrument, InstrumentFact)
                 and isinstance(quote, QuoteFact)
                 and alias_configured
-                and manifest_verified
                 and health.connected
                 and health.read_healthy
             )
@@ -593,7 +606,7 @@ class Doctor:
                 instrument_symbol=instrument.symbol.canonical,
                 quote_symbol=quote.symbol.canonical,
                 account_alias_configured=alias_configured,
-                safety_manifest_verified=manifest_verified,
+                safety_manifest_verified=True,
                 real_order_calls=0,
             )
 

@@ -43,9 +43,10 @@ def _ready_runtime_and_heartbeat(config: Path, *, observed_age: timedelta | None
         if observed_age is None:
             return
         observed_at = NOW - observed_age
-        writer.database.write(
-            """
-            INSERT INTO production_heartbeat(
+        with writer.database.transaction():
+            writer.database.write(
+                """
+                INSERT INTO production_heartbeat(
                 singleton_id, mode, runtime_state, observed_at, host_hash, process_id,
                 writer_generation, broker_connected, broker_read_healthy,
                 broker_write_healthy, pending_events, last_broker_event, last_quote,
@@ -53,21 +54,21 @@ def _ready_runtime_and_heartbeat(config: Path, *, observed_age: timedelta | None
                 control_request_state, processed_events, decisions, executions, eod
             ) VALUES (1, ?, ?, ?, ?, ?, ?, 1, 1, 1, 0, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0)
             """,
-            (
-                Mode.CANARY.value,
-                RuntimeState.READY.value,
-                observed_at.isoformat(),
-                "h" * 64,
-                12345,
-                writer.generation,
-                (NOW - timedelta(seconds=10)).isoformat(),
-                (NOW - timedelta(seconds=9)).isoformat(),
-                (NOW - timedelta(seconds=8)).isoformat(),
-                (NOW - timedelta(seconds=7)).isoformat(),
-                (NOW - timedelta(seconds=6)).isoformat(),
-                "IDLE",
-            ),
-        )
+                (
+                    Mode.CANARY.value,
+                    RuntimeState.READY.value,
+                    observed_at.isoformat(),
+                    "h" * 64,
+                    12345,
+                    writer.generation,
+                    (NOW - timedelta(seconds=10)).isoformat(),
+                    (NOW - timedelta(seconds=9)).isoformat(),
+                    (NOW - timedelta(seconds=8)).isoformat(),
+                    (NOW - timedelta(seconds=7)).isoformat(),
+                    (NOW - timedelta(seconds=6)).isoformat(),
+                    "IDLE",
+                ),
+            )
 
 
 def _configured_service(tmp_path: Path):

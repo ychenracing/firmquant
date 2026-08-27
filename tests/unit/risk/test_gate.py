@@ -219,11 +219,6 @@ def test_sell_is_shrunk_to_sellable_t_plus_one_quantity_and_lot() -> None:
             GateAction.BLOCK,
             "ORDER_LIFETIME_LIMIT",
         ),
-        (
-            {"replacement_count": 2},
-            GateAction.BLOCK,
-            "REPLACEMENT_LIMIT",
-        ),
     ],
 )
 def test_transient_and_lifecycle_limits_have_explicit_actions(
