@@ -148,9 +148,7 @@ def test_complete_backup_restores_deployment_identity_and_contains_no_secret_mat
         "manifest.json",
     }
     text_members = b"\n".join(
-        path.read_bytes()
-        for path in receipt.bundle_path.iterdir()
-        if path.suffix in {".json", ".toml"}
+        path.read_bytes() for path in receipt.bundle_path.iterdir() if path.suffix in {".json", ".toml"}
     )
     assert b"ARM_MAC_KEY" not in text_members
     assert b"WEBHOOK_TOKEN" not in text_members
