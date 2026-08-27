@@ -1,0 +1,42 @@
+name: Runtime Time Health Patch
+
+on:
+  push:
+    branches:
+      - codex/runtime-time-health
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.repository == 'ychenracing/firmquant'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/runtime-time-health
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply exact runtime safety transformations
+        run: python scripts/runtime_time_health_patch.py
+      - name: Commit transformed files when needed
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No patch changes required.'
+            exit 0
+          fi
+          git config user.name 'firmquant-runtime-safety-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/firmquant/persistence/schema.py \
+                  src/firmquant/config.py \
+                  src/firmquant/risk/runtime.py \
+                  src/firmquant/risk/gate.py \
+                  src/firmquant/application/composition.py \
+                  src/firmquant/application/operations.py
+          git commit -m 'Wire heartbeat status and fail-closed risk facts'
+          git push origin HEAD:codex/runtime-time-health
