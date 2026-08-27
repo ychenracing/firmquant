@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -103,6 +104,9 @@ def _check_cli_help() -> list[str]:
 
 
 def main() -> int:
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="backslashreplace")
     failures = [
         *_check_files_and_links(),
         *_check_readme_contract(),
