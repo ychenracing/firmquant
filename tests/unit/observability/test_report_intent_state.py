@@ -55,7 +55,8 @@ def test_report_distinguishes_missing_decision_from_valid_no_intent(tmp_path: Pa
         assert missing.intent_state == "MISSING_DECISION"
 
         no_intent = decision_snapshot(include_sell=False, include_buy=False)
-        DecisionSnapshotRepository(database).append(no_intent)
+        with database.transaction():
+            DecisionSnapshotRepository(database).append(no_intent)
         valid_zero = builder.build(EXECUTION_SESSION)
         assert valid_zero.decision_id == no_intent.decision_id
         assert valid_zero.intent_state == "NO_INTENT"
