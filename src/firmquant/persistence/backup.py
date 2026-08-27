@@ -482,7 +482,7 @@ def _complete_members(
         for path in temporary_bundle.iterdir()
         if path.is_file() and path.name != "manifest.json"
     }
-    deployment = {
+    deployment: dict[str, object] = {
         "schema": "firmquant.deployment-record.v1",
         "firmquant_commit": inputs.firmquant_commit,
         "uquant_commit": inputs.uquant_commit,
@@ -534,6 +534,8 @@ def backup_state(
     deployment: dict[str, object] | None = None
     complete_member_hashes: dict[str, str] | None = None
     if complete_inputs is not None:
+        if account_state_path is None:
+            raise BackupError("complete backup requires uquant AccountState")
         complete_member_hashes, deployment = _complete_members(
             temporary_bundle,
             account_state_path=Path(account_state_path),

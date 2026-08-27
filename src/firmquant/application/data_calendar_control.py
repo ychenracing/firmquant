@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 from collections.abc import Callable, Mapping
@@ -12,7 +11,7 @@ from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from firmquant.config import Settings, load_settings
+from firmquant.config import Mode, Settings, load_settings
 from firmquant.market_data.calendar import CalendarCoverageState
 from firmquant.market_data.calendar_manifest import (
     load_trading_calendar_manifest,
@@ -354,6 +353,19 @@ class DataCalendarController:
         try:
             calendar = load_trading_calendar_manifest(self._calendar_path(settings))
         except Exception as error:
+            if settings.mode in {Mode.REPLAY, Mode.PAPER}:
+                return {
+                    "state": "NOT_REQUIRED",
+                    "as_of": self._now().astimezone(ZoneInfo(settings.timezone)).date().isoformat(),
+                    "covered_from": None,
+                    "covered_through": None,
+                    "remaining_days": None,
+                    "calendar_sha256": None,
+                    "source": None,
+                    "source_sha256": None,
+                    "warning_threshold_days": _CALENDAR_WARNING_DAYS,
+                    "blocker": None,
+                }
             raise DataCalendarControlError("CALENDAR_MANIFEST_INVALID") from error
         as_of = self._now().astimezone(ZoneInfo(settings.timezone)).date()
         status = calendar.coverage_status(as_of, warning_days=_CALENDAR_WARNING_DAYS)

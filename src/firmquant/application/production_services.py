@@ -1344,7 +1344,11 @@ class ProductionServiceHooks:
 
         report_cp = self._close.load(session, CloseStep.REPORT_PUBLISHED)
         if report_cp is None:
-            report = DatabaseDailyReportBuilder(self._database, clock=self._clock).build(session)
+            report = DatabaseDailyReportBuilder(
+                self._database,
+                clock=self._clock,
+                calendar=self._calendar,
+            ).build(session)
             if report.decision_id != decision_id:
                 raise ProductionServicesUnavailable("REPORT_DECISION_IDENTITY_MISMATCH")
             rendered = DailyReportRenderer().write(report, self._settings.paths.report_directory)
