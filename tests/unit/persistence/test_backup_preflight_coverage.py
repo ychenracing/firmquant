@@ -42,6 +42,7 @@ def _inputs(tmp_path: Path) -> backup.BackupBundleInputs:
 def test_backup_bundle_inputs_reject_noncanonical_identity_and_member_types(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     cases: tuple[tuple[dict[str, object], type[Exception], str], ...] = (
+        ({"settings": object()}, TypeError, "validated Settings"),
         ({"config_sha256": "g" * 64}, ValueError, "config SHA-256"),
         ({"account_sha256": "z" * 64}, ValueError, "account SHA-256"),
         ({"firmquant_commit": "a" * 39}, ValueError, "firmquant commit"),
@@ -90,6 +91,44 @@ def test_verify_backup_rejects_external_digest_and_unknown_schema(tmp_path: Path
         backup.verify_backup(bundle, expected_manifest_sha256="0" * 64)
     with pytest.raises(backup.BackupVerificationError, match="unsupported backup manifest"):
         backup.verify_backup(bundle, expected_manifest_sha256=observed)
+
+
+def test_legacy_bundle_manifest_contract_rejects_early_shape_errors(tmp_path: Path) -> None:
+    with pytest.raises(backup.BackupVerificationError, match="manifest fields"):
+        backup._verify_legacy_bundle(tmp_path, {}, manifest_sha256="0" * 64)
+
+    root = {
+        "schema_version": 1,
+        "backup_id": "backup-test",
+        "created_at": NOW.isoformat(),
+        "database": {},
+        "account_state": None,
+        "operational_schema_version": 1,
+        "audit": {"count": 0, "head_hash": "0" * 64},
+    }
+    with pytest.raises(backup.BackupVerificationError, match="database manifest fields"):
+        backup._verify_legacy_bundle(tmp_path, root, manifest_sha256="0" * 64)
+
+    root["database"] = {"filename": "wrong.sqlite3", "sha256": "0" * 64}
+    with pytest.raises(backup.BackupVerificationError, match="filename is not canonical"):
+        backup._verify_legacy_bundle(tmp_path, root, manifest_sha256="0" * 64)
+
+
+def test_complete_bundle_manifest_contract_rejects_early_shape_errors(tmp_path: Path) -> None:
+    with pytest.raises(backup.BackupVerificationError, match="manifest fields"):
+        backup._verify_complete_bundle(tmp_path, {}, manifest_sha256="0" * 64)
+
+    root = {
+        "schema_version": 2,
+        "backup_id": "backup-test",
+        "created_at": NOW.isoformat(),
+        "members": {},
+        "operational_schema_version": 1,
+        "audit": {"count": 0, "head_hash": "0" * 64},
+        "deployment": {},
+    }
+    with pytest.raises(backup.BackupVerificationError, match="member set"):
+        backup._verify_complete_bundle(tmp_path, root, manifest_sha256="0" * 64)
 
 
 def test_backup_state_preflight_rejects_invalid_destination_time_account_and_overwrite(
