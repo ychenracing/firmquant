@@ -67,7 +67,7 @@ class DataCalendarControlError(RuntimeError):
 
 
 class ConfirmationReader(Protocol):
-    def __call__(self, prompt: str) -> str: ...
+    def __call__(self, prompt: str, /) -> str: ...
 
 
 def _sha256(path: Path) -> str:
@@ -151,17 +151,15 @@ class DataCalendarController:
             raise DataCalendarControlError("RUNTIME_MUST_BE_DISARMED")
         if _count(database, "SELECT count(*) FROM arm_leases WHERE revoked_at IS NULL"):
             raise DataCalendarControlError("ACTIVE_ARM_LEASE_PRESENT")
-        broker_placeholders = ",".join("?" for _ in _ACTIVE_BROKER_ORDER_STATES)
         if _count(
             database,
-            f"SELECT count(*) FROM broker_orders WHERE status IN ({broker_placeholders})",
+            "SELECT count(*) FROM broker_orders WHERE status IN (?, ?, ?, ?)",
             _ACTIVE_BROKER_ORDER_STATES,
         ):
             raise DataCalendarControlError("ACTIVE_ORDER_PRESENT")
-        execution_placeholders = ",".join("?" for _ in _ACTIVE_EXECUTION_STATES)
         if _count(
             database,
-            f"SELECT count(*) FROM execution_intents WHERE state IN ({execution_placeholders})",
+            "SELECT count(*) FROM execution_intents WHERE state IN (?, ?, ?, ?)",
             _ACTIVE_EXECUTION_STATES,
         ):
             raise DataCalendarControlError("ACTIVE_ORDER_PRESENT")
