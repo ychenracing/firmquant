@@ -68,7 +68,7 @@ jobs:
           )
           if _runtime_text.count(_old) != 2:
               raise RuntimeError("SHADOW/CANARY blocker construction must have exactly two matches")
-          RUNTIME.write_text(_runtime_text.replace(_old, _new), encoding="utf-8")
+          RUNTIME.write_text(_runtime_text.replace(_old, _new, 1), encoding="utf-8")
           '''
           script.write_text(text.replace(marker, replacement, 1), encoding='utf-8')
           PY
