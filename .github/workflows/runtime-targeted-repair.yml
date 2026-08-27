@@ -86,6 +86,12 @@ jobs:
               daemon_anchor,
               '            clock=clock,\n            monotonic_clock=clock.monotonic,\n            sleep=clock.sleep,\n',
           )
+          heartbeat_assertion = '    assert hooks.heartbeats == 3\n'
+          if text.count(heartbeat_assertion) != 1:
+              raise SystemExit(
+                  f'daemon heartbeat assertion changed: {text.count(heartbeat_assertion)}'
+              )
+          text = text.replace(heartbeat_assertion, '    assert hooks.heartbeats == 1\n', 1)
           daemon_test.write_text(text, encoding='utf-8')
 
           path = Path('src/firmquant/observability/health.py')
