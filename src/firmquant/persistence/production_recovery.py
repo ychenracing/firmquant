@@ -48,9 +48,7 @@ class ProductionRecoveryService(RecoveryService):
         )
         self._orders = MonotonicExecutionLedgerRepository(database)
 
-    def _durable_submit_command(
-        self, attempt: BrokerAttempt
-    ) -> tuple[BrokerOrderCommand, datetime] | None:
+    def _durable_submit_command(self, attempt: BrokerAttempt) -> tuple[BrokerOrderCommand, datetime] | None:
         row = self._database.query_one(
             """
             SELECT oc.payload_json, boa.started_at
@@ -91,9 +89,7 @@ class ProductionRecoveryService(RecoveryService):
         now: datetime,
     ) -> OrderRecoveryReceipt | None:
         gateway = self._gateway
-        if attempt.command_kind != "SUBMIT" or not isinstance(
-            gateway, BrokerOrderAbsenceVerifier
-        ):
+        if attempt.command_kind != "SUBMIT" or not isinstance(gateway, BrokerOrderAbsenceVerifier):
             return None
         durable = self._durable_submit_command(attempt)
         if durable is None:
@@ -150,9 +146,7 @@ class ProductionRecoveryService(RecoveryService):
                 unresolved.append(attempt)
             else:
                 receipts.append(receipt)
-        receipts.extend(
-            super()._mark_attempts_unknown(tuple(unresolved), now=now, reason=reason)
-        )
+        receipts.extend(super()._mark_attempts_unknown(tuple(unresolved), now=now, reason=reason))
         return tuple(receipts)
 
 
