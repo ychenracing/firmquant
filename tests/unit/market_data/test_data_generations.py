@@ -58,7 +58,7 @@ def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: 
     )
 
     assert candidate.changed_symbols == ("sz300308",)
-    assert candidate.changed_sessions == (date(2026, 8, 24),)
+    assert candidate.changed_sessions == (date(2026, 8, 24), date(2026, 8, 25))
     assert candidate.first_difference_session == date(2026, 8, 24)
     assert candidate.old_digest != candidate.new_digest
     assert (active.path / "sz300308.csv").read_bytes() == before
