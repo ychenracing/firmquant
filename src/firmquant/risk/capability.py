@@ -28,6 +28,7 @@ from firmquant.domain.broker_facts import (
 from firmquant.domain.errors import DomainTypeError, DomainValidationError
 from firmquant.domain.states import RuntimeState
 from firmquant.domain.values import Symbol
+from firmquant.scheduling.clock import ClockReceipt
 
 from .arm import ArmBinding, ArmLease, ArmLeaseDenied, ArmService
 from .gate import GateAction, GateDecision
@@ -79,6 +80,7 @@ class WriteAuthorizationContext:
     command_within_uquant_intent: bool
     cash_and_positions_safe: bool
     frequency_within_limits: bool
+    clock_receipt: ClockReceipt | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.settings, Settings):
@@ -114,6 +116,8 @@ class WriteAuthorizationContext:
                 raise DomainValidationError(f"{count_label} must be a nonnegative integer")
         if self.gate_decision is not None and not isinstance(self.gate_decision, GateDecision):
             raise DomainTypeError("write context gate decision must be GateDecision or null")
+        if self.clock_receipt is not None and not isinstance(self.clock_receipt, ClockReceipt):
+            raise DomainTypeError("write context clock receipt must be ClockReceipt or null")
         boolean_values = (
             self.startup_reconciliation_passed,
             self.session_valid,
@@ -196,6 +200,18 @@ class _Authorizer:
             reasons.append("BROKER_HEALTH_STALE")
         if not context.startup_reconciliation_passed:
             reasons.append("STARTUP_RECONCILIATION_REQUIRED")
+        if operation in {WriteOperation.SUBMIT, WriteOperation.CANCEL}:
+            receipt = context.clock_receipt
+            if receipt is None:
+                reasons.append("CLOCK_DRIFT_UNVERIFIED")
+            else:
+                maximum_drift_ms = context.settings.execution.max_clock_drift_seconds * 1000
+                if receipt.drift_milliseconds > maximum_drift_ms:
+                    reasons.append("CLOCK_DRIFT_LIMIT")
+                if receipt.system_time > context.now:
+                    reasons.append("CLOCK_RECEIPT_TIME_IN_FUTURE")
+                elif context.now - receipt.system_time > context.max_quote_age:
+                    reasons.append("CLOCK_RECEIPT_STALE")
         self._freshness_reasons(
             reasons,
             observed=context.broker_snapshot_received_at,

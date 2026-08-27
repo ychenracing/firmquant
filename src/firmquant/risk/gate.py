@@ -251,6 +251,10 @@ class ExecutionRiskContext:
             if optional_value is not None and not isinstance(optional_value, bool):
                 raise DomainTypeError(f"risk {optional_label} must be bool or null")
         for optional_label, optional_value in (
+        ):
+            if optional_value is not None and not isinstance(optional_value, bool):
+                raise DomainTypeError(f"risk {optional_label} must be bool or null")
+        for optional_label, optional_value in (
             ("unexplained position change", self.unexplained_position_change),
             ("corporate action suspected", self.corporate_action_suspected),
         ):

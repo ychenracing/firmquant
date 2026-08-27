@@ -247,7 +247,7 @@ class ProductionDaemon(ProductionRuntime):
             renew_interval=self._renew_interval,
         )
         self._clock_monitor = RuntimeClockMonitor(
-            max_observation_gap=timedelta(minutes=15),
+            max_observation_gap=timedelta(seconds=30),
             max_wall_monotonic_divergence=timedelta(seconds=3),
         )
         if isinstance(max_events_per_cycle, bool) or not isinstance(max_events_per_cycle, int):
