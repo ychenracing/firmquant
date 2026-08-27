@@ -1,0 +1,33 @@
+name: tmp-format-account-finalization
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Apply exact formatting patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/firmquant/persistence/account_authority.py')
+          text = path.read_text(encoding='utf-8')
+          old = '    apply_migrations(database)\n\n@dataclass(frozen=True, slots=True)'
+          new = '    apply_migrations(database)\n\n\n@dataclass(frozen=True, slots=True)'
+          if text.count(old) != 1:
+              raise SystemExit('expected formatter anchor exactly once')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+          git rm .github/workflows/tmp-format-account-finalization.yml
+          git config user.name firmquant-agent
+          git config user.email firmquant-agent@users.noreply.github.com
+          git add src/firmquant/persistence/account_authority.py
+          git commit -m "style: format account authority migration boundary"
+          git push origin HEAD:codex/account-authority-reconciliation
