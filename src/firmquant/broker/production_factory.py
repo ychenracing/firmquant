@@ -9,10 +9,20 @@ from pathlib import Path
 from typing import Protocol
 
 from firmquant.config import BrokerAdapter, Mode, Settings
+from firmquant.domain.broker_facts import (
+    BrokerAccountFact,
+    BrokerFillFact,
+    BrokerOrderFact,
+    BrokerPositionFact,
+    InstrumentFact,
+    MarketSessionStatus,
+    QuoteFact,
+)
+from firmquant.domain.values import Symbol
 from firmquant.persistence.database import Database
 
 from .economic_identity import EconomicIdentityBroker
-from .gateway import BrokerGateway
+from .gateway import BrokerGateway, BrokerHealth
 from .xtquant import BrokerDependencyMissing
 from .xtquant_production import ProductionXtQuantBroker
 from .xtquant_safety import ManifestXtQuantSafetyProvider, XtQuantSafetyManifest
@@ -40,19 +50,14 @@ def _resolved_directory(path: Path, *, label: str) -> Path:
         raise ProductionBrokerConfigurationError(f"{label} cannot be resolved") from error
 
 
-def build_production_xtquant_gateway(
+def _build_transport(
     *,
     settings: Settings,
-    database: Database,
     clock: Callable[[], datetime],
-    importer: ModuleImporter = _default_importer,
-) -> BrokerGateway:
-    """Construct the only production XtQuant gateway with stable economic identity."""
-
+    importer: ModuleImporter,
+) -> ProductionXtQuantBroker:
     if not isinstance(settings, Settings):
         raise TypeError("production broker settings must be Settings")
-    if not isinstance(database, Database):
-        raise TypeError("production broker database must be Database")
     if not callable(clock) or not callable(importer):
         raise TypeError("production broker clock/importer must be callable")
     if settings.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
@@ -70,7 +75,7 @@ def build_production_xtquant_gateway(
         xtdata = importer("xtquant.xtdata")
         xtconstant = importer("xtquant.xtconstant")
     except (ImportError, ModuleNotFoundError, KeyError) as error:
-        raise BrokerDependencyMissing("official XtQuant SDK modules are unavailable") from error
+        raise BrokerDependencyMissing("XTQUANT_SDK_UNAVAILABLE") from error
     try:
         manifest = XtQuantSafetyManifest.load(manifest_path)
     except (OSError, ValueError) as error:
@@ -81,7 +86,7 @@ def build_production_xtquant_gateway(
         manifest=manifest,
         clock=clock,
     )
-    transport = ProductionXtQuantBroker.load_sdk(
+    return ProductionXtQuantBroker.load_sdk(
         userdata_path=userdata,
         session_id=session_id,
         account_id=account_id,
@@ -89,10 +94,80 @@ def build_production_xtquant_gateway(
         importer=importer,
         safety_facts=safety,
     )
+
+
+class ReadOnlyXtQuantGateway:
+    """Diagnostic XtQuant facade whose public type exposes no submit/cancel capability."""
+
+    __slots__ = ("_transport",)
+
+    def __init__(self, transport: ProductionXtQuantBroker) -> None:
+        if not isinstance(transport, ProductionXtQuantBroker):
+            raise TypeError("read-only XtQuant gateway requires official production transport")
+        self._transport = transport
+
+    def connect(self) -> None:
+        self._transport.connect()
+
+    def disconnect(self) -> None:
+        self._transport.disconnect()
+
+    def health(self) -> BrokerHealth:
+        return self._transport.health()
+
+    def query_account(self) -> BrokerAccountFact:
+        return self._transport.query_account()
+
+    def query_positions(self) -> tuple[BrokerPositionFact, ...]:
+        return self._transport.query_positions()
+
+    def query_orders(self) -> tuple[BrokerOrderFact, ...]:
+        return self._transport.query_orders()
+
+    def query_fills(self) -> tuple[BrokerFillFact, ...]:
+        return self._transport.query_fills()
+
+    def query_instrument(self, symbol: Symbol) -> InstrumentFact:
+        return self._transport.query_instrument(symbol)
+
+    def query_quote(self, symbol: Symbol) -> QuoteFact:
+        return self._transport.query_quote(symbol)
+
+    def query_market_status(self) -> MarketSessionStatus:
+        return self._transport.query_market_status()
+
+
+def build_readonly_xtquant_gateway(
+    *,
+    settings: Settings,
+    clock: Callable[[], datetime],
+    importer: ModuleImporter = _default_importer,
+) -> ReadOnlyXtQuantGateway:
+    """Build a fresh XtQuant read facade without a BrokerGateway/write interface."""
+
+    return ReadOnlyXtQuantGateway(
+        _build_transport(settings=settings, clock=clock, importer=importer)
+    )
+
+
+def build_production_xtquant_gateway(
+    *,
+    settings: Settings,
+    database: Database,
+    clock: Callable[[], datetime],
+    importer: ModuleImporter = _default_importer,
+) -> BrokerGateway:
+    """Construct the only production XtQuant gateway with stable economic identity."""
+
+    if not isinstance(database, Database):
+        raise TypeError("production broker database must be Database")
+    transport = _build_transport(settings=settings, clock=clock, importer=importer)
     return EconomicIdentityBroker(gateway=transport, database=database)
 
 
 __all__ = (
     "ProductionBrokerConfigurationError",
+    "ReadOnlyXtQuantGateway",
     "build_production_xtquant_gateway",
+    "build_readonly_xtquant_gateway",
 )
