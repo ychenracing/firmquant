@@ -94,10 +94,7 @@ def test_operator_can_inspect_verify_and_explicitly_promote_rewrite_candidate(
     database = Database.open_read_only(tmp_path / "state" / "firmquant.sqlite3")
     try:
         assert (
-            database.scalar(
-                "SELECT count(*) FROM audit_events WHERE category = 'MARKET_DATA_OPERATOR'"
-            )
-            == 1
+            database.scalar("SELECT count(*) FROM audit_events WHERE category = 'MARKET_DATA_OPERATOR'") == 1
         )
     finally:
         database.close()
