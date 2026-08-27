@@ -16,3 +16,12 @@ backup_directory = "var/backups"
 [compliance]
 program_trading_report_confirmed = false
 broker_api_authorized = false
+
+[promotion]
+min_shadow_sessions = 20
+min_shadow_orders = 50
+max_target_tracking_error = "0.05"
+min_canary_sessions = 3
+min_canary_orders = 3
+min_canary_fills = 1
+max_canary_target_tracking_error = "0.05"
