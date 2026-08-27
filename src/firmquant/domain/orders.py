@@ -100,6 +100,8 @@ ORDER_TRANSITIONS: Final = MappingProxyType(
                 OrderState.PARTIALLY_FILLED,
                 OrderState.FILLED,
                 OrderState.CANCELLED,
+                OrderState.REJECTED,
+                OrderState.EXPIRED,
                 OrderState.UNKNOWN,
             }
         ),
@@ -488,14 +490,16 @@ class OrderAggregate:
                 )
             return self._updated(event, state=OrderState.ARMED)
         if isinstance(event, SubmitOutcomeUnknown):
-            if self.state is OrderState.SUBMITTING:
+            if self.state in {
+                OrderState.SUBMITTING,
+                OrderState.ACKNOWLEDGED,
+                OrderState.PARTIALLY_FILLED,
+                OrderState.CANCEL_REQUESTED,
+            }:
                 return self._updated(event, state=OrderState.UNKNOWN)
             if self.state in {
                 OrderState.UNKNOWN,
-                OrderState.ACKNOWLEDGED,
-                OrderState.PARTIALLY_FILLED,
                 OrderState.FILLED,
-                OrderState.CANCEL_REQUESTED,
                 OrderState.CANCELLED,
                 OrderState.REJECTED,
                 OrderState.EXPIRED,
@@ -546,11 +550,17 @@ class OrderAggregate:
             )
             return self._updated(event, state=target)
         if isinstance(event, CancelOutcomeUnknown):
-            if self.state is not OrderState.CANCEL_REQUESTED:
-                raise DomainTransitionError(
-                    f"illegal order transition {self.state.value} via CancelOutcomeUnknown"
-                )
-            return self._updated(event, state=OrderState.UNKNOWN)
+            if self.state in {
+                OrderState.CANCEL_REQUESTED,
+                OrderState.ACKNOWLEDGED,
+                OrderState.PARTIALLY_FILLED,
+            }:
+                return self._updated(event, state=OrderState.UNKNOWN)
+            if self.state is OrderState.UNKNOWN:
+                return self._updated(event)
+            raise DomainTransitionError(
+                f"illegal order transition {self.state.value} via CancelOutcomeUnknown"
+            )
         if isinstance(event, CancelConfirmed):
             confirmed_id = event.broker_order_id or self.broker_order_id
             if confirmed_id is None:

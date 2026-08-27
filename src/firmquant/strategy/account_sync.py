@@ -77,10 +77,6 @@ def _order_identity_map(snapshot: BrokerSnapshot) -> dict[str, BrokerOrderFact]:
             raise StrategySyncError("multiple broker orders claim one uquant order identity")
         if order.status is BrokerOrderStatus.UNKNOWN:
             raise StrategySyncError("UNKNOWN broker order cannot enter uquant account sync")
-        if order.status in {BrokerOrderStatus.REJECTED, BrokerOrderStatus.EXPIRED}:
-            raise StrategySyncError(
-                f"broker terminal status {order.status.value} has no uquant sync representation"
-            )
         mapping[order.broker_order_id] = order
         economic_ids.add(economic_id)
     return mapping
@@ -188,7 +184,12 @@ def to_uquant_broker_payload(snapshot: BrokerSnapshot) -> dict[str, object]:
             "remaining_shares": 0,
         }
         for order in sorted(snapshot.orders, key=lambda item: item.broker_order_id)
-        if order.status is BrokerOrderStatus.CANCELLED
+        if order.status
+        in {
+            BrokerOrderStatus.CANCELLED,
+            BrokerOrderStatus.REJECTED,
+            BrokerOrderStatus.EXPIRED,
+        }
     ]
     return {
         "as_of": snapshot.session_date.isoformat(),

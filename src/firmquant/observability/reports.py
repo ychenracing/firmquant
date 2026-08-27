@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Never
 from zoneinfo import ZoneInfo
 
-from firmquant.domain.broker_facts import Side
+from firmquant.domain.broker_facts import BrokerOrderStatus, Side
 from firmquant.domain.values import Symbol
 from firmquant.persistence.database import Database
 
@@ -135,6 +135,15 @@ def _stored_time(value: object, *, label: str) -> datetime:
     return observed
 
 
+def _stored_broker_status(value: object) -> BrokerOrderStatus | None:
+    if value is None:
+        return None
+    try:
+        return BrokerOrderStatus(str(value))
+    except ValueError as error:
+        raise ReportError("stored broker order status is not canonical") from error
+
+
 @dataclass(frozen=True, slots=True)
 class TargetActualDifference:
     symbol: str
@@ -178,6 +187,7 @@ class OrderLifecycle:
     filled_shares: int
     state: str
     reason_code: str
+    broker_status: BrokerOrderStatus | None = None
 
     def __post_init__(self) -> None:
         for label, value in (
@@ -191,6 +201,8 @@ class OrderLifecycle:
             _text(value, label=label)
         if not isinstance(self.side, Side):
             raise TypeError("report order side must be typed")
+        if self.broker_status is not None and not isinstance(self.broker_status, BrokerOrderStatus):
+            raise TypeError("report broker order status must be typed or null")
         _shares(self.requested_shares, label="requested shares", positive=True)
         _shares(self.filled_shares, label="filled shares")
         if self.filled_shares > self.requested_shares:
@@ -211,6 +223,7 @@ class OrderLifecycle:
             "filled_shares": self.filled_shares,
             "unfilled_shares": self.requested_shares - self.filled_shares,
             "state": self.state,
+            "broker_status": None if self.broker_status is None else self.broker_status.value,
             "reason_code": self.reason_code,
         }
 
@@ -448,7 +461,9 @@ class DailyReportRenderer:
         else:
             lines.extend(
                 f"- `{item.uquant_order_id}` {item.side.value} {item.symbol}: "
-                f"{item.filled_shares}/{item.requested_shares}, {item.state}, {item.reason_code}"
+                f"{item.filled_shares}/{item.requested_shares}, {item.state}, "
+                f"broker={item.broker_status.value if item.broker_status is not None else 'N/A'}, "
+                f"{item.reason_code}"
                 for item in report.orders
             )
         lines.extend(["", "## 成交、费用与滑点", ""])
@@ -606,7 +621,7 @@ class DatabaseDailyReportBuilder:
             """
             SELECT i.execution_id, i.uquant_order_id, i.symbol, i.side,
                    i.requested_shares, i.filled_shares, i.state,
-                   b.broker_order_id
+                   b.broker_order_id, b.status AS broker_status
             FROM execution_intents i
             LEFT JOIN broker_orders b ON b.execution_id = i.execution_id
             WHERE i.decision_id = ? ORDER BY i.created_at, i.execution_id
@@ -642,6 +657,7 @@ class DatabaseDailyReportBuilder:
                     str(row["execution_id"]),
                     upstream_reasons.get(str(row["uquant_order_id"]), str(row["state"])),
                 ),
+                broker_status=_stored_broker_status(row["broker_status"]),
             )
             for row in rows
         )
