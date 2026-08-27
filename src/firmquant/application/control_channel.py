@@ -381,9 +381,7 @@ class ControlInbox:
             return ControlStatusView(request_id=request_id, status=ControlStatus.QUEUED)
         return ControlStatusView(request_id=request_id, status=ControlStatus.UNKNOWN)
 
-    def process_pending(
-        self, handler: Callable[[ControlRequest], ControlExecution]
-    ) -> ControlBatch:
+    def process_pending(self, handler: Callable[[ControlRequest], ControlExecution]) -> ControlBatch:
         if not callable(handler):
             raise TypeError("control handler must be callable")
         now = _aware(self._clock(), label="control clock")
@@ -418,9 +416,7 @@ class ControlInbox:
                 continue
             pending.append((request, request_path))
         pending.sort(
-            key=lambda item: (
-                _PRIORITY[item[0].command.value], item[0].created_at, item[0].request_id
-            )
+            key=lambda item: (_PRIORITY[item[0].command.value], item[0].created_at, item[0].request_id)
         )
         halted = False
         stop = False
@@ -444,9 +440,7 @@ class ControlInbox:
             stop = stop or execution.stop
         return ControlBatch(receipts=tuple(receipts), halted=halted, stop=stop)
 
-    def _load_path(
-        self, path: Path, *, now: datetime
-    ) -> tuple[ControlRequest, Path] | ControlReceipt | None:
+    def _load_path(self, path: Path, *, now: datetime) -> tuple[ControlRequest, Path] | ControlReceipt | None:
         try:
             metadata = path.lstat()
         except FileNotFoundError:
@@ -477,9 +471,7 @@ class ControlInbox:
 
     def _parse_request(self, payload: Mapping[str, object], *, now: datetime) -> ControlRequest:
         keys = frozenset(payload)
-        if not _REQUIRED_FIELDS.issubset(keys) or not keys.issubset(
-            _REQUIRED_FIELDS | _OPTIONAL_FIELDS
-        ):
+        if not _REQUIRED_FIELDS.issubset(keys) or not keys.issubset(_REQUIRED_FIELDS | _OPTIONAL_FIELDS):
             raise ControlRequestRejected("CONTROL_REQUEST_FIELDS_INVALID")
         try:
             request = ControlRequest(
@@ -488,9 +480,7 @@ class ControlInbox:
                 created_at=datetime.fromisoformat(str(payload["created_at"])),
                 expires_at=datetime.fromisoformat(str(payload["expires_at"])),
                 host_hash=str(payload["host_hash"]),
-                reason_sha256=(
-                    None if "reason_sha256" not in payload else str(payload["reason_sha256"])
-                ),
+                reason_sha256=(None if "reason_sha256" not in payload else str(payload["reason_sha256"])),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ControlRequestRejected("CONTROL_REQUEST_FIELDS_INVALID") from error
@@ -506,9 +496,9 @@ class ControlInbox:
         stem = path.name[:-5] if path.name.endswith(".json") else ""
         request_id = stem if _REQUEST_ID.fullmatch(stem) is not None else None
         raw_identity = raw_hash or hashlib.sha256(f"{path.name}:{reason}".encode()).hexdigest()
-        receipt_id = request_id or "invalid_" + hashlib.sha256(
-            f"{path.name}:{raw_identity}".encode()
-        ).hexdigest()
+        receipt_id = (
+            request_id or "invalid_" + hashlib.sha256(f"{path.name}:{raw_identity}".encode()).hexdigest()
+        )
         receipt = ControlReceipt(
             request_id=receipt_id,
             command=None,
@@ -543,9 +533,7 @@ class ControlInbox:
         if len(raw) > MAX_CONTROL_REQUEST_BYTES * 2:
             raise ControlChannelError("CONTROL_RECEIPT_TOO_LARGE")
         payload = _strict_json(raw)
-        expected = {
-            "command", "outcome", "processed_at", "request_id", "request_sha256", "schema", "status"
-        }
+        expected = {"command", "outcome", "processed_at", "request_id", "request_sha256", "schema", "status"}
         if set(payload) != expected or payload.get("schema") != "firmquant.control-receipt.v1":
             raise ControlChannelError("CONTROL_RECEIPT_INVALID")
         outcome = payload["outcome"]
