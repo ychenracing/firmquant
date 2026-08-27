@@ -242,13 +242,13 @@ class FillObservation:
         if self.shares <= 0:
             raise ValueError("fill shares must be positive")
         _decimal(self.price, label="fill price", positive=True)
-        for label, value in (
+        for decimal_label, decimal_value in (
             ("commission", self.commission),
             ("stamp duty", self.stamp_duty),
             ("transfer fee", self.transfer_fee),
             ("slippage", self.slippage),
         ):
-            _decimal(value, label=label)
+            _decimal(decimal_value, label=decimal_label)
 
     def payload(self) -> dict[str, object]:
         return {
