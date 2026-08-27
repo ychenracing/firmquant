@@ -14,6 +14,7 @@ from firmquant.broker.production_factory import ReadOnlyXtQuantGateway
 from firmquant.broker.production_smoke import ReadOnlyProductionSmokeBroker
 from firmquant.config import ExecutionRuntimeSettings
 from firmquant.execution.live_controller import ExecutionDeadlines, LiveExecutionController
+from firmquant.observability.health import Doctor
 from firmquant.persistence.writer_lease import (
     WriterLease,
     WriterLeaseGuard,
@@ -175,6 +176,20 @@ def test_production_diagnostic_types_have_no_broker_write_surface() -> None:
     assert not hasattr(ReadOnlyXtQuantGateway, "cancel_order")
     assert not hasattr(ReadOnlyProductionSmokeBroker, "submit_order")
     assert not hasattr(ReadOnlyProductionSmokeBroker, "cancel_order")
+
+
+def test_production_doctor_full_authority_probes_are_mode_scoped() -> None:
+    source = inspect.getsource(Doctor.for_local_environment)
+    assert "if not production_mode:" in source
+    for query in (
+        "query_positions(",
+        "query_orders(",
+        "query_fills(",
+        "query_market_status(",
+        "query_instrument(",
+        "query_quote(",
+    ):
+        assert query in source
 
 
 def test_readonly_smoke_is_explicit_operator_command() -> None:
