@@ -306,7 +306,10 @@ def _direct_cancel_or_queue(
     settings, state = _load_control_settings(config_path)
     database_path = state / "firmquant.sqlite3"
     inbox = ControlInbox(state)
-    clock = lambda: datetime.now(UTC)
+
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
     try:
         with WriterLease.acquire(database_path, owner="operator-cancel-system-orders") as writer:
             broker: BrokerGateway | None = None
