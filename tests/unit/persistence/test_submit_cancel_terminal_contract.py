@@ -53,10 +53,13 @@ def test_submit_terminal_result_without_fill_preserves_true_terminal(
 
     assert result.state is expected
     assert result.filled_shares.value == 0
-    assert database.scalar(
-        "SELECT status FROM broker_orders WHERE broker_order_id = ?",
-        (fact.broker_order_id,),
-    ) == status.value
+    assert (
+        database.scalar(
+            "SELECT status FROM broker_orders WHERE broker_order_id = ?",
+            (fact.broker_order_id,),
+        )
+        == status.value
+    )
 
 
 @pytest.mark.parametrize(
@@ -117,10 +120,13 @@ def test_submit_unknown_imports_confirmed_fill_and_remains_unresolved(database: 
 
     assert result.state is OrderState.UNKNOWN
     assert result.filled_shares.value == 50
-    assert database.scalar(
-        "SELECT state FROM broker_order_attempts WHERE attempt_id = ?",
-        (case.attempt.attempt_id,),
-    ) == "UNKNOWN"
+    assert (
+        database.scalar(
+            "SELECT state FROM broker_order_attempts WHERE attempt_id = ?",
+            (case.attempt.attempt_id,),
+        )
+        == "UNKNOWN"
+    )
 
 
 def test_cancel_unknown_imports_confirmed_fill_and_remains_unresolved(database: Database) -> None:
@@ -157,10 +163,13 @@ def test_cancel_unknown_imports_confirmed_fill_and_remains_unresolved(database: 
 
     assert result.state is OrderState.UNKNOWN
     assert result.filled_shares.value == 50
-    assert database.scalar(
-        "SELECT state FROM broker_order_attempts WHERE attempt_id = ?",
-        (cancel_attempt.attempt_id,),
-    ) == "UNKNOWN"
+    assert (
+        database.scalar(
+            "SELECT state FROM broker_order_attempts WHERE attempt_id = ?",
+            (cancel_attempt.attempt_id,),
+        )
+        == "UNKNOWN"
+    )
 
 
 def test_cancel_duplicate_fill_id_with_conflicting_economics_fails_closed(database: Database) -> None:
