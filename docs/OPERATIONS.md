@@ -14,6 +14,8 @@ bootstrap 使用持久 PREPARED operation 作为写前证据。若进程在 Acco
 
 启动获取单实例锁，验证 Asia/Shanghai 时区和时钟，连接 broker，查询完整账户/持仓/委托/成交，并运行启动恢复与对账。只有持久 account binding 存在，且不存在 UNKNOWN、外部活动、账户差异和身份漂移时才能进入 READY。
 
+交易日、session、市场开闭和“属于哪一天的信号”使用 wall clock 与权威交易日历；订单等待、poll interval、执行窗口和组合级 deadline 使用 monotonic clock。程序晚启动、系统从睡眠恢复或当前时刻已越过该 session 的新单安全围栏时，不补执行已经错过的前一日信号，也不通过 wall-clock 差值进行长 sleep。
+
 每次生产账户采纳都固定执行：完整 broker snapshot → 加载持久 binding 与当前 uquant AccountState → preflight 检查账户身份、外部/未知订单成交和未解释经济差异 → 仅在深拷贝上 prepare 已知系统事实 → 对 prepared AccountState 做完整 reconciliation → 全部通过后以 expected-before CAS 提交 AccountState、account operation receipt 和 reconciliation receipt。任一检查失败都不会先修改生产 AccountState，也不会把人工交易或异常现金“同步”为策略事实。
 
 broker snapshot 中的 confirmed fills 按稳定 execution sequence 先导入；`CANCELLED`、`REJECTED`、`EXPIRED` 只在 uquant 边界投影为“关闭未成交剩余量”。firmquant operational ledger、reconciliation、audit 和日报继续保存真实 broker 终态。UNKNOWN 不进入关闭投影。
@@ -21,6 +23,14 @@ broker snapshot 中的 confirmed fills 按稳定 execution sequence 先导入；
 盘后 workflow 验证权威交易日历、市场已收盘、append-only 数据 manifest 和完整券商快照，完成上述账户对账和合法事实采纳后再调用唯一决策入口。次日 workflow 加载冻结决策，验证交易状态和执行事实后提交有限窗口订单。盘中只处理订单、成交、断线、风险与对账；EOD 再取完整快照，按同一 prepare-validate-commit 顺序确认合法成交、生成报告并备份。
 
 `SessionCoordinator` 和 workflow receipts 提供上述可恢复步骤。当前安装版 `run` composition 对 PAPER/REPLAY 完成启动对账并返回 READY 证据；官方 SDK 未验证时 XtQuant 模式明确失败关闭。部署方不能把该失败改成跳过对账。
+
+## WriterLease、时间跳变与恢复
+
+WriterLease 同时绑定 owner、host、pid、generation 和持久化 `expires_at`。续租在同一 EXCLUSIVE transaction 内重新核对全部身份字段与原始到期时间；当前时间已经达到或超过 stored `expires_at` 时，旧 lease 永久失效，不能因为进程从暂停或睡眠中恢复而“续活”。CAS 更新未命中唯一一行同样立即视为 `WriterLeaseLost`。
+
+LiveExecutionController 在长订单和组合执行期间通过 lease guard 复用同一 WriterLease 权威实现。submit 前、每轮 broker poll、cancel 前和可提交状态变更前都检查 lease；达到续租间隔时由 guard 续租。lease loss 发生后禁止新的 submit；已经存在的 SYSTEM 活动订单只允许进入受控 cancel-only 尝试或保留可恢复 UNKNOWN，随后进入 HALT/重启恢复与重新对账。
+
+runtime 同时观察 wall 与 monotonic clock。明显 sleep/resume gap、wall clock 回拨、wall/monotonic 差异异常或可信参考时间无法验证时，系统撤销 arm、阻止新增订单并记录 blocker。该状态不能自动归零或继续使用旧时钟事实；需要重新启动生产恢复、重新查询 broker 并完成对账后才能恢复权限。
 
 ## 本机生产控制通道
 
@@ -39,6 +49,16 @@ WriterLease 当前可获得时，CLI 允许本机直接处理风险缩减命令�
 - `cancel-system-orders`：只尝试撤销 durable ledger 能证明 ownership=SYSTEM、broker id 已知且仍活动的订单；输出逐项 cancelled/terminal/unknown/denied 结果。UNKNOWN 不会被重复 cancel。
 - `stop`：停止新增工作，撤销 arm，进入 STOPPING；broker 断开后才持久化 DISARMED 并干净退出。它不是清仓命令。
 
+## Heartbeat、status、doctor 与只读 smoke
+
+生产 daemon 以固定但非高频的间隔持久化单行 heartbeat，不按秒制造审计噪声。heartbeat 至少包含 mode、runtime state、observed_at、host hash、process id、writer generation、broker connected/read/write health、pending event count、最近 broker event/quote/reconciliation/decision/execution 以及 control request 状态。
+
+`status` 是只读命令。它读取 heartbeat 并计算 age；没有 heartbeat 时 process health 为 `NOT_RUNNING`，超过 freshness 阈值时为 `STALE` 并加入 blocker。旧数据库里的 `runtime_state=READY` 不能覆盖失联或过期 heartbeat，因此 stale/not-running 状态不会显示成可写 READY。
+
+`doctor` 在 SHADOW/CANARY/LIVE 使用独立只读 XtQuant gateway，类型上不暴露 `submit_order`/`cancel_order`。它检查 SDK、连接、账户类型、资金、持仓、委托、成交、market status、instrument、quote、账户 alias、安全 manifest 和时钟事实；构造失败不会静默吞成 `broker=None`。真实 SDK 缺失时明确报告 `XTQUANT_SDK_UNAVAILABLE`。真实模式没有可信参考时间或券商 quote event time 证据时报告 `CLOCK_DRIFT_UNVERIFIED`，不会硬编码零漂移。
+
+`smoke-readonly` 是真实部署机上的显式只读生产 smoke 工具。它绑定 firmquant commit、uquant commit、config hash、account hash 和 safety manifest hash，读取完整生产 authority surface 并持久化 receipt；broker write surface 在类型上不可达，receipt 要求 `real_order_calls=0`。仓库自动化只使用 fake/只读合同验证该工具；真实目标电脑上的实际 smoke 运行属于部署操作，不由 CI 代替。
+
 ## 日常 PAPER 操作
 
 1. 使用示例配置创建未跟踪的本地配置；
@@ -51,11 +71,13 @@ WriterLease 当前可获得时，CLI 允许本机直接处理风险缩减命令�
 
 ## 状态与阻断处理
 
-`status` 输出 mode、runtime state、arm 到期时间、firmquant/uquant commit、strategy session、broker connection、最近 quote/对账、unresolved orders、现金、实际/目标 gross、kill switch 和所有 blocker。
+`status` 输出 mode、有效 runtime state、数据库保存的 runtime state、process health、heartbeat age、arm 到期时间、firmquant/uquant commit、strategy session、broker connection/read/write health、最近 broker event/quote/对账/决策/执行、control request、writer generation、process id、pending event count、unresolved orders、现金、实际/目标 gross、kill switch 和所有 blocker。
 
 - `DEGRADED`：读取或 freshness 下降，系统减少权限；先恢复事实源并对账。
 - `HALTED`：新增订单被拒绝；保留数据库、日志、事件文件、控制 receipt 和账户文件，不手工删除现场。
+- `STALE` / `NOT_RUNNING`：heartbeat 已过期或不存在；不能仅凭旧 runtime state 判定进程健康，先确认 daemon、writer generation 和 broker 连接，再按恢复流程处理。
 - `UNKNOWN` / `SUBMITTING_UNRESOLVED`：查询券商委托与成交，禁止重发同一经济意图，禁止继续新的 BUY。
+- `CLOCK_DRIFT_UNVERIFIED` / clock discontinuity blocker：重新启动恢复、获取可信参考时钟并重新对账；不能手工填零漂移。
 - submit/cancel 超时、网络中断、SDK 异常或返回不完整：按 UNKNOWN 处理；不要把调用异常当作 NOT_ACCEPTED。
 - 普通 broker query 未命中：仍不足以证明未接单；只有明确、权威且绑定同一 durable command 的 NOT_ACCEPTED 证明才能解除 submit UNKNOWN。
 - `CANCELLED` / `REJECTED` / `EXPIRED` 后出现迟到 confirmed fill：保留现场并 HALT 调查；不能删除 fill、改 broker 终态或手工伪造 uquant 订单。

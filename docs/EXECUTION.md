@@ -10,6 +10,16 @@
 
 新增 BUY 只允许在有限执行窗口内，风险缩减 SELL 使用独立的有限窗口。达到截止时间后按 policy 请求撤单或保留当前事实；不无限追价，不自动放宽价格，不循环重试。
 
+## 时间围栏与 WriterLease
+
+交易日、session 和市场时段使用 wall clock；持续时长、poll interval、单笔订单窗口和组合执行截止统一使用可注入 monotonic clock。wall clock 回拨不能延长一笔订单，也不能通过时间差制造额外 sleep；睡眠恢复和明显 wall/monotonic discontinuity 由生产 runtime 单独检测并转入 HALT/恢复流程。
+
+每个组合执行都具有三个显式 monotonic fence：`latest_new_submit` 是最后允许创建新 broker 风险的时刻；`latest_cancel_initiation` 是最后允许开始正常撤单流程的时刻；`absolute_completion` 是本次组合执行必须结束并返回可恢复事实的硬截止。daemon 只有在剩余安全窗口足以覆盖一笔订单的最小生命周期、poll/cancel 余量时才会开始新单。程序晚启动或错过该交易日安全入场点时，不补执行已经错过的前一日信号。
+
+LiveExecutionController 不拥有 WriterLease 算法，只接受 lease guard/keepalive port。每次 submit 前、每轮 poll、cancel 前和状态提交前都先检查 lease；达到续租间隔时由 guard 调用唯一 WriterLease 续租实现。旧 WriterLease 已到期、generation 被替换或 CAS 失败时 guard 立即失败，controller 不得继续新增 submit。
+
+lease loss 发生在已有 SYSTEM 活动订单期间时，执行器停止新增风险，只允许在剩余安全截止时间内进行一次受控 cancel-only 尝试；无法证明撤单结果时保持 UNKNOWN，由重启恢复和权威 broker query 解析。失租后不能继续用旧 controller 对象写 durable 状态来“证明”自己仍是 writer。
+
 ## 券商状态合同
 
 规范化后的券商委托状态完整保留为 `PENDING_NEW`、`ACKNOWLEDGED`、`PARTIALLY_FILLED`、`FILLED`、`PENDING_CANCEL`、`CANCELLED`、`REJECTED`、`EXPIRED`、`UNKNOWN`。这些是真实 broker facts，写入 operational ledger、审计证据和日报；`REJECTED`、`EXPIRED` 不会在 firmquant 内伪装为 `CANCELLED`。
@@ -42,6 +52,6 @@ callback 丢失、队列溢出或 writer 失败都会保留失败 envelope、触
 
 撤单也是可能产生 UNKNOWN 的真实写操作，必须经过相同 capability、arm、身份、健康、频率和风险门禁。cancel 返回活动态或返回信息不足时，不能推断撤单成功；系统保持 UNKNOWN，查询 broker 后再恢复。
 
-kill switch 优先阻止新订单并请求取消系统拥有的未成交 BUY；是否请求取消其他系统订单由安全 policy 决定。默认不自动平仓，不实现激进自动重试、追价或替换循环。
+kill switch 优先阻止新订单并请求取消系统拥有的未成交 BUY；是否请求取消其他系统订单由安全 policy 决定。默认不自动平仓，不实现激进自动重试、追价或替换循环。产品当前不支持 replacement/reprice 功能，因此配置和风险事实中不存在无效的 replacement count/limit 占位字段。
 
 故障语义详见 [恢复](RECOVERY.md)，逐单门禁详见 [风险与实盘安全](RISK_AND_SAFETY.md)。
