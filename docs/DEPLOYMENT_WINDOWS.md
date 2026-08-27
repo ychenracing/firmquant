@@ -109,3 +109,29 @@ GitHub Actions 的 `Windows deployment safety` workflow 固定 `PAPER` 和 `live
 本仓库包含 XtQuant adapter、lazy SDK 诊断、官方签名 contract fake、只读 SHADOW/CANARY/LIVE doctor、本机 control inbox、不可复活 WriterLease、monotonic deadline、持久 heartbeat、只读 production smoke 和 cancel-only capability。当前构建环境没有检测到官方 XtQuant SDK，因此没有完成真实 MiniQMT 连接或账户只读 smoke，也不能声明实盘适配器已经接通。实现与测试期间不得、也没有通过上述 smoke 提交真实订单。
 
 在只读 smoke、完整 SHADOW 观察、启动对账、多重实盘门禁和操作员合规确认全部通过前，部署必须保持 `PAPER` 或只读 `SHADOW`，不得生成任何 submit capability。cancel-only 的代码存在不等于已经具备真实账户撤单资格；只有 CANARY/LIVE 配置、账户 binding 和真实 broker read identity 全部通过时才可跨越真实 cancel 边界。
+
+## 收盘数据与日历运维
+
+生产数据目录中的 `trading-calendar.json` 是有限、权威的 session manifest。Windows 部署必须把它与策略数据一起放在本地受 ACL 保护的非同步目录。`status`、`doctor` 和日报会显示 calendar coverage；距离 `covered_end` 不足安全阈值时出现 `CALENDAR_COVERAGE_WARNING`，覆盖已过期时 `CALENDAR_COVERAGE_EXPIRED` 会阻止新策略决策和 submit。不能用周一到周五规则替代，也不能在 `previous_trading_session` 无法解析时把结果当成“没有订单”。
+
+日历更新只通过本机交互式命令完成：
+
+```powershell
+uv run firmquant --config .\path\to\local.toml calendar-update .\reviewed-calendar.json
+```
+
+该命令要求可获得唯一 WriterLease、运行状态 DISARMED、无活动 arm/order/UNKNOWN，并验证新 manifest 的 schema、identity、单调覆盖和所有已经使用的过去 session。过去 session 发生变化或 coverage 缩短会拒绝；通过后使用原子替换并写 audit receipt，旧 calendar 保留在 state directory 的历史副本中。CI/非交互终端不能批准更新。
+
+XtQuant 收盘日线获取使用有界 attempts、固定间隔和总 deadline，失败会留下不含原始异常内容的 attempt receipt。达到 deadline 后生产 close-session HALT，下一次显式恢复/对账后才会再次尝试；daemon 不会无限等待。停牌股票没有目标日 bar 时必须有同 session、fresh 的权威 instrument status；正常证券和参考指数仍必须存在真实目标日 bar，禁止填充假 OHLCV。
+
+历史 prefix 改变不会直接覆盖 `${data_directory}`。候选保存在 `${state_directory}\market-data\candidates`，操作员先使用：
+
+```powershell
+uv run firmquant --config .\path\to\local.toml data-candidates --json
+uv run firmquant --config .\path\to\local.toml verify-data-candidate <candidate-id> --json
+uv run firmquant --config .\path\to\local.toml approve-data-candidate <candidate-id>
+```
+
+批准命令必须在真实交互终端输入精确确认短语，且只允许 DISARMED、无 active arm、无活动订单、无未解决 UNKNOWN；批准前会再次验证 candidate 未变化。promotion 在 state directory 建立 immutable generation，写 pending crash marker 后原子切换 active pointer，并保留旧 generation 与 source receipt。运行时数据 candidate、diff 和 promotion receipt 不提交 Git。
+
+最终 close-session backup 不再只是数据库副本：正式 schema-v2 bundle 同时包含 SQLite、uquant AccountState、生产配置、XtQuant safety manifest、trading calendar、active data generation、当天 strategy-data manifest 和 deployment record。`userdata`、ARM MAC key、密码/token/webhook secret 不进入 bundle。Windows 上仍使用同一磁盘临时目录完成成员 hash、数据库/audit、AccountState/config/calendar/deployment identity 与当天 frozen decision 验证，再 atomic rename 发布，避免 crash 留下可误认的半成品。
