@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import firmquant.market_data.generations as generations
+from firmquant.market_data.generations import DataGenerationError, DataGenerationStore
 
 
 NOW = datetime(2026, 8, 25, 8, tzinfo=UTC)
@@ -23,7 +23,7 @@ def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: 
     seed = tmp_path / "seed"
     state = tmp_path / "state"
     write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = generations.DataGenerationStore(state)
+    store = DataGenerationStore(state)
     active = store.ensure_active(seed, source="xtquant", created_at=NOW)
     before = (active.path / "sz300308.csv").read_bytes()
 
@@ -50,7 +50,7 @@ def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: 
 def test_tampered_candidate_cannot_be_verified_or_promoted(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = generations.DataGenerationStore(tmp_path / "state")
+    store = DataGenerationStore(tmp_path / "state")
     active = store.ensure_active(seed, source="xtquant", created_at=NOW)
     candidate = store.create_candidate(
         active_generation_id=active.generation_id,
@@ -62,9 +62,9 @@ def test_tampered_candidate_cannot_be_verified_or_promoted(tmp_path: Path) -> No
     )
     (candidate.path / "sz300308.csv").write_text("tampered\n", encoding="utf-8")
 
-    with pytest.raises(generations.DataGenerationError, match="changed"):
+    with pytest.raises(DataGenerationError, match="changed"):
         store.verify_candidate(candidate.candidate_id)
-    with pytest.raises(generations.DataGenerationError):
+    with pytest.raises(DataGenerationError):
         store.promote_candidate(
             candidate.candidate_id,
             expected_candidate_sha256=candidate.candidate_sha256,
@@ -78,7 +78,7 @@ def test_promotion_is_atomic_and_keeps_previous_generation_for_recovery(
 ) -> None:
     seed = tmp_path / "seed"
     write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = generations.DataGenerationStore(tmp_path / "state")
+    store = DataGenerationStore(tmp_path / "state")
     active = store.ensure_active(seed, source="xtquant", created_at=NOW)
     candidate = store.create_candidate(
         active_generation_id=active.generation_id,
