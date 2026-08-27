@@ -39,6 +39,7 @@ from firmquant.risk.capability import (
     WriteOperation,
 )
 from firmquant.risk.gate import GateAction, GateDecision
+from firmquant.scheduling.clock import ClockGuard, ClockObservation
 from firmquant.security.secrets import SecretBytes
 from tests.fixtures.session_cases import NOW, decision_snapshot, execution_snapshot
 
@@ -181,6 +182,13 @@ def capability(
             command_within_uquant_intent=True,
             cash_and_positions_safe=True,
             frequency_within_limits=True,
+            clock_receipt=ClockGuard(max_drift=timedelta(seconds=2)).verify(
+                ClockObservation(
+                    system_time=clock(),
+                    reference_time=clock(),
+                    local_timezone="Asia/Shanghai",
+                )
+            ),
         )
 
     return WriteCapabilityFactory(arm_service=service).create(

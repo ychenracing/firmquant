@@ -871,34 +871,40 @@ class LocalOperatorService:
         )
         last_quote = database.scalar("SELECT max(received_at) FROM broker_events WHERE event_type = 'QUOTE'")
         source = load_locked_source_identity()
+        production_mode = settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
         heartbeat = database.query_one("SELECT * FROM production_heartbeat WHERE singleton_id = 1")
         heartbeat_age: float | None = None
-        process_health = "NOT_RUNNING"
-        broker_connection = "NOT_RUNNING"
+        process_health = "NOT_APPLICABLE"
+        broker_connection = "NOT_APPLICABLE"
         broker_read_healthy = False
         broker_write_healthy = False
-        if heartbeat is None:
-            blockers.add("PROCESS_NOT_RUNNING")
-        else:
-            try:
-                heartbeat_at = datetime.fromisoformat(str(heartbeat["observed_at"]))
-                if heartbeat_at.tzinfo is None or heartbeat_at.utcoffset() is None:
-                    raise ValueError
-                age = now - heartbeat_at
-                heartbeat_age = age.total_seconds()
-                if heartbeat_age < 0:
-                    raise ValueError
-            except ValueError as error:
-                raise OperatorCommandDenied("HEARTBEAT_INVALID") from error
-            broker_connection = "CONNECTED" if int(heartbeat["broker_connected"]) == 1 else "DISCONNECTED"
-            broker_read_healthy = int(heartbeat["broker_read_healthy"]) == 1
-            broker_write_healthy = int(heartbeat["broker_write_healthy"]) == 1
-            if heartbeat_age > 30.0:
-                process_health = "STALE"
-                blockers.add("HEARTBEAT_STALE")
+        effective_state = status.state.value
+        if production_mode:
+            process_health = "NOT_RUNNING"
+            broker_connection = "NOT_RUNNING"
+            effective_state = RuntimeState.HALTED.value
+            if heartbeat is None:
+                blockers.add("PROCESS_NOT_RUNNING")
             else:
-                process_health = "HEALTHY"
-        effective_state = status.state.value if process_health == "HEALTHY" else RuntimeState.HALTED.value
+                try:
+                    heartbeat_at = datetime.fromisoformat(str(heartbeat["observed_at"]))
+                    if heartbeat_at.tzinfo is None or heartbeat_at.utcoffset() is None:
+                        raise ValueError
+                    age = now - heartbeat_at
+                    heartbeat_age = age.total_seconds()
+                    if heartbeat_age < 0:
+                        raise ValueError
+                except ValueError as error:
+                    raise OperatorCommandDenied("HEARTBEAT_INVALID") from error
+                broker_connection = "CONNECTED" if int(heartbeat["broker_connected"]) == 1 else "DISCONNECTED"
+                broker_read_healthy = int(heartbeat["broker_read_healthy"]) == 1
+                broker_write_healthy = int(heartbeat["broker_write_healthy"]) == 1
+                if heartbeat_age > 30.0:
+                    process_health = "STALE"
+                    blockers.add("HEARTBEAT_STALE")
+                else:
+                    process_health = "HEALTHY"
+                    effective_state = status.state.value
         return {
             "mode": settings.mode.value,
             "runtime_state": effective_state,

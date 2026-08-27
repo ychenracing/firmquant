@@ -12,6 +12,7 @@ from firmquant.persistence.database import (
     DatabaseUnavailable,
     TransactionRequired,
 )
+from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -83,7 +84,7 @@ def test_read_only_connection_verifies_existing_ledger_and_rejects_writes(
     try:
         assert reader.scalar("PRAGMA query_only") == 1
         assert reader.scalar("PRAGMA foreign_keys") == 1
-        assert reader.scalar("SELECT count(*) FROM schema_migrations") == 3
+        assert reader.scalar("SELECT count(*) FROM schema_migrations") == CURRENT_SCHEMA_VERSION
         with pytest.raises(sqlite3.OperationalError, match="readonly"), reader.transaction():
             reader.write("DELETE FROM schema_migrations")
     finally:
@@ -224,6 +225,6 @@ def test_online_backup_creates_verified_database(db: Database, tmp_path: Path) -
     restored = Database.open_read_only(destination)
     try:
         restored.integrity_check()
-        assert restored.scalar("SELECT max(version) FROM schema_migrations") == 3
+        assert restored.scalar("SELECT max(version) FROM schema_migrations") == CURRENT_SCHEMA_VERSION
     finally:
         restored.close()

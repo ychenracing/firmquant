@@ -245,9 +245,21 @@ def test_clock_runtime_state_heartbeat_and_halt_control_fail_closed(tmp_path: Pa
         hooks.heartbeat(
             ps.ProductionHeartbeat(
                 mode=Mode.SHADOW,
+                runtime_state=hooks.status.state,
                 observed_at=NOW,
+                host_hash=hooks._writer.host_hash,
+                process_id=hooks._writer.process_id,
                 writer_generation=hooks._writer.generation,
+                broker_connected=True,
+                broker_read_healthy=True,
+                broker_write_healthy=True,
                 pending_events=0,
+                last_broker_event=None,
+                last_quote=None,
+                last_reconciliation=None,
+                last_decision=None,
+                last_execution=None,
+                control_request_state="IDLE",
                 processed_events=0,
                 decisions=0,
                 executions=0,
@@ -467,6 +479,11 @@ def test_risk_context_and_capability_submit_follow_single_authorized_path(
             facts=facts,
             decision=decision,
             planned={planned.uquant_order_id: planned},
+            reconciliation=SimpleNamespace(
+                reconciliation_id="recon_" + "2" * 64,
+                passed=True,
+                blockers=(),
+            ),
         )
         command = _command(planned)
         limits = ps.risk_limits_from_settings(hooks._settings)
@@ -540,6 +557,7 @@ def test_live_execute_path_audits_result_and_rejects_safety_failure(
         monkeypatch.setattr(hooks, "_require_promotion", lambda _account_hash: None)
         monkeypatch.setattr(hooks, "_capability", lambda _authorities: object())
         monkeypatch.setattr(ps, "LiveExecutionController", Controller)
+        hooks._active_execution_deadlines = ps.ExecutionDeadlines(60.0, 90.0, 120.0)
         assert hooks._execute(base.EXECUTION_SESSION) == 1
         assert hooks.real_order_calls() == 2
 
@@ -565,6 +583,7 @@ def test_live_execute_path_audits_result_and_rejects_safety_failure(
         monkeypatch.setattr(hooks, "_require_promotion", lambda _account_hash: None)
         monkeypatch.setattr(hooks, "_capability", lambda _authorities: object())
         monkeypatch.setattr(ps, "LiveExecutionController", UnsafeController)
+        hooks._active_execution_deadlines = ps.ExecutionDeadlines(60.0, 90.0, 120.0)
         with pytest.raises(ps.ProductionServicesUnavailable, match="SAFETY_FAILURE"):
             hooks._execute(base.EXECUTION_SESSION)
 

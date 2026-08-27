@@ -66,6 +66,7 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 |---|---|
 | `firmquant init` | 创建安全默认配置、状态目录和 SQLite 账本 |
 | `firmquant doctor` | 检查依赖、身份、数据、账本、锁、时钟、SDK、只读连接、合规和实盘锁定 |
+| `firmquant smoke-readonly` | 在真实部署机读取完整生产 authority surface 并持久化零写调用 receipt |
 | `firmquant run` | 运行与配置一致的 session；模式不一致即拒绝 |
 | `firmquant status` | 输出模式、运行状态、arm、身份、券商、对账、订单、现金、敞口与阻断原因 |
 | `firmquant arm-live` | 交互式创建短时、认证且绑定部署身份的 lease |
