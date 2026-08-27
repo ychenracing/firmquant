@@ -21,7 +21,6 @@ from firmquant.application.execution_evidence import (
 )
 from firmquant.persistence.database import Database
 
-
 D40 = "a" * 40
 U40 = "b" * 40
 D64 = "c" * 64
