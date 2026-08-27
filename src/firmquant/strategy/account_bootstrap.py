@@ -125,7 +125,7 @@ class AccountBootstrapService:
             raise AccountBootstrapDenied(code)
         return value
 
-    def _preconditions(self) -> None:
+    def _preconditions(self, *, allow_existing_account_file: bool = False) -> None:
         if self._bindings.load() is not None:
             raise AccountBootstrapDenied("ACCOUNT_ALREADY_BOUND")
         runtime = self._database.query_one("SELECT state FROM runtime_state WHERE singleton_id = 1")
@@ -156,7 +156,7 @@ class AccountBootstrapService:
             raise AccountBootstrapDenied("ACCOUNT_TRANSACTION_IN_PROGRESS")
         if self._account_path.is_symlink():
             raise AccountBootstrapDenied("ACCOUNT_STATE_PATH_INVALID")
-        if self._account_path.exists():
+        if self._account_path.exists() and not allow_existing_account_file:
             raise AccountBootstrapDenied("UNBOUND_ACCOUNT_STATE_PRESENT")
 
     @staticmethod
@@ -393,6 +393,10 @@ class AccountBootstrapService:
     def _recover_file_applied(
         self,
         pending: _PendingBootstrap | None,
+        *,
+        snapshot: BrokerSnapshot,
+        identity: StrategyIdentity,
+        data: BootstrapDataIdentity,
     ) -> AccountBootstrapReceipt | None:
         if pending is None:
             return None
@@ -410,6 +414,20 @@ class AccountBootstrapService:
             raise AccountBootstrapDenied("ACCOUNT_BOOTSTRAP_CONTRADICTION") from error
         if actual != pending.account_state_sha256:
             raise AccountBootstrapDenied("ACCOUNT_BOOTSTRAP_CONTRADICTION")
+        self._validate_pending_candidate(
+            pending,
+            snapshot=snapshot,
+            identity=identity,
+            data=data,
+            account_state_sha256=actual,
+        )
+        durable_account = self._strict_load(self._account_path)
+        self._validate_seed(
+            durable_account,
+            snapshot=snapshot,
+            identity=identity,
+            data=data,
+        )
         return self._finalize_bootstrap(pending, completed=self._now())
 
     @staticmethod
@@ -445,19 +463,25 @@ class AccountBootstrapService:
         if snapshot.account.account_type is not AccountType.CASH:
             raise AccountBootstrapDenied("ACCOUNT_TYPE_UNSUPPORTED")
 
-        pending = self._pending_bootstrap()
-        recovered = self._recover_file_applied(pending)
-        if recovered is not None:
-            return recovered
-
         if snapshot.orders or snapshot.fills:
             raise AccountBootstrapDenied("BROKER_ACTIVITY_PRESENT")
-        self._preconditions()
+        pending = self._pending_bootstrap()
+        self._preconditions(
+            allow_existing_account_file=pending is not None and self._account_path.exists()
+        )
         self._economic_summary(snapshot)
         identity = self._identity()
         data = self._data_identity_provider(snapshot)
         if not isinstance(data, BootstrapDataIdentity):
             raise AccountBootstrapDenied("DATA_IDENTITY_INVALID")
+        recovered = self._recover_file_applied(
+            pending,
+            snapshot=snapshot,
+            identity=identity,
+            data=data,
+        )
+        if recovered is not None:
+            return recovered
         if snapshot.positions:
             if seed_path is None:
                 raise AccountBootstrapDenied("ACCOUNT_STATE_SEED_REQUIRED")
