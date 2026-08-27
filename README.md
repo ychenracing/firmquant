@@ -36,9 +36,19 @@ uv run firmquant status
 `doctor` 失败项必须先修复；不能通过修改摘要、删除状态或跳过检查强行继续。SHADOW 只可在部署机安装合法官方 SDK、完成
 只读 schema/import 检查并使用单独的本地配置后启用，仓库不提供可直接复制的实盘启动命令。
 
-## 运行模型
+## 账户权威与运行模型
 
-日频经济路径固定为：盘后更新并验证 uquant 数据合同，读取完整券商快照，通过
+真实账户首次接入必须先执行一次 `bootstrap-account`，建立券商账户、严格 uquant AccountState 和持久 account binding 的
+唯一对应关系。系统必须处于 DISARMED、无有效 arm lease、无既有策略决策/系统订单/成交且无未完成账户事务；空持仓账户
+可以由券商可用现金创建 `AccountState.empty`，非空账户必须提供严格校验通过的已复核 `--account-state` seed。系统不会从
+券商持仓猜测 tranche、lifecycle、attribution 或策略来源。
+
+正常运行时，券商事实不能直接改写 uquant AccountState。固定顺序是：读取完整 broker snapshot 和持久 binding → 对当前
+AccountState、operational ledger 与 broker facts 做 preflight → 仅在深拷贝上 prepare 已知系统成交 → 对 prepared state 做
+完整 reconciliation → 全部通过后才以 expected-before CAS 提交 AccountState、account operation receipt 和 reconciliation
+receipt。人工交易、异常现金、外部订单、未解释持仓变化或身份漂移会在提交前失败关闭，不会被“同步”吸收。
+
+日频经济路径固定为：盘后更新并验证 uquant 数据合同，完成上述账户对账与合法事实采纳后，通过
 `ProductionEngine.decide()` 生成不可变决策；下一交易日只执行该冻结决策。盘中持续运行仅处理订单生命周期、成交、
 断线、quote freshness、风险阻断和对账，不重新选股或优化组合。
 
@@ -63,6 +73,7 @@ uv run firmquant status
 | `firmquant halt` | 触发 kill switch 并阻止新增订单 |
 | `firmquant resume` | 经显式复核后请求恢复，不清除未解决差异 |
 | `firmquant reconcile` | 对账券商、uquant AccountState 与 operational ledger |
+| `firmquant bootstrap-account` | 一次性建立真实券商账户、uquant AccountState 与持久 binding；非空账户必须提供已复核 seed |
 | `firmquant decisions` | 查询不可变 DecisionSnapshot |
 | `firmquant orders` | 查询经济意图、提交尝试和券商订单生命周期 |
 | `firmquant fills` | 查询已规范化成交与费用事实 |

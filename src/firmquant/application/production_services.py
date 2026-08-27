@@ -49,13 +49,22 @@ from firmquant.market_data.calendar_manifest import load_trading_calendar_manife
 from firmquant.market_data.xtquant_daily import DailyDataUpdateReceipt, XtQuantDailyDataUpdater
 from firmquant.market_data.xtquant_history import OfficialXtQuantDailyHistoryProvider
 from firmquant.observability.reports import DailyReportRenderer, DatabaseDailyReportBuilder
+from firmquant.persistence.account_authority import (
+    AccountBindingRepository,
+    ReviewedAccountAdjustmentRepository,
+)
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.backup import backup_state
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
 from firmquant.persistence.production_recovery import ProductionRecoveryService
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
+from firmquant.persistence.recovery import RecoveryContradiction
 from firmquant.persistence.repositories import DecisionSnapshotRepository, canonical_json, canonical_sha256
 from firmquant.persistence.writer_lease import WriterLease
+from firmquant.reconciliation.account_coordinator import (
+    AccountReconciliationBlocked,
+    AccountReconciliationCoordinator,
+)
 from firmquant.reconciliation.live_view import build_operational_ledger_view
 from firmquant.reconciliation.models import (
     ExpectedPosition,
@@ -76,6 +85,7 @@ from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCom
 from firmquant.risk.runtime import risk_limits_from_settings
 from firmquant.scheduling.sessions import WorkflowReceiptStore
 from firmquant.security.secrets import EnvironmentSecretProvider
+from firmquant.strategy.account_sync import AccountStateContract
 from firmquant.strategy.adapter import DecisionRequest, ProductionEngineContract, StrategyAdapter
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.runtime_account import RuntimeAccountRepository
@@ -376,31 +386,58 @@ class ProductionServiceHooks:
             clock=self._clock,
             max_attempts=3,
         ).capture()
-        expected_id, expected_type = self._snapshots.previous_account_identity(snapshot)
         self._snapshots.persist(snapshot)
-        account, _ = self._accounts.sync_broker_snapshot(snapshot)
-        identity = StrategyIdentity.locked()
-        payload = _account_payload(account)
-        facts = ReconciliationFacts(
-            broker_snapshot=snapshot,
-            strategy_account=_strategy_view(account, snapshot.positions, self._accounts),
-            operational_ledger=build_operational_ledger_view(
-                self._database,
-                broker_session=snapshot.session_date,
-                expected_account_id_hash=expected_id,
-                expected_account_type=expected_type,
-            ),
-            company_action_suspected_symbols=frozenset(),
-            uquant_code_identity_matches=(
-                payload.get("code_hash") in {"", identity.economic_code_fingerprint}
-            ),
-            data_identity_matches=_data_identity_matches(account, self._settings.paths.data_directory),
-            config_identity_matches=(configuration_sha256(self._config_path) == self._identity.config_sha256),
+        binding = AccountBindingRepository(self._database).load()
+        if binding is None:
+            raise ProductionServicesUnavailable("ACCOUNT_BINDING_REQUIRED")
+        operational = build_operational_ledger_view(
+            self._database,
+            broker_session=snapshot.session_date,
+            expected_account_id_hash=binding.account_id_hash,
+            expected_account_type=binding.account_type,
         )
-        receipt = self._reconciler.run(kind, facts)
-        if not receipt.passed:
-            raise ProductionServicesUnavailable("RECONCILIATION_FAILED:" + ",".join(receipt.blockers))
-        return receipt, snapshot, account
+        coordinator = AccountReconciliationCoordinator(
+            account_repository=self._accounts,
+            reconciler=self._reconciler,
+            cash_tolerance=Decimal("0.01"),
+            reviewed_adjustments=ReviewedAccountAdjustmentRepository(self._database),
+        )
+
+        def final_facts(account: AccountStateContract) -> ReconciliationFacts:
+            identity = StrategyIdentity.locked()
+            payload = _account_payload(account)
+            return ReconciliationFacts(
+                broker_snapshot=snapshot,
+                strategy_account=_strategy_view(account, snapshot.positions, self._accounts),
+                operational_ledger=operational,
+                company_action_suspected_symbols=frozenset(),
+                uquant_code_identity_matches=(
+                    payload.get("code_hash") in {"", identity.economic_code_fingerprint}
+                ),
+                data_identity_matches=_data_identity_matches(
+                    account,
+                    self._settings.paths.data_directory,
+                ),
+                config_identity_matches=(
+                    configuration_sha256(self._config_path) == self._identity.config_sha256
+                ),
+            )
+
+        try:
+            result = coordinator.reconcile(
+                kind=kind,
+                snapshot=snapshot,
+                operational_ledger=operational,
+                binding=binding,
+                final_facts=final_facts,
+            )
+        except AccountReconciliationBlocked as error:
+            raise ProductionServicesUnavailable(
+                "RECONCILIATION_FAILED:" + ",".join(error.blockers)
+            ) from error
+        except RecoveryContradiction as error:
+            raise ProductionServicesUnavailable("ACCOUNT_COMMIT_CONTRADICTION") from error
+        return result.receipt, snapshot, result.account
 
     def _require_promotion(self, account_hash: str) -> None:
         if self._settings.mode is Mode.SHADOW:

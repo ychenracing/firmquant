@@ -50,6 +50,14 @@ EXECUTION_SESSION = date(2026, 8, 25)
 POST_CLOSE = datetime(2026, 8, 25, 7, 10, tzinfo=UTC)
 
 
+class AccountPosition:
+    def __init__(self, shares: int) -> None:
+        self.shares = shares
+
+    def sellable_shares(self, _date: str) -> int:
+        return self.shares
+
+
 class Account:
     def __init__(self) -> None:
         self.payload: dict[str, object] = {
@@ -66,6 +74,28 @@ class Account:
             "code_hash": "",
             "capital_peak": 11000.0,
         }
+
+    @property
+    def cash(self) -> float:
+        return float(self.payload["cash"])
+
+    @property
+    def positions(self) -> dict[str, AccountPosition]:
+        raw = self.payload["positions"]
+        assert isinstance(raw, dict)
+        return {
+            str(symbol): AccountPosition(int(position["shares"]))
+            for symbol, position in raw.items()
+            if isinstance(position, dict)
+        }
+
+    @property
+    def order_ledger(self) -> list[object]:
+        return []
+
+    @property
+    def fills(self) -> list[object]:
+        return []
 
     def to_dict(self) -> dict[str, object]:
         return self.payload
@@ -99,6 +129,18 @@ class Accounts:
             account_after_sha256="c" * 64,
             snapshot_id=snapshot.snapshot_id,
         )
+
+    def prepare_broker_snapshot(self, snapshot):
+        return SimpleNamespace(
+            prepared_account=self.account,
+            receipt=SimpleNamespace(snapshot_id=snapshot.snapshot_id),
+            account_before_sha256="c" * 64,
+            account_after_sha256="c" * 64,
+            evidence_sha256=snapshot.raw_payload_sha256,
+        )
+
+    def commit_broker_snapshot(self, prepared) -> str:
+        return str(prepared.account_after_sha256)
 
     def persist_prepared(
         self,
@@ -151,7 +193,7 @@ class PassingReconciler:
     def __init__(self) -> None:
         self.facts: list[object] = []
 
-    def run(self, kind, facts):
+    def evaluate(self, kind, facts):
         self.facts.append(facts)
         return SimpleNamespace(
             reconciliation_id="recon_" + "a" * 64,
@@ -159,6 +201,9 @@ class PassingReconciler:
             passed=True,
             blockers=(),
         )
+
+    def commit(self, _receipt, *, broker_snapshot_sha256):
+        assert len(broker_snapshot_sha256) == 64
 
 
 class RecoveryResult:
@@ -413,7 +458,26 @@ def test_hook_reconciliation_builds_session_scoped_authority_view(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with hook_case(tmp_path) as (hooks, _writer, _broker, accounts):
+    with hook_case(tmp_path) as (hooks, writer, _broker, accounts):
+        from firmquant.persistence.account_authority import AccountBinding, AccountBindingRepository
+        from firmquant.strategy.identity import StrategyIdentity
+
+        broker_snapshot = execution_snapshot().broker_snapshot
+        identity = StrategyIdentity.locked()
+        AccountBindingRepository(writer.database).bind(
+            AccountBinding.create(
+                account_id_hash=broker_snapshot.account.account_id_hash,
+                account_type=broker_snapshot.account.account_type,
+                broker_snapshot_sha256="a" * 64,
+                account_state_sha256="c" * 64,
+                uquant_commit=identity.uquant_commit,
+                uquant_code_fingerprint=identity.economic_code_fingerprint,
+                data_hash="d" * 64,
+                data_as_of="2026-08-24",
+                data_symbols=("sz300308",),
+                created_at=NOW,
+            )
+        )
         reconciler = PassingReconciler()
         hooks._reconciler = reconciler
         monkeypatch.setattr(ps, "_data_identity_matches", lambda *_args: True)
@@ -434,10 +498,11 @@ def test_hook_reconciliation_builds_session_scoped_authority_view(
         assert facts.config_identity_matches is True
 
         hooks._reconciler = SimpleNamespace(
-            run=lambda _kind, _facts: SimpleNamespace(
+            evaluate=lambda _kind, _facts: SimpleNamespace(
                 passed=False,
                 blockers=("BROKER_MISMATCH",),
-            )
+            ),
+            commit=lambda _receipt, **_kwargs: None,
         )
         with pytest.raises(ProductionServicesUnavailable, match="BROKER_MISMATCH"):
             hooks._reconcile(ReconciliationKind.MANUAL)

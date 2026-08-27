@@ -3,14 +3,33 @@
 firmquant 的控制面是本机 CLI。操作命令返回稳定 reason code，`--json` 可供本机脚本读取；命令输出和审计 payload 均
 经过统一脱敏。仓库不默认开放 HTTP 端口。
 
+## 一次性账户初始化
+
+真实券商账户在首次生产运行前必须完成一次 `bootstrap-account`。该命令只读取券商账户事实，不提交或撤销订单，并要求：
+运行状态为 DISARMED、无活动 arm lease、无既有策略决策/系统订单/成交、无未完成账户事务且尚未存在 account binding。
+
+券商为空持仓时，系统以可用现金创建严格 uquant `AccountState.empty`，并写入当前锁定 code/data identity；券商已有持仓时
+必须显式提供 `--account-state`，且 seed 必须通过当前 uquant schema、code/data identity、现金、持仓、可卖数量和经济摘要
+逐项严格校验。任何不一致都在生产 AccountState 写入前失败；系统不从券商事实猜测 lifecycle、tranche、attribution 或策略来源。
+
+bootstrap 使用持久 PREPARED operation 作为写前证据。若进程在 AccountState 保存前退出，下一次同一 bootstrap 会复用同一
+operation；若文件已经原子保存但 SQLite finalization 尚未完成，重启先验证文件 hash，再在单一 SQLite transaction 内完成
+account binding、binding audit、operation final state 和 bootstrap audit，不重新覆盖账户文件。已完整绑定的账户再次 bootstrap
+会拒绝覆盖。
+
 ## Session 生命周期
 
 启动获取单实例锁，验证 Asia/Shanghai 时区和时钟，连接 broker，查询完整账户/持仓/委托/成交，并运行启动恢复与对账。
-只有不存在 UNKNOWN、外部活动、账户差异和身份漂移时才能进入 READY。
+只有持久 account binding 存在，且不存在 UNKNOWN、外部活动、账户差异和身份漂移时才能进入 READY。
 
-盘后 workflow 验证权威交易日历、市场已收盘、append-only 数据 manifest 和完整券商快照，然后同步 uquant AccountState
-并调用唯一决策入口。次日 workflow 加载冻结决策，验证交易状态和执行事实后提交有限窗口订单。盘中只处理订单、成交、
-断线、风险与对账；EOD 再取完整快照、同步确认成交、生成报告并备份。
+每次生产账户采纳都固定执行：完整 broker snapshot → 加载持久 binding 与当前 uquant AccountState → preflight 检查账户身份、
+外部/未知订单成交和未解释经济差异 → 仅在深拷贝上 prepare 已知系统事实 → 对 prepared AccountState 做完整 reconciliation →
+全部通过后以 expected-before CAS 提交 AccountState、account operation receipt 和 reconciliation receipt。任一检查失败都不会
+先修改生产 AccountState，也不会把人工交易或异常现金“同步”为策略事实。
+
+盘后 workflow 验证权威交易日历、市场已收盘、append-only 数据 manifest 和完整券商快照，完成上述账户对账和合法事实采纳
+后再调用唯一决策入口。次日 workflow 加载冻结决策，验证交易状态和执行事实后提交有限窗口订单。盘中只处理订单、成交、
+断线、风险与对账；EOD 再取完整快照，按同一 prepare-validate-commit 顺序确认合法成交、生成报告并备份。
 
 `SessionCoordinator` 和 workflow receipts 提供上述可恢复步骤。当前安装版 `run` composition 对 PAPER/REPLAY 完成启动
 对账并返回 READY 证据；官方 SDK 未验证时 XtQuant 模式明确失败关闭。部署方不能把该失败改成跳过对账。
@@ -33,7 +52,8 @@ quote/对账、unresolved orders、现金、实际/目标 gross、kill switch �
 - `DEGRADED`：读取或 freshness 下降，系统减少权限；先恢复事实源并对账。
 - `HALTED`：新增订单被拒绝；保留数据库、日志、事件文件和账户文件，不手工删除现场。
 - `UNKNOWN` / `SUBMITTING_UNRESOLVED`：查询券商委托与成交，禁止重发同一经济意图。
-- 外部人工订单：停止新增订单，导出报告，由操作员明确调查；系统不自动采纳。
+- 外部人工订单或人工账户变化：停止新增订单，导出报告，由操作员明确调查；系统不自动采纳。
+- 公司行动/持仓差异：没有精确 reviewed evidence 时阻断；即使有持仓类 reviewed receipt，也必须提供显式 reviewed AccountState，不能把 receipt 当作“忽略差异”。
 - 身份/数据漂移：恢复锁定源码、配置或 append-only 数据，不能直接改摘要。
 
 `resume` 只请求状态恢复，仍需交互确认、重新对账和全部 blocker 消失。`disarm` 不等同于解决订单不确定性。

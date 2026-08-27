@@ -45,6 +45,11 @@ from firmquant.reconciliation.models import (
 )
 from firmquant.reconciliation.service import ReconciliationService
 from firmquant.scheduling.sessions import WorkflowReceiptStore
+from firmquant.strategy.account_bootstrap import (
+    AccountBootstrapDenied,
+    AccountBootstrapService,
+    BootstrapDataIdentity,
+)
 from firmquant.strategy.identity import StrategyIdentity
 
 _PAPER_ACCOUNT_NAMESPACE = "firmquant-paper-single-account"
@@ -103,6 +108,14 @@ class _LoadAccount(Protocol):
 
 class _DataStoreFactory(Protocol):
     def __call__(self, root: Path) -> _UquantDataStore: ...
+
+
+class _UquantUniverse(Protocol):
+    def symbols_as_of(self, as_of: date) -> tuple[str, ...]: ...
+
+
+class _UniverseFactory(Protocol):
+    def __call__(self) -> _UquantUniverse: ...
 
 
 def _uquant_symbol(module_name: str, symbol: str) -> object:
@@ -559,6 +572,94 @@ class ConfiguredOperatorPorts:
         settings = self._settings()
         account = _safe_account(self._account_path(settings))
         return self._gateway(settings, account)
+
+    def _bootstrap_data_identity(
+        self,
+        settings: Settings,
+        snapshot: BrokerSnapshot,
+    ) -> BootstrapDataIdentity:
+        identity = StrategyIdentity.locked()
+        try:
+            identity.verify()
+        except Exception as error:
+            raise OperatorCommandDenied("UQUANT_IDENTITY_UNAVAILABLE") from error
+        factory = _uquant_symbol("uquant.contracts.universe", "default_ai_universe")
+        if not callable(factory):
+            raise OperatorCommandDenied("UQUANT_CONTRACT_INVALID")
+        universe = cast(_UniverseFactory, factory)()
+        try:
+            symbols = universe.symbols_as_of(snapshot.session_date)
+        except Exception as error:
+            raise OperatorCommandDenied("UQUANT_UNIVERSE_UNAVAILABLE") from error
+        if (
+            not isinstance(symbols, tuple)
+            or not symbols
+            or tuple(sorted(set(symbols))) != symbols
+            or any(not isinstance(symbol, str) or not symbol for symbol in symbols)
+        ):
+            raise OperatorCommandDenied("UQUANT_UNIVERSE_INVALID")
+        manifest = _uquant_data_manifest(
+            settings.paths.data_directory,
+            symbols,
+            as_of=snapshot.session_date.isoformat(),
+        )
+        try:
+            return BootstrapDataIdentity(
+                data_hash=manifest.digest,
+                as_of=manifest.end,
+                symbols=manifest.symbols,
+            )
+        except (TypeError, ValueError) as error:
+            raise OperatorCommandDenied("UQUANT_DATA_IDENTITY_INVALID") from error
+
+    def bootstrap_account(self, seed_path: Path | None) -> Mapping[str, object]:
+        """Establish the sole real-account binding from read-only broker facts."""
+
+        if seed_path is not None and not isinstance(seed_path, Path):
+            raise OperatorCommandDenied("ACCOUNT_STATE_SEED_INVALID")
+        settings = self._settings()
+        if settings.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            raise OperatorCommandDenied("ACCOUNT_BOOTSTRAP_REQUIRES_PRODUCTION_BROKER")
+        state_directory = settings.paths.state_directory
+        if state_directory.is_symlink():
+            raise OperatorCommandDenied("STATE_PATH_INVALID")
+        try:
+            state_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise OperatorCommandDenied("STATE_PATH_UNAVAILABLE") from error
+        with WriterLease.acquire(
+            state_directory / "firmquant.sqlite3",
+            owner="operator-bootstrap-account",
+            clock=self._clock,
+        ) as writer:
+            gateway = self._production_gateway(settings, writer.database)
+            gateway.connect()
+            try:
+                snapshot = ReadOnlyBrokerSession(
+                    gateway=gateway,
+                    clock=self._clock,
+                ).capture_snapshot()
+            finally:
+                gateway.disconnect()
+            _persist_snapshot(writer.database, snapshot)
+            service = AccountBootstrapService(
+                database=writer.database,
+                account_path=self._account_path(settings),
+                data_identity_provider=lambda observed: self._bootstrap_data_identity(
+                    settings,
+                    observed,
+                ),
+                clock=self._clock,
+            )
+            try:
+                receipt = service.bootstrap(snapshot, seed_path=seed_path)
+            except AccountBootstrapDenied as error:
+                raise OperatorCommandDenied(error.reason_code) from error
+        return {
+            "binding_id": receipt.binding_id,
+            "account_state_sha256": receipt.account_state_sha256,
+            "broker_snapshot_sha256": receipt.broker_snapshot_sha256,
+        }
 
     def cancel_system_orders(self, broker_order_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Expose cancellation only when a recoverable mode-specific writer exists."""

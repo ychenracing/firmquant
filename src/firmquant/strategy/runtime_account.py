@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol, cast
 
 from firmquant.domain.broker_facts import BrokerSnapshot
 from firmquant.persistence.database import Database
-from firmquant.persistence.recovery import AccountOperation, UquantAccountStateStore
-from firmquant.strategy.account_sync import (
-    AccountStateContract,
-    AccountSyncReceipt,
-    sync_account,
+from firmquant.persistence.recovery import (
+    AccountOperation,
+    RecoveryContradiction,
+    UquantAccountStateStore,
 )
+from firmquant.persistence.repositories import PersistenceConflict, canonical_json
+from firmquant.strategy.account_prepare import PreparedAccountSync, prepare_account_sync
+from firmquant.strategy.account_sync import AccountStateContract, AccountSyncReceipt
 
 
 class _LoadAccount(Protocol):
@@ -40,8 +44,18 @@ def _load_account(path: Path) -> AccountStateContract:
     return cast(AccountStateContract, account)
 
 
+def _path_sha256(path: Path) -> str:
+    try:
+        canonical = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise RecoveryContradiction("account state path cannot be resolved") from error
+    if path.is_symlink() or not canonical.is_file():
+        raise RecoveryContradiction("account state must be a regular non-symlink file")
+    return hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()
+
+
 class RuntimeAccountRepository:
-    """Load, broker-sync, and atomically persist exactly one uquant AccountState."""
+    """Prepare and explicitly commit exactly one uquant AccountState."""
 
     def __init__(
         self,
@@ -72,6 +86,12 @@ class RuntimeAccountRepository:
     def load(self) -> AccountStateContract:
         return _load_account(self._path)
 
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise RuntimeError("runtime account clock must be timezone-aware")
+        return now
+
     def persist_prepared(
         self,
         account: AccountStateContract,
@@ -80,9 +100,7 @@ class RuntimeAccountRepository:
         operation_kind: str,
         evidence_sha256: str,
     ) -> str:
-        now = self._clock()
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise RuntimeError("runtime account clock must be timezone-aware")
+        now = self._now()
         operation = AccountOperation.begin(
             database=self._database,
             store=self._store,
@@ -97,23 +115,128 @@ class RuntimeAccountRepository:
         operation.commit_receipt(now=now)
         return operation.expected_account_after_sha256
 
+    def prepare_broker_snapshot(self, snapshot: BrokerSnapshot) -> PreparedAccountSync:
+        if not isinstance(snapshot, BrokerSnapshot):
+            raise TypeError("runtime broker sync requires BrokerSnapshot")
+        return prepare_account_sync(self.load(), snapshot)
+
     def sync_broker_snapshot(
         self,
         snapshot: BrokerSnapshot,
     ) -> tuple[AccountStateContract, AccountSyncReceipt]:
-        if not isinstance(snapshot, BrokerSnapshot):
-            raise TypeError("runtime broker sync requires BrokerSnapshot")
-        account = self.load()
-        receipt = sync_account(account, snapshot)
-        persisted = self.persist_prepared(
-            account,
-            expected_before_sha256=receipt.account_before_sha256,
-            operation_kind="BROKER_SYNC",
-            evidence_sha256=snapshot.raw_payload_sha256,
+        """Compatibility prepare surface; no durable account state is changed."""
+
+        prepared = self.prepare_broker_snapshot(snapshot)
+        return prepared.prepared_account, prepared.receipt
+
+    @staticmethod
+    def _operation_id(prepared: PreparedAccountSync) -> str:
+        return "acctop_" + hashlib.sha256(prepared.preparation_id.encode("utf-8")).hexdigest()
+
+    def _existing_broker_operation(
+        self,
+        prepared: PreparedAccountSync,
+        *,
+        operation_id: str,
+        finalization_payload: Mapping[str, object] | None = None,
+    ) -> AccountOperation | None:
+        row = self._database.query_one(
+            "SELECT operation_kind, stage, account_before_sha256, "
+            "expected_account_after_sha256, actual_account_after_sha256, payload_json "
+            "FROM account_operations WHERE operation_id = ?",
+            (operation_id,),
         )
-        if persisted != receipt.account_after_sha256:
-            raise RuntimeError("durable broker sync account hash differs from uquant receipt")
-        return account, receipt
+        if row is None:
+            return None
+        if (
+            str(row["operation_kind"]) != "BROKER_SYNC"
+            or str(row["account_before_sha256"]) != prepared.account_before_sha256
+            or str(row["expected_account_after_sha256"]) != prepared.account_after_sha256
+        ):
+            raise PersistenceConflict("broker account preparation identity collision")
+        try:
+            payload: object = json.loads(str(row["payload_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise PersistenceConflict("broker account operation payload is invalid") from error
+        path_sha256 = _path_sha256(self._path)
+        expected_payload: dict[str, object] = {
+            "schema": "firmquant.account-operation.v1",
+            "operation_kind": "BROKER_SYNC",
+            "account_path_sha256": path_sha256,
+            "evidence_sha256": prepared.broker_snapshot_sha256,
+        }
+        if finalization_payload is not None:
+            decoded = json.loads(canonical_json(finalization_payload))
+            if not isinstance(decoded, dict):
+                raise PersistenceConflict("broker account finalization payload is invalid")
+            expected_payload["finalization"] = decoded
+        if payload != expected_payload:
+            raise PersistenceConflict("broker account preparation payload collision")
+        stage = str(row["stage"])
+        actual = row["actual_account_after_sha256"]
+        if stage == "CONTRADICTION":
+            raise RecoveryContradiction("broker account operation is already contradictory")
+        if stage == "PREPARED":
+            if actual is not None:
+                raise RecoveryContradiction("prepared broker account operation has unexpected actual hash")
+        elif stage in {"FILE_COMMITTED", "RECEIPT_COMMITTED"}:
+            if actual is None or str(actual) != prepared.account_after_sha256:
+                raise RecoveryContradiction("committed broker account operation has unexpected actual hash")
+        else:
+            raise RecoveryContradiction("broker account operation stage is invalid")
+        return AccountOperation(
+            database=self._database,
+            store=self._store,
+            account_path=self._path,
+            prepared_account=prepared.prepared_account,
+            operation_id=operation_id,
+            operation_kind="BROKER_SYNC",
+            account_before_sha256=prepared.account_before_sha256,
+            expected_account_after_sha256=prepared.account_after_sha256,
+            evidence_sha256=prepared.broker_snapshot_sha256,
+            path_sha256=path_sha256,
+        )
+
+    def commit_broker_snapshot(
+        self,
+        prepared: PreparedAccountSync,
+        *,
+        finalize: Callable[[], None] | None = None,
+        finalization_payload: Mapping[str, object] | None = None,
+    ) -> str:
+        """CAS-commit one reviewed preparation and its SQLite finalization atomically."""
+
+        if not isinstance(prepared, PreparedAccountSync):
+            raise TypeError("broker account commit requires PreparedAccountSync")
+        if finalize is not None and not callable(finalize):
+            raise TypeError("broker account finalizer must be callable or None")
+        if self._store.hash_state(prepared.prepared_account) != prepared.account_after_sha256:
+            raise RecoveryContradiction("prepared broker account changed before commit")
+        operation_id = self._operation_id(prepared)
+        operation = self._existing_broker_operation(
+            prepared,
+            operation_id=operation_id,
+            finalization_payload=finalization_payload,
+        )
+        now = self._now()
+        if operation is None:
+            operation = AccountOperation.begin(
+                database=self._database,
+                store=self._store,
+                account_path=self._path,
+                prepared_account=prepared.prepared_account,
+                expected_before_sha256=prepared.account_before_sha256,
+                operation_kind="BROKER_SYNC",
+                evidence_sha256=prepared.broker_snapshot_sha256,
+                now=now,
+                operation_id=operation_id,
+                finalization_payload=finalization_payload,
+            )
+        operation.commit_file(now=now)
+        operation.commit_receipt(now=now, finalize=finalize)
+        if self._store.hash_file(self._path) != prepared.account_after_sha256:
+            raise RecoveryContradiction("durable broker sync account hash differs from preparation")
+        return prepared.account_after_sha256
 
 
 __all__ = ("RuntimeAccountRepository",)

@@ -34,6 +34,7 @@ _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("halt", "触发 kill switch 并停止新增订单"),
     ("resume", "在显式复核后请求恢复"),
     ("reconcile", "执行完整券商与本地状态对账"),
+    ("bootstrap-account", "一次性建立真实券商账户与 uquant AccountState 权威绑定"),
     ("decisions", "查询不可变策略决策快照"),
     ("orders", "查询经济意图与券商订单生命周期"),
     ("fills", "查询规范化成交事实"),
@@ -109,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument(
                 "--reason",
                 help="可选操作说明; 仅保存摘要, 不保存原文",
+            )
+        elif name == "bootstrap-account":
+            subparser.add_argument(
+                "--account-state",
+                type=Path,
+                help="非空真实账户必须提供已复核的 uquant AccountState; 路径不会写入结果",
             )
         elif name == "replay":
             subparser.add_argument("--events", type=Path, required=True, help="冻结事件文件")
