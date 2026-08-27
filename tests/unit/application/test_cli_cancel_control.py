@@ -181,7 +181,9 @@ def test_cli_direct_cancel_is_write_free_in_paper(tmp_path: Path, capsys) -> Non
     assert calls == 0
 
 
-def test_cli_cancel_queues_when_daemon_owns_writer_without_constructing_broker(tmp_path: Path, capsys) -> None:
+def test_cli_cancel_queues_when_daemon_owns_writer_without_constructing_broker(
+    tmp_path: Path, capsys
+) -> None:
     state = tmp_path / "state"
     state.mkdir()
     config = tmp_path / "firmquant.toml"
