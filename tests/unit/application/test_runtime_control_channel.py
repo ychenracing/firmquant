@@ -105,24 +105,24 @@ def _write_config(path: Path, state: Path) -> None:
     path.write_text(
         "\n".join(
             (
-                'schema_version = 1',
+                "schema_version = 1",
                 'mode = "PAPER"',
-                'live_trading_enabled = false',
+                "live_trading_enabled = false",
                 'timezone = "Asia/Shanghai"',
-                '',
-                '[broker]',
+                "",
+                "[broker]",
                 'adapter = "PAPER"',
-                '',
-                '[paths]',
+                "",
+                "[paths]",
                 f'state_directory = "{state.as_posix()}"',
                 f'data_directory = "{(state.parent / "data").as_posix()}"',
                 f'report_directory = "{(state.parent / "reports").as_posix()}"',
                 f'backup_directory = "{(state.parent / "backups").as_posix()}"',
-                '',
-                '[compliance]',
-                'program_trading_report_confirmed = false',
-                'broker_api_authorized = false',
-                '',
+                "",
+                "[compliance]",
+                "program_trading_report_confirmed = false",
+                "broker_api_authorized = false",
+                "",
             )
         ),
         encoding="utf-8",
@@ -397,9 +397,7 @@ def test_daemon_applies_halt_before_broker_events_or_cycle_and_revokes_arm(tmp_p
             poll_interval=timedelta(seconds=1),
         )
         receipt = daemon.run()
-        revoked = writer.database.scalar(
-            "SELECT count(*) FROM arm_leases WHERE revoked_at IS NOT NULL"
-        )
+        revoked = writer.database.scalar("SELECT count(*) FROM arm_leases WHERE revoked_at IS NOT NULL")
         kill_events = writer.database.scalar(
             "SELECT count(*) FROM risk_events WHERE code = 'KILL_SWITCH_TRIPPED'"
         )
