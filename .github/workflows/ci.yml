@@ -18,7 +18,7 @@ env:
 
 jobs:
   source-repair:
-    if: github.event_name == 'push' && github.ref_name == 'codex/execution-evidence-readiness'
+    if: github.event_name == 'pull_request' && github.head_ref == 'codex/execution-evidence-readiness'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout branch without destructive cleanup
