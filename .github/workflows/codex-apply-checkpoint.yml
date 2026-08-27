@@ -1,4 +1,4 @@
-name: Codex apply checkpoint transforms
+name: Codex generate checkpoint artifacts
 
 on:
   push:
@@ -6,11 +6,11 @@ on:
       - codex/data-calendar-checkpoint
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply:
-    if: github.event.head_commit.message == 'chore: apply close checkpoint transforms'
+  generate:
+    if: github.event.head_commit.message == 'chore: generate close checkpoint artifacts'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout isolated branch
@@ -56,11 +56,27 @@ jobs:
             tests/unit/market_data/test_validation_suspension.py \
             tests/unit/market_data/test_xtquant_history_status.py \
             tests/integration/test_complete_backup_bundle.py
-      - name: Commit transformed checkpoint
+          git diff --check
+      - name: Stage transformed files
         run: |
-          git config user.name ychenracing
-          git config user.email ychenracing@163.com
-          git add src tests
-          git diff --cached --check
-          git commit -m 'feat: wire ordered close-session recovery checkpoint'
-          git push origin HEAD:codex/data-calendar-checkpoint
+          mkdir -p /tmp/firmquant-checkpoint/src/firmquant/application
+          mkdir -p /tmp/firmquant-checkpoint/src/firmquant/market_data
+          mkdir -p /tmp/firmquant-checkpoint/src/firmquant/observability
+          mkdir -p /tmp/firmquant-checkpoint/src/firmquant/persistence
+          mkdir -p /tmp/firmquant-checkpoint/tests/unit/application
+          cp src/firmquant/application/close_checkpoint.py /tmp/firmquant-checkpoint/src/firmquant/application/
+          cp src/firmquant/application/production_services.py /tmp/firmquant-checkpoint/src/firmquant/application/
+          cp src/firmquant/market_data/generations.py /tmp/firmquant-checkpoint/src/firmquant/market_data/
+          cp src/firmquant/market_data/xtquant_daily.py /tmp/firmquant-checkpoint/src/firmquant/market_data/
+          cp src/firmquant/market_data/xtquant_history.py /tmp/firmquant-checkpoint/src/firmquant/market_data/
+          cp src/firmquant/market_data/validation.py /tmp/firmquant-checkpoint/src/firmquant/market_data/
+          cp src/firmquant/observability/reports.py /tmp/firmquant-checkpoint/src/firmquant/observability/
+          cp src/firmquant/persistence/backup.py /tmp/firmquant-checkpoint/src/firmquant/persistence/
+          cp tests/unit/application/test_production_services_acceptance.py /tmp/firmquant-checkpoint/tests/unit/application/
+          git diff > /tmp/firmquant-checkpoint/transform.patch
+      - name: Upload transformed checkpoint
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: close-checkpoint-transform
+          path: /tmp/firmquant-checkpoint
+          if-no-files-found: error
