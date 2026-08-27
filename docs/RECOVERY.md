@@ -50,8 +50,10 @@ CONTRADICTION/HALT。
 AccountState，只有其 account hash、账户身份及 code/data identity 与原 operation 完全一致才继续；不会插入第二个 operation。
 
 崩溃发生在 AccountState 已经保存但 binding 尚未 finalize 时，重跑首先验证现有文件 hash 必须等于 operation 中的
-expected account hash，然后在单一 SQLite transaction 内写 account binding、binding audit、BINDING_COMMITTED 和 bootstrap
-audit。该恢复路径不再次保存或覆盖 AccountState。任何不匹配都失败关闭；完整 binding 已建立后再次 bootstrap 也拒绝覆盖。
+expected account hash，并重新确认当前只读 broker snapshot 仍属于同一账户、没有新的委托/成交，同时严格核对已保存
+AccountState 的 code/data identity、现金、持仓和可卖数量。全部一致后，才在单一 SQLite transaction 内写 account binding、
+binding audit、BINDING_COMMITTED 和 bootstrap audit。该恢复路径不再次保存或覆盖 AccountState。任何身份或经济状态不匹配
+都保持 PREPARED 并失败关闭；完整 binding 已建立后再次 bootstrap 也拒绝覆盖。
 
 ## SQLite 异常
 
