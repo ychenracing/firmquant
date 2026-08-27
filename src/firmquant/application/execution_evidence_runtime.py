@@ -17,6 +17,7 @@ from firmquant.application.execution_evidence import (
     ExecutionObservation,
     FillObservation,
     OrderObservation,
+    PlanningBlockerObservation,
     PositionObservation,
     TargetObservation,
 )
@@ -214,6 +215,17 @@ def _target_observations(
             reference_price=_price_for(symbol, quotes, planned.get(symbol)),
         )
     return tuple(targets[symbol] for symbol in sorted(targets, key=lambda value: value.canonical))
+
+
+def _planning_blockers(plan: ExecutionPlan) -> tuple[PlanningBlockerObservation, ...]:
+    return tuple(
+        PlanningBlockerObservation(
+            uquant_order_id=item.uquant_order_id,
+            symbol=item.symbol,
+            reason_code=item.reason_code,
+        )
+        for item in plan.blockers
+    )
 
 
 def _positions(values: tuple[object, ...]) -> tuple[PositionObservation, ...]:
@@ -419,6 +431,7 @@ def build_shadow_observation(
         plan_id=plan.plan_id,
         portfolio_equity=facts.broker_snapshot.account.total_assets.value,
         planned_orders=tuple(order_observations),
+        planning_blockers=_planning_blockers(plan),
         targets=targets,
         fills=tuple(fill_observations),
         actual_ending_positions=actual,
@@ -470,14 +483,7 @@ def _plan_payload(
             }
             for item in plan.orders
         ],
-        "blockers": [
-            {
-                "uquant_order_id": item.uquant_order_id,
-                "symbol": item.symbol.canonical,
-                "reason_code": item.reason_code,
-            }
-            for item in plan.blockers
-        ],
+        "blockers": [item.payload() for item in _planning_blockers(plan)],
         "targets": [item.payload() for item in targets],
         "created_at": created_at.isoformat(),
     }
@@ -553,6 +559,24 @@ def _load_canary_plan(database: Database, *, session: date) -> dict[str, object]
         if raw.get("execution_session") == session.isoformat():
             return cast(dict[str, object], raw)
     return None
+
+
+def _plan_blockers(payload: Mapping[str, object]) -> tuple[PlanningBlockerObservation, ...]:
+    raw = payload.get("blockers")
+    if not isinstance(raw, list):
+        raise RuntimeEvidenceError("CANARY plan blockers are missing")
+    blockers: list[PlanningBlockerObservation] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RuntimeEvidenceError("CANARY blocker evidence is malformed")
+        blockers.append(
+            PlanningBlockerObservation(
+                uquant_order_id=str(item.get("uquant_order_id", "")),
+                symbol=str(item.get("symbol", "")),
+                reason_code=str(item.get("reason_code", "")),
+            )
+        )
+    return tuple(blockers)
 
 
 def _plan_targets(payload: Mapping[str, object]) -> tuple[TargetObservation, ...]:
@@ -701,6 +725,7 @@ def finalize_canary_observation(
         plan_id=plan_id,
         portfolio_equity=Decimal(str(plan.get("portfolio_equity"))),
         planned_orders=tuple(order_observations),
+        planning_blockers=_plan_blockers(plan),
         targets=targets,
         fills=tuple(fill_observations),
         actual_ending_positions=actual,

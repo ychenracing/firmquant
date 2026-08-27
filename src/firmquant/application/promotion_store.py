@@ -16,6 +16,7 @@ from firmquant.application.execution_evidence import (
     ExecutionObservation,
     FillObservation,
     OrderObservation,
+    PlanningBlockerObservation,
     PositionObservation,
     TargetObservation,
     aggregate_observations,
@@ -120,6 +121,15 @@ def _decode_order(payload: object) -> OrderObservation:
     )
 
 
+def _decode_planning_blocker(payload: object) -> PlanningBlockerObservation:
+    value = _mapping(payload, label="planning blocker observation")
+    return PlanningBlockerObservation(
+        uquant_order_id=cast(str, _text(value.get("uquant_order_id"), label="blocker order id")),
+        symbol=cast(str, _text(value.get("symbol"), label="blocker symbol")),
+        reason_code=cast(str, _text(value.get("reason_code"), label="blocker reason code")),
+    )
+
+
 def _decode_target(payload: object) -> TargetObservation:
     value = _mapping(payload, label="target observation")
     return TargetObservation(
@@ -169,6 +179,10 @@ def _decode_observation(payload: object) -> ExecutionObservation:
         portfolio_equity=_decimal(value.get("portfolio_equity"), label="portfolio equity"),
         planned_orders=tuple(
             _decode_order(item) for item in _array(value.get("planned_orders"), label="planned orders")
+        ),
+        planning_blockers=tuple(
+            _decode_planning_blocker(item)
+            for item in _array(value.get("planning_blockers"), label="planning blockers")
         ),
         targets=tuple(_decode_target(item) for item in _array(value.get("targets"), label="targets")),
         fills=tuple(_decode_fill(item) for item in _array(value.get("fills"), label="fills")),

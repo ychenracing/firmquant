@@ -147,6 +147,25 @@ class EvidenceIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanningBlockerObservation:
+    uquant_order_id: str
+    symbol: str
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        _text(self.uquant_order_id, label="planning blocker order id")
+        _text(self.symbol, label="planning blocker symbol")
+        _text(self.reason_code, label="planning blocker reason code")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "uquant_order_id": self.uquant_order_id,
+            "symbol": self.symbol,
+            "reason_code": self.reason_code,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class OrderObservation:
     execution_id: str
     uquant_order_id: str
@@ -293,6 +312,7 @@ class ExecutionObservation:
     plan_id: str
     portfolio_equity: Decimal
     planned_orders: tuple[OrderObservation, ...]
+    planning_blockers: tuple[PlanningBlockerObservation, ...]
     targets: tuple[TargetObservation, ...]
     fills: tuple[FillObservation, ...]
     actual_ending_positions: tuple[PositionObservation, ...]
@@ -315,6 +335,7 @@ class ExecutionObservation:
         _decimal(self.portfolio_equity, label="portfolio equity", positive=True)
         for label, values, expected in (
             ("planned orders", self.planned_orders, OrderObservation),
+            ("planning blockers", self.planning_blockers, PlanningBlockerObservation),
             ("targets", self.targets, TargetObservation),
             ("fills", self.fills, FillObservation),
             ("actual ending positions", self.actual_ending_positions, PositionObservation),
@@ -375,6 +396,7 @@ class ExecutionObservation:
             "plan_id": self.plan_id,
             "portfolio_equity": _decimal_text(self.portfolio_equity),
             "planned_orders": [item.payload() for item in self.planned_orders],
+            "planning_blockers": [item.payload() for item in self.planning_blockers],
             "targets": [item.payload() for item in self.targets],
             "fills": [item.payload() for item in self.fills],
             "actual_ending_positions": [item.payload() for item in self.actual_ending_positions],
@@ -600,6 +622,7 @@ __all__ = (
     "ExecutionObservation",
     "FillObservation",
     "OrderObservation",
+    "PlanningBlockerObservation",
     "PositionObservation",
     "TargetObservation",
     "aggregate_observations",

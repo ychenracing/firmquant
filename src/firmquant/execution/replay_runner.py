@@ -684,7 +684,7 @@ def _broker_execution_facts(
         requested = planned.authorized_shares.value
         broker_order_id = (
             "replay-order:"
-            + hashlib.sha256(f"{session.isoformat()} {planned.uquant_order_id}".encode()).hexdigest()
+            + hashlib.sha256(f"{session.isoformat()}\0{planned.uquant_order_id}".encode()).hexdigest()
         )
         status = BrokerOrderStatus.FILLED if filled == requested else BrokerOrderStatus.CANCELLED
         order_payload = {
@@ -725,7 +725,7 @@ def _broker_execution_facts(
             fill_id = (
                 "replay-fill:"
                 + hashlib.sha256(
-                    f"{session.isoformat()} {planned.uquant_order_id} {filled} {fill_price}".encode()
+                    f"{session.isoformat()}\0{planned.uquant_order_id}\0{filled}\0{fill_price}".encode()
                 ).hexdigest()
             )
             fill_payload = {

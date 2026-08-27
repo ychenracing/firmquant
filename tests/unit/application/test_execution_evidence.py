@@ -15,6 +15,7 @@ from firmquant.application.execution_evidence import (
     ExecutionObservation,
     FillObservation,
     OrderObservation,
+    PlanningBlockerObservation,
     PositionObservation,
     TargetObservation,
     aggregate_observations,
@@ -46,6 +47,13 @@ def _observation(*, stage: EvidenceStage = EvidenceStage.SHADOW) -> ExecutionObs
         decision_id="decision-1",
         plan_id="plan-1",
         portfolio_equity=Decimal("10000"),
+        planning_blockers=(
+            PlanningBlockerObservation(
+                uquant_order_id="uq-blocked",
+                symbol="000001.SZ",
+                reason_code="TARGET_ALREADY_SATISFIED",
+            ),
+        ),
         planned_orders=(
             OrderObservation(
                 execution_id="exec-1",
@@ -129,6 +137,7 @@ def test_shadow_tracking_error_is_derived_from_target_and_ending_positions() -> 
     assert aggregate.notional_weighted_tracking_error == Decimal("0.04")
     assert aggregate.unfilled_notional == Decimal("400")
     assert aggregate.blocker_counts[BlockerCode.VOLUME_LIMIT] == 1
+    assert observation.payload()["planning_blockers"][0]["reason_code"] == "TARGET_ALREADY_SATISFIED"
 
 
 def test_blocker_does_not_force_tracking_error_to_one() -> None:

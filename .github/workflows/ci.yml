@@ -8,7 +8,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FIRMQ_CI: "1"
@@ -17,79 +17,6 @@ env:
   UV_FROZEN: "1"
 
 jobs:
-  source-repair:
-    if: github.event_name == 'pull_request' && github.head_ref == 'codex/execution-evidence-readiness'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout branch without destructive cleanup
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: codex/execution-evidence-readiness
-          clean: false
-          fetch-depth: 1
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.12"
-      - name: Set up uv
-        uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
-        with:
-          version: "0.11.33"
-      - name: Repair source encoding and apply immutable blockers
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          runner = Path('src/firmquant/execution/replay_runner.py')
-          raw = runner.read_bytes()
-          if b'\x00' not in raw:
-              raise SystemExit('expected replay runner NUL byte is absent')
-          runner.write_bytes(raw.replace(b'\x00', b'\\0'))
-
-          script = Path('scripts/add_immutable_planning_blockers.py')
-          text = script.read_text(encoding='utf-8')
-          marker = '''replace_once(
-              RUNTIME,
-              "        planned_orders=tuple(order_observations),\\n        targets=targets,\\n",
-              "        planned_orders=tuple(order_observations),\\n"
-              "        planning_blockers=_planning_blockers(plan),\\n"
-              "        targets=targets,\\n",
-              label="shadow blocker construction",
-          )
-          '''
-          if marker not in text:
-              raise SystemExit('immutable blocker construction marker is missing')
-          replacement = '''_runtime_text = RUNTIME.read_text(encoding="utf-8")
-          _old = "        planned_orders=tuple(order_observations),\\n        targets=targets,\\n"
-          _new = (
-              "        planned_orders=tuple(order_observations),\\n"
-              "        planning_blockers=_planning_blockers(plan),\\n"
-              "        targets=targets,\\n"
-          )
-          if _runtime_text.count(_old) != 2:
-              raise RuntimeError("SHADOW/CANARY blocker construction must have exactly two matches")
-          RUNTIME.write_text(_runtime_text.replace(_old, _new, 1), encoding="utf-8")
-          '''
-          script.write_text(text.replace(marker, replacement, 1), encoding='utf-8')
-          PY
-          python scripts/add_immutable_planning_blockers.py
-      - name: Normalize exact touched surface
-        run: |
-          uv sync --frozen --extra dev
-          uv run ruff check --fix src/firmquant/application/execution_evidence.py src/firmquant/application/promotion_store.py src/firmquant/application/execution_evidence_runtime.py src/firmquant/execution/replay_runner.py tests/unit/application/test_execution_evidence.py
-          uv run ruff format src/firmquant/application/execution_evidence.py src/firmquant/application/promotion_store.py src/firmquant/application/execution_evidence_runtime.py src/firmquant/execution/replay_runner.py tests/unit/application/test_execution_evidence.py
-      - name: Restore standard CI and commit repair
-        shell: bash
-        run: |
-          git fetch origin main --depth=1
-          git show FETCH_HEAD:.github/workflows/ci.yml > .github/workflows/ci.yml
-          git config user.name "firmquant-bot"
-          git config user.email "firmquant-bot@users.noreply.github.com"
-          git add -A
-          git diff --cached --check
-          git commit -m "Repair execution evidence source integrity"
-          git push origin HEAD:codex/execution-evidence-readiness
-
   quality:
     name: Python 3.12 / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
