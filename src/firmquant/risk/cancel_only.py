@@ -201,7 +201,9 @@ class BrokerCancelOnlyCapability:
                         filled_shares=int(row["filled_shares"]),
                         limit_price=str(row["limit_price"]),
                         session_date=str(row["session_date"]),
-                        event_sequence=(None if row["last_event_sequence"] is None else int(row["last_event_sequence"])),
+                        event_sequence=(
+                            None if row["last_event_sequence"] is None else int(row["last_event_sequence"])
+                        ),
                     )
                 )
             except (KeyError, TypeError, ValueError):
