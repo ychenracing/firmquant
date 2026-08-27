@@ -246,7 +246,6 @@ class AccountBindingRepository:
             return self.bind_in_transaction(binding)
 
 
-
 @dataclass(frozen=True, slots=True)
 class ReviewedAccountAdjustment:
     adjustment_id: str

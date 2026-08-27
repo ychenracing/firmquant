@@ -541,7 +541,6 @@ class AccountBootstrapService:
         return self._finalize_bootstrap(pending, completed=self._now())
 
 
-
 __all__ = (
     "AccountBootstrapDenied",
     "AccountBootstrapReceipt",
