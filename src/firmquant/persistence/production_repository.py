@@ -431,23 +431,33 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         if expected is not None and current.state is expected:
             return current
         if fact.status is BrokerOrderStatus.REJECTED:
-            event = BrokerRejected(
-                event_id=_stable_event_id("recovery-rejected", fact.broker_order_id, fact.event_sequence),
-                reason_code="BROKER_REJECTED",
+            return self.transition(
+                current,
+                BrokerRejected(
+                    event_id=_stable_event_id("recovery-rejected", fact.broker_order_id, fact.event_sequence),
+                    reason_code="BROKER_REJECTED",
+                ),
+                occurred_at=received_at,
             )
-        elif fact.status is BrokerOrderStatus.EXPIRED:
-            event = OrderExpired(
-                event_id=_stable_event_id("recovery-expired", fact.broker_order_id, fact.event_sequence),
-                reason_code="BROKER_EXPIRED",
+        if fact.status is BrokerOrderStatus.EXPIRED:
+            return self.transition(
+                current,
+                OrderExpired(
+                    event_id=_stable_event_id("recovery-expired", fact.broker_order_id, fact.event_sequence),
+                    reason_code="BROKER_EXPIRED",
+                ),
+                occurred_at=received_at,
             )
-        elif fact.status is BrokerOrderStatus.CANCELLED:
-            event = CancelConfirmed(
-                event_id=_stable_event_id("recovery-cancelled", fact.broker_order_id, fact.event_sequence),
-                broker_order_id=fact.broker_order_id,
+        if fact.status is BrokerOrderStatus.CANCELLED:
+            return self.transition(
+                current,
+                CancelConfirmed(
+                    event_id=_stable_event_id("recovery-cancelled", fact.broker_order_id, fact.event_sequence),
+                    broker_order_id=fact.broker_order_id,
+                ),
+                occurred_at=received_at,
             )
-        else:
-            return current
-        return self.transition(current, event, occurred_at=received_at)
+        return current
 
     def reconcile_broker_fact(
         self,
