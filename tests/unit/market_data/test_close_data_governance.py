@@ -10,6 +10,7 @@ import pytest
 from firmquant.market_data.xtquant_daily import (
     DailyBar,
     DailyDataDeadlineExceeded,
+    DailyDataRetriesExhausted,
     DailyDataUpdateError,
     DailyFetchPolicy,
     InstrumentSessionState,
@@ -76,6 +77,11 @@ class Provider:
         return {symbol: self.statuses[symbol] for symbol in symbols}
 
 
+def _retry_cause(error: DailyDataRetriesExhausted, message: str) -> None:
+    assert isinstance(error.__cause__, DailyDataUpdateError)
+    assert message in str(error.__cause__)
+
+
 def test_suspended_security_may_keep_last_real_bar_without_fabrication(tmp_path: Path) -> None:
     symbol = "sz300308"
     provider = Provider(
@@ -93,7 +99,7 @@ def test_suspended_security_may_keep_last_real_bar_without_fabrication(tmp_path:
     assert "2026-08-25" not in (tmp_path / f"{symbol}.csv").read_text(encoding="utf-8")
 
 
-def test_normal_security_missing_target_bar_fails_closed(tmp_path: Path) -> None:
+def test_normal_security_missing_target_bar_fails_closed_after_bounded_retries(tmp_path: Path) -> None:
     symbol = "sz300308"
     provider = Provider(
         {symbol: (bar(24),)},
@@ -101,11 +107,13 @@ def test_normal_security_missing_target_bar_fails_closed(tmp_path: Path) -> None
     )
     updater = XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
 
-    with pytest.raises(DailyDataUpdateError, match="target session"):
+    with pytest.raises(DailyDataRetriesExhausted) as captured:
         updater.update((symbol,), through=TARGET)
+    _retry_cause(captured.value, "while security is trading")
+    assert provider.fetch_calls == 3
 
 
-def test_stale_suspension_fact_fails_closed(tmp_path: Path) -> None:
+def test_stale_suspension_fact_fails_closed_after_bounded_retries(tmp_path: Path) -> None:
     symbol = "sz300308"
     stale = datetime(2026, 8, 25, 6, 30, tzinfo=UTC)
     provider = Provider(
@@ -114,8 +122,10 @@ def test_stale_suspension_fact_fails_closed(tmp_path: Path) -> None:
     )
     updater = XtQuantDailyDataUpdater(root=tmp_path, provider=provider, clock=lambda: NOW)
 
-    with pytest.raises(DailyDataUpdateError, match="status is stale"):
+    with pytest.raises(DailyDataRetriesExhausted) as captured:
         updater.update((symbol,), through=TARGET)
+    _retry_cause(captured.value, "status is stale")
+    assert provider.fetch_calls == 3
 
 
 def test_reference_index_missing_target_bar_is_never_excused(tmp_path: Path) -> None:
@@ -131,8 +141,10 @@ def test_reference_index_missing_target_bar_is_never_excused(tmp_path: Path) -> 
         required_complete_symbols=frozenset({symbol}),
     )
 
-    with pytest.raises(DailyDataUpdateError, match="required complete"):
+    with pytest.raises(DailyDataRetriesExhausted) as captured:
         updater.update((symbol,), through=TARGET)
+    _retry_cause(captured.value, "required complete")
+    assert provider.fetch_calls == 3
 
 
 def test_bounded_retry_succeeds_and_persists_attempt_receipts(tmp_path: Path) -> None:
