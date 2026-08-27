@@ -20,6 +20,22 @@ def write_csv(root: Path, symbol: str, rows: tuple[tuple[str, str], ...]) -> Non
     (root / f"{symbol}.csv").write_text(text, encoding="utf-8")
 
 
+def candidate_store(tmp_path: Path) -> tuple[DataGenerationStore, str, str]:
+    seed = tmp_path / "seed"
+    write_csv(seed, "sz300308", (("2026-08-24", "10"),))
+    store = DataGenerationStore(tmp_path / "state")
+    active = store.ensure_active(seed, source="xtquant", created_at=NOW)
+    candidate = store.create_candidate(
+        active_generation_id=active.generation_id,
+        replacement_rows={
+            "sz300308": b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n"
+        },
+        source="xtquant",
+        generated_at=NOW,
+    )
+    return store, active.generation_id, candidate.candidate_id
+
+
 def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     state = tmp_path / "state"
@@ -77,19 +93,8 @@ def test_promotion_is_atomic_and_keeps_previous_generation_for_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = tmp_path / "seed"
-    write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = DataGenerationStore(tmp_path / "state")
-    active = store.ensure_active(seed, source="xtquant", created_at=NOW)
-    candidate = store.create_candidate(
-        active_generation_id=active.generation_id,
-        replacement_rows={
-            "sz300308": b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n"
-        },
-        source="xtquant",
-        generated_at=NOW,
-    )
-    original = store.active().generation_id
+    store, original, candidate_id = candidate_store(tmp_path)
+    candidate = store.verify_candidate(candidate_id)
     real_replace = store._replace_active_pointer
 
     def crash(*_args: object, **_kwargs: object) -> None:
@@ -112,3 +117,36 @@ def test_promotion_is_atomic_and_keeps_previous_generation_for_recovery(
     )
     assert promoted.generation_id != original
     assert (store.generations_root / original).is_dir()
+
+
+def test_promotion_recovers_after_pointer_switch_before_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, original, candidate_id = candidate_store(tmp_path)
+    candidate = store.verify_candidate(candidate_id)
+    real_replace = store._replace_active_pointer
+    switched: list[str] = []
+
+    def switch_then_crash(generation) -> None:
+        real_replace(generation)
+        switched.append(generation.generation_id)
+        raise OSError("simulated post-pointer crash")
+
+    monkeypatch.setattr(store, "_replace_active_pointer", switch_then_crash)
+    with pytest.raises(OSError, match="post-pointer crash"):
+        store.promote_candidate(
+            candidate.candidate_id,
+            expected_candidate_sha256=candidate.candidate_sha256,
+            promoted_at=NOW,
+        )
+    assert switched
+    assert store.active().generation_id != original
+    assert store.pending_promotion.is_file()
+
+    monkeypatch.setattr(store, "_replace_active_pointer", real_replace)
+    recovered = store.recover_pending_promotion()
+    assert recovered is not None
+    assert recovered.generation_id == store.active().generation_id
+    assert not store.pending_promotion.exists()
+    assert (store.promotions_root / f"{candidate.candidate_id}.json").is_file()
