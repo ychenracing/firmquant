@@ -173,7 +173,6 @@ class ProductionDaemon(ProductionRuntime):
             writer=writer,
             broker=cancel_broker,
             clock=clock,
-            halt_hook=hooks.halt,
         )
         self._risk_blocked = False
         self._poll_interval = _positive_duration(poll_interval, label="poll interval")
@@ -200,7 +199,9 @@ class ProductionDaemon(ProductionRuntime):
 
     def _drain_events(self) -> int:
         processed = 0
-        while processed < self._max_events_per_cycle and self._pump.dispatch_one(self._hooks.handle_event):
+        while processed < self._max_events_per_cycle and self._pump.dispatch_one(
+            self._hooks.handle_event
+        ):
             processed += 1
         return processed
 
