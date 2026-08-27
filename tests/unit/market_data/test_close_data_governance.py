@@ -4,9 +4,8 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
-
 import firmquant.market_data.xtquant_daily as daily
+import pytest
 
 
 TARGET = date(2026, 8, 25)
