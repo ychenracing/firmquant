@@ -201,3 +201,25 @@ def test_production_risk_wiring_has_no_favourable_placeholder_literals() -> None
         "cash_and_positions_safe=True",
     )
     assert not [literal for literal in forbidden if literal in source]
+
+
+def test_production_time_authority_wiring_has_single_implementation() -> None:
+    import firmquant.application.production_services as production_services
+
+    module_source = inspect.getsource(production_services)
+    hooks_source = inspect.getsource(production_services.ProductionServiceHooks)
+    assert module_source.count("reconciliation: ReconciliationReceipt") == 1
+    assert (
+        hooks_source.count(
+            "self._active_execution_deadlines: ExecutionDeadlines | None = None"
+        )
+        == 1
+    )
+    for helper in (
+        "def _monotonic(",
+        "def _clock_receipt(",
+        "def _disconnect_duration(",
+        "def _existing_order_age(",
+        "def _execution_deadlines(",
+    ):
+        assert hooks_source.count(helper) == 1
