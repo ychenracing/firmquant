@@ -193,7 +193,7 @@ class PassingReconciler:
     def __init__(self) -> None:
         self.facts: list[object] = []
 
-    def run(self, kind, facts):
+    def evaluate(self, kind, facts):
         self.facts.append(facts)
         return SimpleNamespace(
             reconciliation_id="recon_" + "a" * 64,
@@ -201,6 +201,9 @@ class PassingReconciler:
             passed=True,
             blockers=(),
         )
+
+    def commit(self, _receipt, *, broker_snapshot_sha256):
+        assert len(broker_snapshot_sha256) == 64
 
 
 class RecoveryResult:
