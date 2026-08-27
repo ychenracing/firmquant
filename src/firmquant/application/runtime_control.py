@@ -83,9 +83,9 @@ class RuntimeControlExecutor:
 
         if not isinstance(source, str) or not source or source != source.strip():
             raise ValueError("internal stop source must be canonical text")
-        request_id = "internal-stop-" + hashlib.sha256(
-            f"{source}:{self._writer.generation}".encode()
-        ).hexdigest()
+        request_id = (
+            "internal-stop-" + hashlib.sha256(f"{source}:{self._writer.generation}".encode()).hexdigest()
+        )
         return self._stop(request_id=request_id, reason_sha256=None)
 
     def finalize_stop(self) -> RuntimeStatus:
