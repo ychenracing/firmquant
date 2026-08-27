@@ -68,12 +68,22 @@ def test_calendar_update_cannot_rewrite_any_already_used_session(tmp_path: Path)
 
 def test_calendar_update_may_extend_future_coverage_without_changing_past(tmp_path: Path) -> None:
     sessions = ["2026-08-21", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28"]
-    current = load_trading_calendar_manifest(manifest(tmp_path / "current.json", end="2026-08-28", sessions=sessions))
+    current = load_trading_calendar_manifest(
+        manifest(tmp_path / "current.json", end="2026-08-28", sessions=sessions)
+    )
     proposed = load_trading_calendar_manifest(
-        manifest(tmp_path / "proposed.json", end="2026-09-04", sessions=sessions + ["2026-08-31", "2026-09-01"])
+        manifest(
+            tmp_path / "proposed.json",
+            end="2026-09-04",
+            sessions=[*sessions, "2026-08-31", "2026-09-01"],
+        )
     )
 
-    receipt = validate_calendar_update(current=current, proposed=proposed, used_through=date(2026, 8, 25))
+    receipt = validate_calendar_update(
+        current=current,
+        proposed=proposed,
+        used_through=date(2026, 8, 25),
+    )
 
     assert receipt.previous_sha256 == current.sha256
     assert receipt.proposed_sha256 == proposed.sha256

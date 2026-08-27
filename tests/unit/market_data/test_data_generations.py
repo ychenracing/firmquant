@@ -5,10 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from firmquant.market_data.generations import (
-    DataGenerationError,
-    DataGenerationStore,
-)
+import firmquant.market_data.generations as generations
 
 
 NOW = datetime(2026, 8, 25, 8, tzinfo=UTC)
@@ -26,7 +23,7 @@ def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: 
     seed = tmp_path / "seed"
     state = tmp_path / "state"
     write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = DataGenerationStore(state)
+    store = generations.DataGenerationStore(state)
     active = store.ensure_active(seed, source="xtquant", created_at=NOW)
     before = (active.path / "sz300308.csv").read_bytes()
 
@@ -34,10 +31,10 @@ def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: 
         active_generation_id=active.generation_id,
         replacement_rows={
             "sz300308": (
-                "date,open,high,low,close,volume,amount\n"
-                "2026-08-24,9.5,9.5,9.5,9.5,1000,9500\n"
-                "2026-08-25,11,11,11,11,1000,11000\n"
-            ).encode("utf-8")
+                b"date,open,high,low,close,volume,amount\n"
+                b"2026-08-24,9.5,9.5,9.5,9.5,1000,9500\n"
+                b"2026-08-25,11,11,11,11,1000,11000\n"
+            )
         },
         source="xtquant",
         generated_at=NOW,
@@ -53,20 +50,26 @@ def test_history_rewrite_candidate_never_overwrites_active_generation(tmp_path: 
 def test_tampered_candidate_cannot_be_verified_or_promoted(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = DataGenerationStore(tmp_path / "state")
+    store = generations.DataGenerationStore(tmp_path / "state")
     active = store.ensure_active(seed, source="xtquant", created_at=NOW)
     candidate = store.create_candidate(
         active_generation_id=active.generation_id,
-        replacement_rows={"sz300308": b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n"},
+        replacement_rows={
+            "sz300308": b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n"
+        },
         source="xtquant",
         generated_at=NOW,
     )
     (candidate.path / "sz300308.csv").write_text("tampered\n", encoding="utf-8")
 
-    with pytest.raises(DataGenerationError, match="changed"):
+    with pytest.raises(generations.DataGenerationError, match="changed"):
         store.verify_candidate(candidate.candidate_id)
-    with pytest.raises(DataGenerationError):
-        store.promote_candidate(candidate.candidate_id, expected_candidate_sha256=candidate.candidate_sha256, promoted_at=NOW)
+    with pytest.raises(generations.DataGenerationError):
+        store.promote_candidate(
+            candidate.candidate_id,
+            expected_candidate_sha256=candidate.candidate_sha256,
+            promoted_at=NOW,
+        )
 
 
 def test_promotion_is_atomic_and_keeps_previous_generation_for_recovery(
@@ -75,11 +78,13 @@ def test_promotion_is_atomic_and_keeps_previous_generation_for_recovery(
 ) -> None:
     seed = tmp_path / "seed"
     write_csv(seed, "sz300308", (("2026-08-24", "10"),))
-    store = DataGenerationStore(tmp_path / "state")
+    store = generations.DataGenerationStore(tmp_path / "state")
     active = store.ensure_active(seed, source="xtquant", created_at=NOW)
     candidate = store.create_candidate(
         active_generation_id=active.generation_id,
-        replacement_rows={"sz300308": b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n"},
+        replacement_rows={
+            "sz300308": b"date,open,high,low,close,volume,amount\n2026-08-24,9,9,9,9,1000,9000\n"
+        },
         source="xtquant",
         generated_at=NOW,
     )
@@ -91,7 +96,11 @@ def test_promotion_is_atomic_and_keeps_previous_generation_for_recovery(
 
     monkeypatch.setattr(store, "_replace_active_pointer", crash)
     with pytest.raises(OSError, match="promotion crash"):
-        store.promote_candidate(candidate.candidate_id, expected_candidate_sha256=candidate.candidate_sha256, promoted_at=NOW)
+        store.promote_candidate(
+            candidate.candidate_id,
+            expected_candidate_sha256=candidate.candidate_sha256,
+            promoted_at=NOW,
+        )
     assert store.active().generation_id == original
 
     monkeypatch.setattr(store, "_replace_active_pointer", real_replace)
