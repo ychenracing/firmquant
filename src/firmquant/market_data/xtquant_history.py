@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
+from firmquant.domain.broker_facts import InstrumentFact, SecurityStatus
 from firmquant.domain.values import Symbol
-from firmquant.market_data.xtquant_daily import DailyBar, DailyDataUpdateError, DailyHistoryProvider
+from firmquant.market_data.xtquant_daily import (
+    DailyBar,
+    DailyDataUpdateError,
+    DailyHistoryProvider,
+    InstrumentSessionState,
+    InstrumentSessionStatus,
+)
+from firmquant.persistence.repositories import canonical_sha256
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _RAW_INDEX_SYMBOLS = frozenset({"sh000300", "sh000682"})
 _FIELDS = ["time", "open", "high", "low", "close", "volume", "amount"]
+type InstrumentLookup = Callable[[Symbol], InstrumentFact]
 
 
 class _Frame(Protocol):
@@ -80,15 +89,23 @@ def _time_value(row: Mapping[str, object]) -> object:
 
 
 class OfficialXtQuantDailyHistoryProvider(DailyHistoryProvider):
-    """Download/read official local MiniQMT history; all unit multipliers are reviewed inputs."""
+    """Read official history plus broker-authoritative instrument status without filling bars."""
 
-    def __init__(self, *, xtdata: object, volume_multipliers: Mapping[str, int]) -> None:
+    def __init__(
+        self,
+        *,
+        xtdata: object,
+        volume_multipliers: Mapping[str, int],
+        instrument_lookup: InstrumentLookup | None = None,
+    ) -> None:
         downloader = getattr(xtdata, "download_history_data", None)
         reader = getattr(xtdata, "get_market_data_ex", None)
         if not callable(downloader) or not callable(reader):
             raise TypeError("official XtQuant history APIs are unavailable")
         if not isinstance(volume_multipliers, Mapping):
             raise TypeError("XtQuant history volume multipliers must be a mapping")
+        if instrument_lookup is not None and not callable(instrument_lookup):
+            raise TypeError("XtQuant instrument lookup must be callable")
         normalized: dict[str, int] = {}
         for market in ("SH", "SZ", "BJ"):
             value = volume_multipliers.get(market)
@@ -97,6 +114,7 @@ class OfficialXtQuantDailyHistoryProvider(DailyHistoryProvider):
             normalized[market] = value
         self._xtdata = xtdata
         self._multipliers = normalized
+        self._instrument_lookup = instrument_lookup
 
     def _fetch_symbol(self, symbol: str, *, through: date) -> tuple[DailyBar, ...]:
         parsed = Symbol.parse(symbol)
@@ -145,8 +163,10 @@ class OfficialXtQuantDailyHistoryProvider(DailyHistoryProvider):
                 )
             )
         values = tuple(sorted(bars, key=lambda item: item.session))
-        if not values or values[-1].session != through:
-            raise DailyDataUpdateError(f"XtQuant daily history does not reach {through}: {symbol}")
+        if not values:
+            raise DailyDataUpdateError(f"XtQuant daily history is empty for {symbol}")
+        if values[-1].session > through:
+            raise DailyDataUpdateError(f"XtQuant daily history exceeds target session: {symbol}")
         if len({item.session for item in values}) != len(values):
             raise DailyDataUpdateError(f"XtQuant daily history contains duplicate sessions: {symbol}")
         return values
@@ -164,5 +184,55 @@ class OfficialXtQuantDailyHistoryProvider(DailyHistoryProvider):
         normalized = tuple(sorted({Symbol.parse(item).canonical for item in symbols}))
         return {symbol: self._fetch_symbol(symbol, through=through) for symbol in normalized}
 
+    def fetch_status(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        session: date,
+    ) -> Mapping[str, InstrumentSessionStatus]:
+        if type(session) is not date:
+            raise TypeError("XtQuant instrument status session must be calendar date")
+        if self._instrument_lookup is None:
+            raise DailyDataUpdateError("broker-authoritative instrument status lookup is unavailable")
+        normalized = tuple(sorted({Symbol.parse(item).canonical for item in symbols}))
+        result: dict[str, InstrumentSessionStatus] = {}
+        for symbol in normalized:
+            parsed = Symbol.parse(symbol)
+            try:
+                fact = self._instrument_lookup(parsed)
+            except Exception as error:
+                raise DailyDataUpdateError(f"XtQuant instrument status is unavailable for {symbol}") from error
+            if not isinstance(fact, InstrumentFact) or fact.symbol != parsed:
+                raise DailyDataUpdateError(f"XtQuant instrument identity mismatch for {symbol}")
+            if fact.session_date != session:
+                raise DailyDataUpdateError(f"XtQuant instrument status session mismatch for {symbol}")
+            state = (
+                InstrumentSessionState.SUSPENDED
+                if fact.status is SecurityStatus.SUSPENDED
+                else InstrumentSessionState.TRADING
+            )
+            raw_payload_sha256 = canonical_sha256(
+                {
+                    "schema": "firmquant.xtquant-instrument-status.v1",
+                    "symbol": fact.symbol.canonical,
+                    "security_type": fact.security_type.value,
+                    "status": fact.status.value,
+                    "session_date": fact.session_date,
+                    "observed_at": fact.observed_at,
+                    "trading_unit": fact.trading_unit.value,
+                    "price_tick": fact.price_tick.canonical,
+                    "price_precision": fact.price_precision,
+                }
+            )
+            result[symbol] = InstrumentSessionStatus(
+                symbol=symbol,
+                session=session,
+                state=state,
+                observed_at=fact.observed_at,
+                source="xtquant-instrument",
+                raw_payload_sha256=raw_payload_sha256,
+            )
+        return result
 
-__all__ = ("OfficialXtQuantDailyHistoryProvider",)
+
+__all__ = ("InstrumentLookup", "OfficialXtQuantDailyHistoryProvider")
