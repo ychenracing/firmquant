@@ -6,6 +6,7 @@ on:
       - codex/data-calendar-checkpoint
     paths:
       - .github/codex_apply_checkpoint.py
+      - .github/workflows/codex-apply-checkpoint.yml
 
 permissions:
   contents: read
