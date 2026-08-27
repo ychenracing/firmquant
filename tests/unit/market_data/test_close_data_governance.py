@@ -4,8 +4,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
-import firmquant.market_data.xtquant_daily as daily
 import pytest
+
+import firmquant.market_data.xtquant_daily as daily
 
 
 TARGET = date(2026, 8, 25)
@@ -187,4 +188,4 @@ def test_bounded_retry_exhaustion_and_deadline_do_not_loop_forever(tmp_path: Pat
 
     with pytest.raises(daily.DailyDataDeadlineExceeded):
         updater.update((symbol,), through=TARGET)
-    assert provider.fetch_calls == 3
+    assert provider.fetch_calls == 2

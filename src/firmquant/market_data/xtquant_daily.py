@@ -1,16 +1,20 @@
-"""Atomic daily-data updates that reject silent historical rewrites."""
+"""Atomic daily-data updates with authoritative suspension and bounded-retry semantics."""
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import importlib
+import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
 
@@ -21,6 +25,59 @@ class SourceEpochResealRequired(RuntimeError):
 
 class DailyDataUpdateError(RuntimeError):
     """Daily market data could not be proven safe for a strategy decision."""
+
+
+class DailyDataDeadlineExceeded(DailyDataUpdateError):
+    """The bounded close-data deadline elapsed before a safe update was available."""
+
+
+class DailyDataRetriesExhausted(DailyDataUpdateError):
+    """The bounded close-data attempt budget was exhausted."""
+
+
+class InstrumentSessionState(StrEnum):
+    TRADING = "TRADING"
+    SUSPENDED = "SUSPENDED"
+    NON_TRADING = "NON_TRADING"
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentSessionStatus:
+    symbol: str
+    session: date
+    state: InstrumentSessionState
+    observed_at: datetime
+    source: str
+    raw_payload_sha256: str
+
+    def __post_init__(self) -> None:
+        _canonical_symbol(self.symbol)
+        if type(self.session) is not date:
+            raise TypeError("instrument status session must be a calendar date")
+        if not isinstance(self.state, InstrumentSessionState):
+            raise TypeError("instrument status state is invalid")
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise TypeError("instrument status observed_at must be timezone-aware")
+        if not isinstance(self.source, str) or not self.source or self.source != self.source.strip():
+            raise ValueError("instrument status source must be canonical text")
+        if (
+            not isinstance(self.raw_payload_sha256, str)
+            or len(self.raw_payload_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.raw_payload_sha256)
+        ):
+            raise ValueError("instrument status raw payload digest must be lowercase SHA-256")
+
+    @property
+    def evidence_sha256(self) -> str:
+        payload = {
+            "symbol": _canonical_symbol(self.symbol),
+            "session": self.session.isoformat(),
+            "state": self.state.value,
+            "observed_at": self.observed_at.astimezone(UTC).isoformat(),
+            "source": self.source,
+            "raw_payload_sha256": self.raw_payload_sha256,
+        }
+        return hashlib.sha256(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,12 +124,50 @@ class DailyHistoryProvider(Protocol):
     ) -> Mapping[str, tuple[DailyBar, ...]]: ...
 
 
+@runtime_checkable
+class InstrumentStatusProvider(Protocol):
+    def fetch_status(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        session: date,
+    ) -> Mapping[str, InstrumentSessionStatus]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DailyFetchPolicy:
+    max_attempts: int = 3
+    retry_interval_seconds: float = 5.0
+    total_deadline_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_attempts, bool) or not isinstance(self.max_attempts, int) or self.max_attempts < 1:
+            raise ValueError("daily fetch max_attempts must be a positive integer")
+        for label, value in (
+            ("retry interval", self.retry_interval_seconds),
+            ("total deadline", self.total_deadline_seconds),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+                raise ValueError(f"daily fetch {label} must be positive")
+        if self.retry_interval_seconds > self.total_deadline_seconds:
+            raise ValueError("daily fetch retry interval cannot exceed total deadline")
+
+
+@dataclass(frozen=True, slots=True)
+class DailySeriesObservation:
+    symbol: str
+    latest_observed_session: date
+    suspension_evidence_sha256: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class DailyDataUpdateReceipt:
     latest_common_session: date
     manifest_sha256: str
     appended_rows: int
     symbols: tuple[str, ...]
+    observations: tuple[DailySeriesObservation, ...] = ()
+    fetch_attempts: int = 1
 
 
 class _UquantManifest(Protocol):
@@ -205,15 +300,37 @@ def _data_store(root: Path) -> _UquantDataStore:
 
 
 class XtQuantDailyDataUpdater:
-    """Stage all symbols, prove append-only history, then atomically publish every file."""
+    """Stage all symbols, prove history/status completeness, then publish atomically."""
 
-    def __init__(self, *, root: Path, provider: DailyHistoryProvider) -> None:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        provider: DailyHistoryProvider,
+        state_root: Path | None = None,
+        clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
+        fetch_policy: DailyFetchPolicy | None = None,
+        required_complete_symbols: frozenset[str] = frozenset(),
+        max_status_age: timedelta = timedelta(minutes=15),
+    ) -> None:
         self._root = Path(root)
-        if self._root.is_symlink() or not self._root.is_dir():
-            raise DailyDataUpdateError("daily data root must be an existing non-symlink directory")
+        if self._root.exists() and (self._root.is_symlink() or not self._root.is_dir()):
+            raise DailyDataUpdateError("daily data root must be a regular directory")
+        self._root.mkdir(parents=True, exist_ok=True)
         if not isinstance(provider, DailyHistoryProvider):
             raise TypeError("daily history provider does not satisfy its contract")
         self._provider = provider
+        self._state_root = Path(state_root) if state_root is not None else self._root / ".firmquant"
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic or time.monotonic
+        self._sleep = sleep or time.sleep
+        self._fetch_policy = fetch_policy or DailyFetchPolicy()
+        self._required_complete_symbols = frozenset(_canonical_symbol(item) for item in required_complete_symbols)
+        if max_status_age <= timedelta(0):
+            raise ValueError("instrument status maximum age must be positive")
+        self._max_status_age = max_status_age
 
     def _path(self, symbol: str) -> Path:
         canonical = _canonical_symbol(symbol)
@@ -225,27 +342,112 @@ class XtQuantDailyDataUpdater:
             return bare
         return prefixed
 
+    def _record_attempt(self, *, session: date, attempt: int, error: Exception | None) -> None:
+        directory = self._state_root / "attempts" / session.isoformat()
+        directory.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, object] = {
+            "schema": "firmquant.daily-data-attempt.v1",
+            "session": session.isoformat(),
+            "attempt": attempt,
+            "success": error is None,
+        }
+        if error is not None:
+            summary = f"{type(error).__name__}:{error}"
+            payload["error_type"] = type(error).__name__
+            payload["error_sha256"] = hashlib.sha256(summary.encode()).hexdigest()
+        target = directory / f"attempt-{attempt:03d}.json"
+        temporary = target.with_suffix(".json.new")
+        temporary.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+
+    def _fetch(self, canonical: tuple[str, ...], *, through: date) -> tuple[Mapping[str, tuple[DailyBar, ...]], int]:
+        started = self._monotonic()
+        last_error: Exception | None = None
+        for attempt in range(1, self._fetch_policy.max_attempts + 1):
+            if attempt > 1 and self._monotonic() - started >= self._fetch_policy.total_deadline_seconds:
+                raise DailyDataDeadlineExceeded("daily data total deadline exceeded") from last_error
+            try:
+                raw = self._provider.fetch(canonical, through=through)
+            except Exception as error:  # provider boundary is deliberately fail-closed
+                last_error = error
+                self._record_attempt(session=through, attempt=attempt, error=error)
+                if attempt >= self._fetch_policy.max_attempts:
+                    raise DailyDataRetriesExhausted("daily data attempt budget exhausted") from error
+                elapsed = self._monotonic() - started
+                if elapsed + self._fetch_policy.retry_interval_seconds > self._fetch_policy.total_deadline_seconds:
+                    raise DailyDataDeadlineExceeded("daily data total deadline exceeded") from error
+                self._sleep(self._fetch_policy.retry_interval_seconds)
+                continue
+            self._record_attempt(session=through, attempt=attempt, error=None)
+            return raw, attempt
+        raise DailyDataRetriesExhausted("daily data attempt budget exhausted") from last_error
+
+    def _status_observations(
+        self,
+        raw: Mapping[str, tuple[DailyBar, ...]],
+        *,
+        canonical: tuple[str, ...],
+        through: date,
+    ) -> tuple[DailySeriesObservation, ...]:
+        lagging = tuple(symbol for symbol in canonical if raw[symbol][-1].session < through)
+        for symbol in lagging:
+            if symbol in self._required_complete_symbols:
+                raise DailyDataUpdateError(f"required complete symbol {symbol} does not reach target trading session")
+        statuses: Mapping[str, InstrumentSessionStatus] = {}
+        if lagging:
+            if not isinstance(self._provider, InstrumentStatusProvider):
+                raise DailyDataUpdateError("authoritative instrument status is unavailable for missing target bar")
+            statuses = self._provider.fetch_status(lagging, session=through)
+            if not isinstance(statuses, Mapping) or set(statuses) != set(lagging):
+                raise DailyDataUpdateError("authoritative instrument status set is incomplete")
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise DailyDataUpdateError("daily data clock must be timezone-aware")
+        observations: list[DailySeriesObservation] = []
+        for symbol in canonical:
+            latest = raw[symbol][-1].session
+            if latest > through:
+                raise DailyDataUpdateError(f"{symbol} history exceeds target trading session")
+            evidence: str | None = None
+            if latest < through:
+                fact = statuses[symbol]
+                if _canonical_symbol(fact.symbol) != symbol or fact.session != through:
+                    raise DailyDataUpdateError(f"{symbol} authoritative status does not match target session")
+                age = now.astimezone(UTC) - fact.observed_at.astimezone(UTC)
+                if age < timedelta(0) or age > self._max_status_age:
+                    raise DailyDataUpdateError(f"{symbol} authoritative instrument status is stale")
+                if fact.state not in {InstrumentSessionState.SUSPENDED, InstrumentSessionState.NON_TRADING}:
+                    raise DailyDataUpdateError(f"{symbol} does not reach target session while security is trading")
+                evidence = fact.evidence_sha256
+            observations.append(
+                DailySeriesObservation(
+                    symbol=symbol,
+                    latest_observed_session=latest,
+                    suspension_evidence_sha256=evidence,
+                )
+            )
+        return tuple(observations)
+
     def update(self, symbols: tuple[str, ...], *, through: date) -> DailyDataUpdateReceipt:
         if type(through) is not date:
             raise TypeError("daily update through must be a calendar date")
         canonical = tuple(sorted({_canonical_symbol(item) for item in symbols}))
         if not canonical:
             raise DailyDataUpdateError("daily update requires at least one symbol")
-        raw = self._provider.fetch(canonical, through=through)
+        raw, fetch_attempts = self._fetch(canonical, through=through)
         if not isinstance(raw, Mapping) or set(raw) != set(canonical):
             raise DailyDataUpdateError("daily history provider returned incomplete symbol set")
+        for symbol in canonical:
+            _validate_series(raw[symbol], label=symbol)
+        observations = self._status_observations(raw, canonical=canonical, through=through)
 
         candidates: dict[str, tuple[DailyBar, ...]] = {}
         destinations: dict[str, Path] = {}
         appended_rows = 0
         for symbol in canonical:
-            incoming = raw[symbol]
-            _validate_series(incoming, label=symbol)
-            if incoming[-1].session != through:
-                raise DailyDataUpdateError(f"{symbol} does not reach target trading session")
             destination = self._path(symbol)
             existing = _read_existing(destination)
-            merged, appended = _merge(existing, incoming, symbol=symbol)
+            merged, appended = _merge(existing, raw[symbol], symbol=symbol)
             candidates[symbol] = merged
             destinations[symbol] = destination
             appended_rows += appended
@@ -254,13 +456,12 @@ class XtQuantDailyDataUpdater:
             staging = Path(temporary)
             for symbol, bars in candidates.items():
                 (staging / f"{symbol}.csv").write_text(_render(bars), encoding="utf-8", newline="\n")
-            manifest = _data_store(staging).manifest(
-                canonical,
-                source="xtquant",
-                as_of=through.isoformat(),
-            )
-            if manifest.end != through.isoformat() or manifest.symbols != canonical:
-                raise DailyDataUpdateError("uquant manifest does not match updated trading session")
+            manifest = _data_store(staging).manifest(canonical, source="xtquant", as_of=through.isoformat())
+            if manifest.symbols != canonical:
+                raise DailyDataUpdateError("uquant manifest symbol identity does not match updated data")
+            observed_common = min(item.latest_observed_session for item in observations)
+            if date.fromisoformat(manifest.end) != observed_common:
+                raise DailyDataUpdateError("uquant manifest does not match observed strategy-data coverage")
             for symbol, destination in destinations.items():
                 source = staging / f"{symbol}.csv"
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -268,19 +469,54 @@ class XtQuantDailyDataUpdater:
                 shutil.copyfile(source, temporary_target)
                 os.replace(temporary_target, destination)
 
+        governance = {
+            "schema": "firmquant.daily-data-manifest.v2",
+            "target_session": through.isoformat(),
+            "source": "xtquant",
+            "uquant_manifest_sha256": manifest.digest,
+            "observations": [
+                {
+                    "symbol": item.symbol,
+                    "latest_observed_session": item.latest_observed_session.isoformat(),
+                    "suspension_evidence_sha256": item.suspension_evidence_sha256,
+                }
+                for item in observations
+            ],
+        }
+        rendered = json.dumps(governance, separators=(",", ":"), sort_keys=True).encode()
+        manifest_sha256 = hashlib.sha256(rendered).hexdigest()
+        manifest_path = self._root / ".firmquant-data-manifest.json"
+        temporary_manifest = manifest_path.with_suffix(".json.new")
+        temporary_manifest.write_bytes(rendered)
+        os.replace(temporary_manifest, manifest_path)
+        archive = self._state_root / "data-manifests" / f"{through.isoformat()}.json"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive_temp = archive.with_suffix(".json.new")
+        archive_temp.write_bytes(rendered)
+        os.replace(archive_temp, archive)
+
         return DailyDataUpdateReceipt(
-            latest_common_session=through,
-            manifest_sha256=manifest.digest,
+            latest_common_session=min(item.latest_observed_session for item in observations),
+            manifest_sha256=manifest_sha256,
             appended_rows=appended_rows,
             symbols=canonical,
+            observations=observations,
+            fetch_attempts=fetch_attempts,
         )
 
 
 __all__ = (
     "DailyBar",
+    "DailyDataDeadlineExceeded",
+    "DailyDataRetriesExhausted",
     "DailyDataUpdateError",
     "DailyDataUpdateReceipt",
+    "DailyFetchPolicy",
     "DailyHistoryProvider",
+    "DailySeriesObservation",
+    "InstrumentSessionState",
+    "InstrumentSessionStatus",
+    "InstrumentStatusProvider",
     "SourceEpochResealRequired",
     "XtQuantDailyDataUpdater",
 )

@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-import firmquant.market_data.generations as generations
 import pytest
+
+import firmquant.market_data.generations as generations
 
 
 NOW = datetime(2026, 8, 25, 8, tzinfo=UTC)
