@@ -12,6 +12,8 @@ firmquant 负责券商事实接入、订单执行、前置安全门、对账、�
 - REPLAY、PAPER、SHADOW 不具有真实券商写权限；CI 和示例配置也不具有实盘写权限。
 - CANARY/LIVE 需要明确配置、短时 arm lease、部署身份绑定、券商 API 权限和程序化交易合规确认、启动对账、最新
   券商/行情事实、完整逐单风控及无 UNKNOWN 状态；任一条件缺失即失败关闭。
+- 真实券商账户在进入生产 reconciliation 前必须通过一次性 `bootstrap-account` 建立持久 AccountBinding；系统不会把“第一份
+  券商快照”自动当作账户身份，也不会用券商持仓反推 uquant lifecycle。
 - uquant Risk Sentinel 仍为 `FREEZE_ONLY`：只能冻结新增风险，不直接卖出、不改 gross cap，也不创建第二风险账户。
 - firmquant 的安全层只能阻止、缩小、延迟或取消订单以及进入 HALT，绝不扩大 uquant 的目标或订单意图。
 - 紧急状态默认阻止新订单、取消系统拥有的未成交订单并 HALT，不自动清仓，更不会在状态不确定时发无保护市价单。
@@ -38,9 +40,17 @@ uv run firmquant status
 
 ## 运行模型
 
-日频经济路径固定为：盘后更新并验证 uquant 数据合同，读取完整券商快照，通过
-`ProductionEngine.decide()` 生成不可变决策；下一交易日只执行该冻结决策。盘中持续运行仅处理订单生命周期、成交、
-断线、quote freshness、风险阻断和对账，不重新选股或优化组合。
+日频经济路径固定为：盘后更新并验证 uquant 数据合同，读取完整券商快照，先用持久 AccountBinding 验证账户身份并在**不修改
+生产 AccountState** 的前提下执行 preflight；只有 firmquant 已知且身份一致的系统订单/成交可以进入 deep-copy account candidate。
+候选账户必须再次通过完整资金、持仓、订单、成交、代码/数据/配置 reconciliation，随后才以 expected-before CAS 提交
+AccountState，并在同一 SQLite finalization 中提交 account-operation 与 reconciliation receipt。只有这个边界成功后才调用
+`ProductionEngine.decide()` 生成不可变决策；下一交易日只执行该冻结决策。
+
+人工订单、异常现金变化、无法解释的持仓变化和未知成交不会被 account sync 自动吸收。ReviewedAccountAdjustment 只能授权与
+receipt 精确匹配的已复核差异；现金差异可按精确 evidence 授权，涉及持仓/可卖数量的变化仍不能让 firmquant 猜测 lifecycle、
+tranche 或 attribution，必须提供已经复核且满足 uquant 严格合同的 AccountState。
+
+盘中持续运行仅处理订单生命周期、成交、断线、quote freshness、风险阻断和对账，不重新选股或优化组合。
 
 运行状态不是布尔值，而是：`DISARMED`、`STARTING`、`RECONCILING`、`READY`、`EXECUTING`、`DEGRADED`、
 `HALTED`、`STOPPING`。订单状态持久化为：`PLANNED`、`VALIDATED`、`ARMED`、`SUBMITTING`、
