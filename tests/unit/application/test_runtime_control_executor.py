@@ -234,8 +234,13 @@ def test_halt_is_durable_idempotent_evidence_and_never_liquidates(tmp_path: Path
         assert first.outcome["auto_liquidation"] is False
         assert second.outcome["auto_liquidation"] is False
         assert writer.database.scalar("SELECT state FROM runtime_state WHERE singleton_id = 1") == "HALTED"
-        assert writer.database.scalar("SELECT count(*) FROM risk_events WHERE code = 'KILL_SWITCH_TRIPPED'") == 1
-        assert writer.database.scalar("SELECT count(*) FROM audit_events WHERE category = 'RUNTIME_CONTROL'") == 1
+        assert (
+            writer.database.scalar("SELECT count(*) FROM risk_events WHERE code = 'KILL_SWITCH_TRIPPED'") == 1
+        )
+        assert (
+            writer.database.scalar("SELECT count(*) FROM audit_events WHERE category = 'RUNTIME_CONTROL'")
+            == 1
+        )
         assert executor.cancel_calls == 0
 
 
