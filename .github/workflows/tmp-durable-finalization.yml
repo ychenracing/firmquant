@@ -1,0 +1,25 @@
+name: tmp-durable-finalization
+on:
+  push:
+    branches:
+      - codex/account-authority-reconciliation
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Apply exact durable finalization patch
+        run: |
+          python .tmp/patch_durable_finalization.py
+          git rm .tmp/patch_durable_finalization.py
+          git rm .github/workflows/tmp-durable-finalization.yml
+          git config user.name firmquant-agent
+          git config user.email firmquant-agent@users.noreply.github.com
+          git add src tests
+          git commit -m "fix: recover reconciled account finalization durably"
+          git push origin HEAD:codex/account-authority-reconciliation
