@@ -8,8 +8,18 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol, runtime_checkable
 
-from firmquant.broker.gateway import BrokerGateway
+from firmquant.broker.gateway import BrokerHealth
+from firmquant.domain.broker_facts import (
+    BrokerAccountFact,
+    BrokerFillFact,
+    BrokerOrderFact,
+    BrokerPositionFact,
+    InstrumentFact,
+    MarketSessionStatus,
+    QuoteFact,
+)
 from firmquant.domain.values import Symbol
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
@@ -17,6 +27,20 @@ from firmquant.persistence.repositories import canonical_json
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+@runtime_checkable
+class ReadOnlyProductionSmokeBroker(Protocol):
+    """Full production read surface with no submit/cancel methods."""
+
+    def health(self) -> BrokerHealth: ...
+    def query_account(self) -> BrokerAccountFact: ...
+    def query_positions(self) -> tuple[BrokerPositionFact, ...]: ...
+    def query_orders(self) -> tuple[BrokerOrderFact, ...]: ...
+    def query_fills(self) -> tuple[BrokerFillFact, ...]: ...
+    def query_market_status(self) -> MarketSessionStatus: ...
+    def query_instrument(self, symbol: Symbol) -> InstrumentFact: ...
+    def query_quote(self, symbol: Symbol) -> QuoteFact: ...
 
 
 def _digest(value: str, pattern: re.Pattern[str], *, label: str) -> None:
@@ -169,7 +193,7 @@ class ProductionSmokeStore:
 
 def run_readonly_production_smoke(
     *,
-    broker: BrokerGateway,
+    broker: ReadOnlyProductionSmokeBroker,
     database: Database,
     probe_symbol: Symbol,
     firmquant_commit: str,
@@ -180,8 +204,8 @@ def run_readonly_production_smoke(
 ) -> ProductionSmokeReceipt:
     """Read all live authority surfaces once. This function has no write call sites."""
 
-    if not isinstance(broker, BrokerGateway):
-        raise TypeError("production smoke broker must satisfy BrokerGateway")
+    if not isinstance(broker, ReadOnlyProductionSmokeBroker):
+        raise TypeError("production smoke broker must satisfy read-only production protocol")
     if not isinstance(database, Database):
         raise TypeError("production smoke database must be Database")
     if not isinstance(probe_symbol, Symbol):
@@ -220,5 +244,6 @@ def run_readonly_production_smoke(
 __all__ = (
     "ProductionSmokeReceipt",
     "ProductionSmokeStore",
+    "ReadOnlyProductionSmokeBroker",
     "run_readonly_production_smoke",
 )

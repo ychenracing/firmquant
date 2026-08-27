@@ -10,7 +10,7 @@ import signal
 import sys
 import time as time_module
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -41,7 +41,11 @@ from firmquant.config import Mode, Settings
 from firmquant.domain.broker_facts import BrokerPositionFact, BrokerSnapshot, MarketSessionStatus
 from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.domain.values import Money, Shares, Symbol
-from firmquant.execution.live_controller import ExecutionWindowPolicy, LiveExecutionController
+from firmquant.execution.live_controller import (
+    ExecutionDeadlines,
+    ExecutionWindowPolicy,
+    LiveExecutionController,
+)
 from firmquant.execution.planner import ExecutionBrokerSnapshot, ExecutionPlan, ExecutionPlanner, PlannedOrder
 from firmquant.execution.policy import FeeSchedule
 from firmquant.market_data.calendar import AuthoritativeTradingCalendar, CalendarCoverageError
@@ -60,7 +64,7 @@ from firmquant.persistence.production_recovery import ProductionRecoveryService
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
 from firmquant.persistence.recovery import RecoveryContradiction
 from firmquant.persistence.repositories import DecisionSnapshotRepository, canonical_json, canonical_sha256
-from firmquant.persistence.writer_lease import WriterLease
+from firmquant.persistence.writer_lease import WriterLease, WriterLeaseGuard, WriterLeaseLost
 from firmquant.reconciliation.account_coordinator import (
     AccountReconciliationBlocked,
     AccountReconciliationCoordinator,
@@ -83,6 +87,7 @@ from firmquant.risk.capability import (
 )
 from firmquant.risk.gate import ExecutionRiskContext, ExecutionRiskGate, RiskCommand, RiskLimits
 from firmquant.risk.runtime import risk_limits_from_settings
+from firmquant.scheduling.clock import ClockGuard, ClockObservation, ClockReceipt
 from firmquant.scheduling.sessions import WorkflowReceiptStore
 from firmquant.security.secrets import EnvironmentSecretProvider
 from firmquant.strategy.account_sync import AccountStateContract
@@ -142,6 +147,7 @@ class _ExecutionAuthorities:
     facts: ExecutionBrokerSnapshot
     decision: DecisionSnapshot
     planned: Mapping[str, PlannedOrder]
+    reconciliation: ReconciliationReceipt
 
 
 def _hash_event(prefix: str, payload: object) -> str:
@@ -315,6 +321,7 @@ class ProductionServiceHooks:
         identity: _RuntimeIdentity,
         safety_manifest: XtQuantSafetyManifest,
         clock: Callable[[], datetime],
+        monotonic_clock: Callable[[], float] = time_module.monotonic,
     ) -> None:
         self._config_path = config_path
         self._settings = settings
@@ -330,6 +337,10 @@ class ProductionServiceHooks:
         self._identity = identity
         self._safety = safety_manifest
         self._clock = clock
+        self._monotonic_clock = monotonic_clock
+        self._last_monotonic: float | None = None
+        self._disconnect_started_monotonic: float | None = None
+        self._last_quote_at: datetime | None = None
         self._snapshots = BrokerSnapshotStore(self._database)
         self._decisions = DecisionSnapshotRepository(self._database)
         self._ledger = MonotonicExecutionLedgerRepository(self._database)
@@ -342,6 +353,7 @@ class ProductionServiceHooks:
         self._status = self._receipts.load_runtime(settings.mode)
         self._startup_reconciliation_id: str | None = None
         self._real_order_calls = 0
+        self._active_execution_deadlines: ExecutionDeadlines | None = None
 
     @property
     def status(self) -> RuntimeStatus:
@@ -352,6 +364,74 @@ class ProductionServiceHooks:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ProductionServicesUnavailable("PRODUCTION_CLOCK_INVALID")
         return value
+
+    def _monotonic(self) -> float:
+        value = self._monotonic_clock()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_INVALID")
+        observed = float(value)
+        if observed < 0 or (self._last_monotonic is not None and observed < self._last_monotonic):
+            raise ProductionServicesUnavailable("MONOTONIC_CLOCK_ROLLBACK")
+        self._last_monotonic = observed
+        return observed
+
+    def _clock_receipt(self, symbol: Symbol) -> ClockReceipt:
+        system_time = self._now()
+        quote = self._broker.query_quote(symbol)
+        self._last_quote_at = quote.received_at
+        try:
+            return ClockGuard(
+                max_drift=timedelta(seconds=self._settings.execution.max_clock_drift_seconds)
+            ).verify(
+                ClockObservation(
+                    system_time=system_time,
+                    reference_time=quote.event_time,
+                    local_timezone=self._settings.timezone,
+                )
+            )
+        except Exception as error:
+            raise ProductionServicesUnavailable("CLOCK_DRIFT_UNVERIFIED") from error
+
+    def _disconnect_duration(self, *, connected: bool) -> timedelta:
+        observed = self._monotonic()
+        if connected:
+            self._disconnect_started_monotonic = None
+            return timedelta(seconds=observed - observed)
+        if self._disconnect_started_monotonic is None:
+            self._disconnect_started_monotonic = observed
+        return timedelta(seconds=observed - self._disconnect_started_monotonic)
+
+    def _existing_order_age(self, now: datetime) -> timedelta | None:
+        row = self._database.query_one(
+            "SELECT min(created_at) AS created_at FROM execution_intents WHERE state IN "
+            "('SUBMITTING','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_REQUESTED','UNKNOWN')"
+        )
+        if row is None or row["created_at"] is None:
+            return None
+        created_at = datetime.fromisoformat(str(row["created_at"]))
+        if created_at.tzinfo is None or created_at.utcoffset() is None or created_at > now:
+            raise ProductionServicesUnavailable("EXISTING_ORDER_TIME_INVALID")
+        return now - created_at
+
+    def _execution_deadlines(self, now: datetime) -> ExecutionDeadlines | None:
+        shanghai = now.astimezone(_SHANGHAI)
+        completion_wall = datetime.combine(shanghai.date(), time(14, 59, 50), tzinfo=_SHANGHAI)
+        cancel_wall = completion_wall - timedelta(seconds=30)
+        max_window = timedelta(
+            seconds=max(
+                self._settings.execution.sell_window_seconds,
+                self._settings.execution.buy_window_seconds,
+            )
+        )
+        submit_wall = cancel_wall - max_window
+        if shanghai >= submit_wall:
+            return None
+        monotonic_now = self._monotonic()
+        return ExecutionDeadlines(
+            latest_new_submit=monotonic_now + (submit_wall - shanghai).total_seconds(),
+            latest_cancel_initiation=monotonic_now + (cancel_wall - shanghai).total_seconds(),
+            absolute_completion=monotonic_now + (completion_wall - shanghai).total_seconds(),
+        )
 
     def _transition(
         self,
@@ -406,11 +486,40 @@ class ProductionServiceHooks:
         def final_facts(account: AccountStateContract) -> ReconciliationFacts:
             identity = StrategyIdentity.locked()
             payload = _account_payload(account)
+            strategy_view = _strategy_view(account, snapshot.positions, self._accounts)
+            broker_positions = {item.symbol: item for item in snapshot.positions}
+            strategy_positions = {item.symbol: item for item in strategy_view.positions}
+            suspected = frozenset(
+                symbol
+                for symbol in set(broker_positions) | set(strategy_positions)
+                if (
+                    (
+                        0
+                        if broker_positions.get(symbol) is None
+                        else broker_positions[symbol].total_shares.value
+                    )
+                    != (
+                        0
+                        if strategy_positions.get(symbol) is None
+                        else strategy_positions[symbol].total_shares.value
+                    )
+                    or (
+                        0
+                        if broker_positions.get(symbol) is None
+                        else broker_positions[symbol].sellable_shares.value
+                    )
+                    != (
+                        0
+                        if strategy_positions.get(symbol) is None
+                        else strategy_positions[symbol].sellable_shares.value
+                    )
+                )
+            )
             return ReconciliationFacts(
                 broker_snapshot=snapshot,
-                strategy_account=_strategy_view(account, snapshot.positions, self._accounts),
+                strategy_account=strategy_view,
                 operational_ledger=operational,
-                company_action_suspected_symbols=frozenset(),
+                company_action_suspected_symbols=suspected,
                 uquant_code_identity_matches=(
                     payload.get("code_hash") in {"", identity.economic_code_fingerprint}
                 ),
@@ -766,13 +875,18 @@ class ProductionServiceHooks:
             label="BROKER_ATTEMPT_COUNT",
         )
         health = self._broker.health()
+        observed_now = self._now()
+        clock_receipt = self._clock_receipt(command.symbol)
+        existing_order_age = self._existing_order_age(observed_now)
+        disconnect_duration = self._disconnect_duration(connected=health.connected)
+        reconciliation = authorities.reconciliation
         account_state = self._accounts.load()
         actual_gross = sum((item.market_value.value for item in positions), Decimal(0))
         symbol_notional = Decimal(0) if position is None else position.market_value.value
         return ExecutionRiskContext(
             mode=self._settings.mode,
             runtime_state=self._status.state,
-            now=self._now(),
+            now=observed_now,
             account_type=account.account_type,
             available_cash=account.available_cash,
             total_assets=account.total_assets,
@@ -807,22 +921,19 @@ class ProductionServiceHooks:
                 label="CONSECUTIVE_REJECTION_COUNT",
             ),
             broker_connected=health.connected,
-            disconnect_duration=timedelta(0)
-            if health.connected
-            else limits.max_disconnect_duration + timedelta(seconds=1),
-            existing_order_age=None,
-            replacement_count=0,
+            disconnect_duration=disconnect_duration,
+            existing_order_age=existing_order_age,
             submit_count_window=attempts,
             cancel_count_window=attempts,
             uquant_max_volume_participation=_uquant_participation(),
             equity_change_fraction=equity_change,
             intraday_loss_fraction=intraday_loss,
             capital_drawdown_fraction=drawdown,
-            reconciliation_healthy=self._latest_passed_reconciliation(ReconciliationKind.INTRADAY) != "",
+            reconciliation_healthy=reconciliation.passed,
             external_active_order_count=self._external_order_count(),
-            unexplained_position_change=False,
-            corporate_action_suspected=False,
-            clock_drift=timedelta(0),
+            unexplained_position_change=("UNEXPLAINED_POSITION_CHANGE" in reconciliation.blockers),
+            corporate_action_suspected=("CORPORATE_ACTION_SUSPECTED" in reconciliation.blockers),
+            clock_drift=timedelta(milliseconds=clock_receipt.drift_milliseconds),
             data_identity_matches=_data_identity_matches(account_state, self._settings.paths.data_directory),
             config_identity_matches=(configuration_sha256(self._config_path) == self._identity.config_sha256),
             unresolved_order_count=_count(
@@ -850,6 +961,7 @@ class ProductionServiceHooks:
             planned: PlannedOrder | None = None
             gate_decision = None
             quote_time = snapshot.captured_at
+            clock_receipt: ClockReceipt | None = None
             symbol_allowed = True
             command_within = True
             cancel_approved = True
@@ -871,7 +983,10 @@ class ProductionServiceHooks:
                         ),
                         risk_context,
                     )
-                    quote_time = self._broker.query_quote(subject.symbol).received_at
+                    quote = self._broker.query_quote(subject.symbol)
+                    self._last_quote_at = quote.received_at
+                    quote_time = quote.received_at
+                    clock_receipt = self._clock_receipt(subject.symbol)
                     symbol_allowed = self._universe.allowed(
                         subject.symbol.canonical, planned.execution_session
                     )
@@ -889,7 +1004,10 @@ class ProductionServiceHooks:
                         broker_order.symbol.canonical,
                         snapshot.session_date,
                     )
-                    quote_time = self._broker.query_quote(broker_order.symbol).received_at
+                    quote = self._broker.query_quote(broker_order.symbol)
+                    self._last_quote_at = quote.received_at
+                    quote_time = quote.received_at
+                    clock_receipt = self._clock_receipt(broker_order.symbol)
             known = self._known_client_ids()
             external = any(
                 item.client_order_id is None or item.client_order_id not in known for item in snapshot.orders
@@ -932,18 +1050,25 @@ class ProductionServiceHooks:
                     ),
                     label="SUBMITTING_ORDER_COUNT",
                 ),
-                reconciliation_mismatch=False,
+                reconciliation_mismatch=not authorities.reconciliation.passed,
                 external_activity_detected=external,
                 gate_decision=gate_decision,
                 cancel_risk_approved=cancel_approved,
                 symbol_in_canonical_universe=symbol_allowed,
                 symbol_in_deployment_allowlist=symbol_allowed,
                 command_within_uquant_intent=command_within,
-                cash_and_positions_safe=True,
+                cash_and_positions_safe=(
+                    authorities.reconciliation.passed
+                    and snapshot.account.available_cash.value >= 0
+                    and all(
+                        item.sellable_shares.value <= item.total_shares.value for item in snapshot.positions
+                    )
+                ),
                 frequency_within_limits=(
                     attempts < self._settings.execution.max_submit_count_window
                     and attempts < self._settings.execution.max_cancel_count_window
                 ),
+                clock_receipt=clock_receipt,
             )
 
         return WriteCapabilityFactory(arm_service=arm_service).create(
@@ -1055,7 +1180,11 @@ class ProductionServiceHooks:
             facts=facts,
             decision=decision,
             planned={item.uquant_order_id: item for item in plan.orders},
+            reconciliation=reconciliation,
         )
+        deadlines = self._active_execution_deadlines
+        if deadlines is None:
+            raise ProductionServicesUnavailable("EXECUTION_DEADLINE_UNAVAILABLE")
         controller = LiveExecutionController(
             capability=self._capability(authorities),
             ledger=self._ledger,
@@ -1067,6 +1196,14 @@ class ProductionServiceHooks:
                 minimum_order_lifetime=timedelta(seconds=self._settings.execution.min_order_lifetime_seconds),
                 poll_interval=timedelta(seconds=self._settings.execution.poll_interval_seconds),
             ),
+            lease_guard=WriterLeaseGuard(
+                self._writer,
+                monotonic_clock=self._monotonic_clock,
+                renew_interval=timedelta(seconds=10),
+            ),
+            monotonic_clock=self._monotonic_clock,
+            execution_deadlines=deadlines,
+            sleep=time_module.sleep,
         )
         result = controller.execute(plan)
         self._real_order_calls += result.submit_calls + result.cancel_calls
@@ -1145,12 +1282,20 @@ class ProductionServiceHooks:
         market_status = self._broker.query_market_status()
         decisions = executions = eod = 0
         if market_status is MarketSessionStatus.OPEN:
+            deadlines = self._execution_deadlines(shanghai)
+            if deadlines is None:
+                return ProductionCycleResult(0, 0, 0)
+            self._active_execution_deadlines = deadlines
             self._transition(RuntimeState.EXECUTING, reason="next-session execution")
             try:
                 executions = self._execute(session)
+            except WriterLeaseLost:
+                raise
             except Exception:
                 self.halt("EXECUTION_STEP_FAILED")
                 raise
+            finally:
+                self._active_execution_deadlines = None
             self._transition(RuntimeState.READY, reason="execution step completed")
         elif market_status is MarketSessionStatus.CLOSED and shanghai.time() >= _POST_CLOSE:
             self._transition(RuntimeState.RECONCILING, reason="end-of-day reconciliation")
@@ -1172,6 +1317,219 @@ class ProductionServiceHooks:
     def heartbeat(self, heartbeat: ProductionHeartbeat) -> None:
         if not isinstance(heartbeat, ProductionHeartbeat):
             raise TypeError("production heartbeat must be typed")
+        health = self._broker.health()
+        last_broker_event = self._database.scalar("SELECT max(recorded_at) FROM broker_events")
+        last_reconciliation = self._database.scalar(
+            "SELECT max(completed_at) FROM reconciliation_runs WHERE completed_at IS NOT NULL"
+        )
+        last_decision = self._database.scalar("SELECT max(created_at) FROM decision_snapshots")
+        last_execution = self._database.scalar(
+            "SELECT max(created_at) FROM audit_events WHERE category = 'PRODUCTION_EXECUTION'"
+        )
+        enriched = replace(
+            heartbeat,
+            runtime_state=self._status.state,
+            broker_connected=health.connected,
+            broker_read_healthy=health.read_healthy,
+            broker_write_healthy=health.write_healthy,
+            last_broker_event=None
+            if last_broker_event is None
+            else datetime.fromisoformat(str(last_broker_event)),
+            last_quote=self._last_quote_at,
+            last_reconciliation=(
+                None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
+            ),
+            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
+            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
+        )
+        with self._database.transaction():
+            self._database.write(
+                """
+                INSERT INTO production_heartbeat(
+                    singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,
+                    broker_connected,broker_read_healthy,broker_write_healthy,pending_events,
+                    last_broker_event,last_quote,last_reconciliation,last_decision,last_execution,
+                    control_request_state,processed_events,decisions,executions,eod
+                ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    mode=excluded.mode,runtime_state=excluded.runtime_state,observed_at=excluded.observed_at,
+                    host_hash=excluded.host_hash,process_id=excluded.process_id,
+                    writer_generation=excluded.writer_generation,broker_connected=excluded.broker_connected,
+                    broker_read_healthy=excluded.broker_read_healthy,
+                    broker_write_healthy=excluded.broker_write_healthy,pending_events=excluded.pending_events,
+                    last_broker_event=excluded.last_broker_event,last_quote=excluded.last_quote,
+                    last_reconciliation=excluded.last_reconciliation,last_decision=excluded.last_decision,
+                    last_execution=excluded.last_execution,control_request_state=excluded.control_request_state,
+                    processed_events=excluded.processed_events,decisions=excluded.decisions,
+                    executions=excluded.executions,eod=excluded.eod
+                """,
+                (
+                    enriched.mode.value,
+                    enriched.runtime_state.value,
+                    enriched.observed_at.isoformat(),
+                    enriched.host_hash,
+                    enriched.process_id,
+                    enriched.writer_generation,
+                    int(enriched.broker_connected),
+                    int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),
+                    enriched.pending_events,
+                    None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
+                    None if enriched.last_quote is None else enriched.last_quote.isoformat(),
+                    None
+                    if enriched.last_reconciliation is None
+                    else enriched.last_reconciliation.isoformat(),
+                    None if enriched.last_decision is None else enriched.last_decision.isoformat(),
+                    None if enriched.last_execution is None else enriched.last_execution.isoformat(),
+                    enriched.control_request_state,
+                    enriched.processed_events,
+                    enriched.decisions,
+                    enriched.executions,
+                    enriched.eod,
+                ),
+            )
+        health = self._broker.health()
+        last_broker_event = self._database.scalar("SELECT max(recorded_at) FROM broker_events")
+        last_reconciliation = self._database.scalar(
+            "SELECT max(completed_at) FROM reconciliation_runs WHERE completed_at IS NOT NULL"
+        )
+        last_decision = self._database.scalar("SELECT max(created_at) FROM decision_snapshots")
+        last_execution = self._database.scalar(
+            "SELECT max(created_at) FROM audit_events WHERE category = 'PRODUCTION_EXECUTION'"
+        )
+        enriched = replace(
+            heartbeat,
+            runtime_state=self._status.state,
+            broker_connected=health.connected,
+            broker_read_healthy=health.read_healthy,
+            broker_write_healthy=health.write_healthy,
+            last_broker_event=None
+            if last_broker_event is None
+            else datetime.fromisoformat(str(last_broker_event)),
+            last_quote=self._last_quote_at,
+            last_reconciliation=(
+                None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
+            ),
+            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
+            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
+        )
+        with self._database.transaction():
+            self._database.write(
+                """
+                INSERT INTO production_heartbeat(
+                    singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,
+                    broker_connected,broker_read_healthy,broker_write_healthy,pending_events,
+                    last_broker_event,last_quote,last_reconciliation,last_decision,last_execution,
+                    control_request_state,processed_events,decisions,executions,eod
+                ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    mode=excluded.mode,runtime_state=excluded.runtime_state,observed_at=excluded.observed_at,
+                    host_hash=excluded.host_hash,process_id=excluded.process_id,
+                    writer_generation=excluded.writer_generation,broker_connected=excluded.broker_connected,
+                    broker_read_healthy=excluded.broker_read_healthy,
+                    broker_write_healthy=excluded.broker_write_healthy,pending_events=excluded.pending_events,
+                    last_broker_event=excluded.last_broker_event,last_quote=excluded.last_quote,
+                    last_reconciliation=excluded.last_reconciliation,last_decision=excluded.last_decision,
+                    last_execution=excluded.last_execution,control_request_state=excluded.control_request_state,
+                    processed_events=excluded.processed_events,decisions=excluded.decisions,
+                    executions=excluded.executions,eod=excluded.eod
+                """,
+                (
+                    enriched.mode.value,
+                    enriched.runtime_state.value,
+                    enriched.observed_at.isoformat(),
+                    enriched.host_hash,
+                    enriched.process_id,
+                    enriched.writer_generation,
+                    int(enriched.broker_connected),
+                    int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),
+                    enriched.pending_events,
+                    None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
+                    None if enriched.last_quote is None else enriched.last_quote.isoformat(),
+                    None
+                    if enriched.last_reconciliation is None
+                    else enriched.last_reconciliation.isoformat(),
+                    None if enriched.last_decision is None else enriched.last_decision.isoformat(),
+                    None if enriched.last_execution is None else enriched.last_execution.isoformat(),
+                    enriched.control_request_state,
+                    enriched.processed_events,
+                    enriched.decisions,
+                    enriched.executions,
+                    enriched.eod,
+                ),
+            )
+        health = self._broker.health()
+        last_broker_event = self._database.scalar("SELECT max(recorded_at) FROM broker_events")
+        last_reconciliation = self._database.scalar(
+            "SELECT max(completed_at) FROM reconciliation_runs WHERE completed_at IS NOT NULL"
+        )
+        last_decision = self._database.scalar("SELECT max(created_at) FROM decision_snapshots")
+        last_execution = self._database.scalar(
+            "SELECT max(created_at) FROM audit_events WHERE category = 'PRODUCTION_EXECUTION'"
+        )
+        enriched = replace(
+            heartbeat,
+            runtime_state=self._status.state,
+            broker_connected=health.connected,
+            broker_read_healthy=health.read_healthy,
+            broker_write_healthy=health.write_healthy,
+            last_broker_event=None
+            if last_broker_event is None
+            else datetime.fromisoformat(str(last_broker_event)),
+            last_quote=self._last_quote_at,
+            last_reconciliation=(
+                None if last_reconciliation is None else datetime.fromisoformat(str(last_reconciliation))
+            ),
+            last_decision=None if last_decision is None else datetime.fromisoformat(str(last_decision)),
+            last_execution=(None if last_execution is None else datetime.fromisoformat(str(last_execution))),
+        )
+        with self._database.transaction():
+            self._database.write(
+                """
+                INSERT INTO production_heartbeat(
+                    singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,
+                    broker_connected,broker_read_healthy,broker_write_healthy,pending_events,
+                    last_broker_event,last_quote,last_reconciliation,last_decision,last_execution,
+                    control_request_state,processed_events,decisions,executions,eod
+                ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(singleton_id) DO UPDATE SET
+                    mode=excluded.mode,runtime_state=excluded.runtime_state,observed_at=excluded.observed_at,
+                    host_hash=excluded.host_hash,process_id=excluded.process_id,
+                    writer_generation=excluded.writer_generation,broker_connected=excluded.broker_connected,
+                    broker_read_healthy=excluded.broker_read_healthy,
+                    broker_write_healthy=excluded.broker_write_healthy,pending_events=excluded.pending_events,
+                    last_broker_event=excluded.last_broker_event,last_quote=excluded.last_quote,
+                    last_reconciliation=excluded.last_reconciliation,last_decision=excluded.last_decision,
+                    last_execution=excluded.last_execution,control_request_state=excluded.control_request_state,
+                    processed_events=excluded.processed_events,decisions=excluded.decisions,
+                    executions=excluded.executions,eod=excluded.eod
+                """,
+                (
+                    enriched.mode.value,
+                    enriched.runtime_state.value,
+                    enriched.observed_at.isoformat(),
+                    enriched.host_hash,
+                    enriched.process_id,
+                    enriched.writer_generation,
+                    int(enriched.broker_connected),
+                    int(enriched.broker_read_healthy),
+                    int(enriched.broker_write_healthy),
+                    enriched.pending_events,
+                    None if enriched.last_broker_event is None else enriched.last_broker_event.isoformat(),
+                    None if enriched.last_quote is None else enriched.last_quote.isoformat(),
+                    None
+                    if enriched.last_reconciliation is None
+                    else enriched.last_reconciliation.isoformat(),
+                    None if enriched.last_decision is None else enriched.last_decision.isoformat(),
+                    None if enriched.last_execution is None else enriched.last_execution.isoformat(),
+                    enriched.control_request_state,
+                    enriched.processed_events,
+                    enriched.decisions,
+                    enriched.executions,
+                    enriched.eod,
+                ),
+            )
 
     def halt(self, reason_code: str) -> None:
         reason = reason_code if isinstance(reason_code, str) and reason_code else "PRODUCTION_HALTED"
@@ -1284,6 +1642,9 @@ def build_production_runtime(
         universe_policy=universe,
     )
     pump = DomainEventPump(capacity=4096, clock=clock)
+    monotonic_clock = time_module.monotonic
+    monotonic_clock = time_module.monotonic
+    monotonic_clock = time_module.monotonic
     hooks = ProductionServiceHooks(
         config_path=config_path.resolve(),
         settings=settings,
@@ -1298,6 +1659,7 @@ def build_production_runtime(
         identity=runtime_identity,
         safety_manifest=safety,
         clock=clock,
+        monotonic_clock=monotonic_clock,
     )
     stop = _StopFlag()
     _install_stop_handlers(stop)
@@ -1308,6 +1670,7 @@ def build_production_runtime(
         pump=pump,
         hooks=hooks,
         clock=clock,
+        monotonic_clock=monotonic_clock,
         sleep=time_module.sleep,
         stop_requested=stop,
         poll_interval=timedelta(seconds=1),

@@ -1,9 +1,11 @@
-"""Fail-closed wall-clock and timezone validation."""
+"""Fail-closed wall-clock validation plus monotonic runtime time fences."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from firmquant.persistence.repositories import canonical_sha256
@@ -14,6 +16,20 @@ _SHANGHAI = ZoneInfo(_SHANGHAI_NAME)
 
 class ClockValidationError(RuntimeError):
     """Raised when time cannot authorize a production session."""
+
+
+class RuntimeClockDiscontinuity(ClockValidationError):
+    """Raised when wall/monotonic observations prove an unsafe time jump."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ClockReferenceProvider(Protocol):
+    """Port for a trusted external or broker-backed reference-time observation."""
+
+    def observe(self, system_time: datetime) -> ClockObservation | None: ...
 
 
 def _aware(value: datetime, *, label: str) -> None:
@@ -49,6 +65,83 @@ class ClockReceipt:
     shanghai_time: datetime
     drift_milliseconds: int
     sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class MonotonicDeadline:
+    """Absolute monotonic deadline; never derived from wall-clock differences."""
+
+    value: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
+            raise ClockValidationError("monotonic deadline must be numeric")
+        if self.value < 0:
+            raise ClockValidationError("monotonic deadline cannot be negative")
+
+    def remaining(self, monotonic_clock: Callable[[], float]) -> float:
+        observed = monotonic_clock()
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+            raise ClockValidationError("monotonic clock must return a number")
+        return max(0.0, float(self.value) - float(observed))
+
+    def expired(self, monotonic_clock: Callable[[], float]) -> bool:
+        observed = monotonic_clock()
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+            raise ClockValidationError("monotonic clock must return a number")
+        return float(observed) >= float(self.value)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeClockObservation:
+    wall_time: datetime
+    monotonic_time: float
+
+    def __post_init__(self) -> None:
+        _aware(self.wall_time, label="runtime wall time")
+        if isinstance(self.monotonic_time, bool) or not isinstance(self.monotonic_time, (int, float)):
+            raise ClockValidationError("runtime monotonic time must be numeric")
+        if self.monotonic_time < 0:
+            raise ClockValidationError("runtime monotonic time cannot be negative")
+
+
+class RuntimeClockMonitor:
+    """Detect process pauses, suspend/resume, wall rollback and clock divergence."""
+
+    def __init__(
+        self,
+        *,
+        max_observation_gap: timedelta = timedelta(seconds=30),
+        max_wall_monotonic_divergence: timedelta = timedelta(seconds=2),
+    ) -> None:
+        if (
+            not isinstance(max_observation_gap, timedelta)
+            or max_observation_gap <= timedelta(0)
+            or not isinstance(max_wall_monotonic_divergence, timedelta)
+            or max_wall_monotonic_divergence <= timedelta(0)
+        ):
+            raise ValueError("runtime clock thresholds must be positive timedeltas")
+        self._max_gap = max_observation_gap.total_seconds()
+        self._max_divergence = max_wall_monotonic_divergence.total_seconds()
+        self._previous: RuntimeClockObservation | None = None
+
+    def observe(self, observation: RuntimeClockObservation) -> None:
+        if not isinstance(observation, RuntimeClockObservation):
+            raise ClockValidationError("runtime clock observation must be typed")
+        previous = self._previous
+        self._previous = observation
+        if previous is None:
+            return
+        monotonic_delta = observation.monotonic_time - previous.monotonic_time
+        wall_delta = (observation.wall_time - previous.wall_time).total_seconds()
+        if monotonic_delta < 0:
+            raise RuntimeClockDiscontinuity("MONOTONIC_CLOCK_ROLLBACK")
+        if wall_delta < -self._max_divergence:
+            raise RuntimeClockDiscontinuity("WALL_CLOCK_ROLLBACK")
+        if monotonic_delta > self._max_gap:
+            raise RuntimeClockDiscontinuity("RUNTIME_OBSERVATION_GAP")
+        if abs(wall_delta - monotonic_delta) > self._max_divergence:
+            raise RuntimeClockDiscontinuity("WALL_MONOTONIC_DIVERGENCE")
 
 
 class ClockGuard:
@@ -98,5 +191,10 @@ __all__ = (
     "ClockGuard",
     "ClockObservation",
     "ClockReceipt",
+    "ClockReferenceProvider",
     "ClockValidationError",
+    "MonotonicDeadline",
+    "RuntimeClockDiscontinuity",
+    "RuntimeClockMonitor",
+    "RuntimeClockObservation",
 )

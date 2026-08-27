@@ -11,8 +11,8 @@ from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
 def test_account_authority_is_owned_by_central_schema_migration(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     try:
-        assert CURRENT_SCHEMA_VERSION == 3
-        assert database.scalar("SELECT max(version) FROM schema_migrations") == 3
+        assert CURRENT_SCHEMA_VERSION >= 4
+        assert database.scalar("SELECT max(version) FROM schema_migrations") == CURRENT_SCHEMA_VERSION
         tables = {
             str(row["name"])
             for row in database.query_all("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")

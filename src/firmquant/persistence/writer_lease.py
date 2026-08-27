@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import os
 import socket
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -99,7 +100,7 @@ def _aware_now(clock: Callable[[], datetime]) -> datetime:
 
 
 class WriterLease:
-    """Exclusive writer ownership that is lost unless periodically renewed."""
+    """Exclusive writer ownership that is permanently lost after an invalid observation."""
 
     def __init__(
         self,
@@ -126,6 +127,7 @@ class WriterLease:
         self._ttl = ttl
         self._clock = clock
         self._active = True
+        self._lost = False
 
     @classmethod
     def acquire(
@@ -234,13 +236,29 @@ class WriterLease:
 
     @property
     def active(self) -> bool:
-        return self._active
+        return self._active and not self._lost
+
+    def _lose(self, message: str) -> WriterLeaseLost:
+        self._lost = True
+        return WriterLeaseLost(message)
+
+    @staticmethod
+    def _stored_expiry(value: object) -> datetime:
+        try:
+            observed = datetime.fromisoformat(str(value))
+        except ValueError as error:
+            raise WriterLeaseLost("stored writer lease expiry is invalid") from error
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise WriterLeaseLost("stored writer lease expiry is not timezone-aware")
+        return observed
 
     def assert_current(self) -> None:
         """Prove this exact, unexpired generation still owns database writes."""
 
         if not self._active:
             raise WriterLeaseLost("writer lease is no longer active")
+        if self._lost:
+            raise WriterLeaseLost("writer lease was previously lost")
         now = _aware_now(self._clock)
         row = self.database.query_one(
             """
@@ -254,36 +272,63 @@ class WriterLease:
             or int(row["process_id"]) != self.process_id
             or int(row["generation"]) != self.generation
         ):
-            raise WriterLeaseLost("writer lease generation or owner changed")
-        observed_expiry = datetime.fromisoformat(str(row["expires_at"]))
-        if observed_expiry.tzinfo is None or observed_expiry.utcoffset() is None:
-            raise WriterLeaseLost("stored writer lease expiry is not timezone-aware")
+            raise self._lose("writer lease generation or owner changed")
+        try:
+            observed_expiry = self._stored_expiry(row["expires_at"])
+        except WriterLeaseLost:
+            self._lost = True
+            raise
         if now >= observed_expiry:
-            raise WriterLeaseLost("writer lease expired")
+            raise self._lose("writer lease expired")
 
     def renew(self) -> None:
+        """Renew only a still-current, still-unexpired stored lease using CAS."""
+
         if not self._active:
             raise WriterLeaseLost("writer lease is no longer active")
+        if self._lost:
+            raise WriterLeaseLost("writer lease was previously lost")
         now = _aware_now(self._clock)
         expires_at = now + self._ttl
-        with self.database.transaction("EXCLUSIVE"):
-            cursor = self.database.write(
-                """
-                UPDATE writer_leases SET renewed_at = ?, expires_at = ?
-                WHERE singleton_id = 1 AND owner_id = ? AND host_hash = ?
-                  AND process_id = ? AND generation = ?
-                """,
-                (
-                    now.isoformat(),
-                    expires_at.isoformat(),
-                    self.owner,
-                    self.host_hash,
-                    self.process_id,
-                    self.generation,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise WriterLeaseLost("writer lease generation or owner changed")
+        try:
+            with self.database.transaction("EXCLUSIVE"):
+                row = self.database.query_one(
+                    """
+                    SELECT owner_id, host_hash, process_id, generation, expires_at
+                    FROM writer_leases WHERE singleton_id = 1
+                    """
+                )
+                if row is None or (
+                    str(row["owner_id"]) != self.owner
+                    or str(row["host_hash"]) != self.host_hash
+                    or int(row["process_id"]) != self.process_id
+                    or int(row["generation"]) != self.generation
+                ):
+                    raise self._lose("writer lease generation or owner changed")
+                stored_expires_at = self._stored_expiry(row["expires_at"])
+                if now >= stored_expires_at:
+                    raise self._lose("writer lease expired before renewal")
+                cursor = self.database.write(
+                    """
+                    UPDATE writer_leases SET renewed_at = ?, expires_at = ?
+                    WHERE singleton_id = 1 AND owner_id = ? AND host_hash = ?
+                      AND process_id = ? AND generation = ? AND expires_at = ?
+                    """,
+                    (
+                        now.isoformat(),
+                        expires_at.isoformat(),
+                        self.owner,
+                        self.host_hash,
+                        self.process_id,
+                        self.generation,
+                        stored_expires_at.isoformat(),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise self._lose("writer lease compare-and-swap failed")
+        except WriterLeaseLost:
+            self._lost = True
+            raise
         self.expires_at = expires_at
 
     def release(self, *, remove_database_lease: bool = True) -> None:
@@ -316,9 +361,65 @@ class WriterLease:
         self.release()
 
 
+class WriterLeaseGuard:
+    """Monotonic keepalive port that delegates all ownership proof to WriterLease."""
+
+    def __init__(
+        self,
+        lease: WriterLease,
+        *,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+        renew_interval: timedelta = timedelta(seconds=10),
+    ) -> None:
+        if not isinstance(lease, WriterLease):
+            raise TypeError("writer lease guard requires WriterLease")
+        if not callable(monotonic_clock):
+            raise TypeError("writer lease guard monotonic clock must be callable")
+        if not isinstance(renew_interval, timedelta) or not timedelta(0) < renew_interval < lease._ttl:
+            raise ValueError("writer lease renew interval must be positive and shorter than TTL")
+        observed = monotonic_clock()
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+            raise TypeError("monotonic clock must return a number")
+        self._lease = lease
+        self._clock = monotonic_clock
+        self._renew_interval_seconds = renew_interval.total_seconds()
+        self._last_renewal = float(observed)
+        self._last_observation = float(observed)
+        self._lost = False
+
+    @property
+    def generation(self) -> int:
+        return self._lease.generation
+
+    def check(self) -> None:
+        """Prove ownership and renew when the monotonic interval is due."""
+
+        if self._lost:
+            raise WriterLeaseLost("writer lease guard was previously lost")
+        observed = self._clock()
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+            self._lost = True
+            raise WriterLeaseLost("writer lease monotonic clock became invalid")
+        now = float(observed)
+        if now < self._last_observation:
+            self._lost = True
+            raise WriterLeaseLost("writer lease monotonic clock moved backwards")
+        self._last_observation = now
+        try:
+            if now - self._last_renewal >= self._renew_interval_seconds:
+                self._lease.renew()
+                self._last_renewal = now
+            else:
+                self._lease.assert_current()
+        except WriterLeaseLost:
+            self._lost = True
+            raise
+
+
 __all__ = (
     "WriterLease",
     "WriterLeaseBusy",
+    "WriterLeaseGuard",
     "WriterLeaseLost",
     "writer_lock_available",
 )

@@ -1,18 +1,20 @@
-"""Capability-bound, time-bounded real execution with explicit write outcomes."""
+"""Capability-bound, lease-guarded real execution with monotonic time fences."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
+import time as time_module
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import sleep as _sleep
+from typing import Protocol
 
 from firmquant.domain.broker_facts import Side
 from firmquant.domain.orders import OrderAggregate, OrderState
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
+from firmquant.persistence.writer_lease import WriterLeaseLost
 from firmquant.risk.capability import BrokerWriteCapability
 
 from .controller import ExecutionController, ExecutionSessionResult
@@ -21,6 +23,34 @@ from .policy import FeeSchedule
 from .write_outcome import WriteFailureClass, classify_write_failure
 
 _OPEN_STATES = frozenset({OrderState.ACKNOWLEDGED, OrderState.PARTIALLY_FILLED})
+
+
+class LeaseGuard(Protocol):
+    """Minimal ownership port required by live execution."""
+
+    def check(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionDeadlines:
+    """Portfolio-level absolute deadlines expressed only in monotonic seconds."""
+
+    latest_new_submit: float
+    latest_cancel_initiation: float
+    absolute_completion: float
+
+    def __post_init__(self) -> None:
+        values = (
+            self.latest_new_submit,
+            self.latest_cancel_initiation,
+            self.absolute_completion,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
+            raise TypeError("execution deadlines must be numeric monotonic values")
+        if self.latest_new_submit < 0:
+            raise ValueError("execution deadlines cannot be negative")
+        if not (self.latest_new_submit <= self.latest_cancel_initiation <= self.absolute_completion):
+            raise ValueError("execution deadlines must be ordered")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +83,7 @@ class ExecutionWindowPolicy:
 
 
 class LiveExecutionController(ExecutionController):
-    """Real execution that cannot be constructed without dynamic broker-write capability."""
+    """Real execution that is bounded by capability, lease ownership and monotonic deadlines."""
 
     def __init__(
         self,
@@ -63,6 +93,9 @@ class LiveExecutionController(ExecutionController):
         fee_schedule: FeeSchedule,
         clock: Callable[[], datetime],
         window_policy: ExecutionWindowPolicy,
+        lease_guard: LeaseGuard | None = None,
+        monotonic_clock: Callable[[], float] = time_module.monotonic,
+        execution_deadlines: ExecutionDeadlines | None = None,
         sleep: Callable[[float], None] = _sleep,
     ) -> None:
         if not isinstance(capability, BrokerWriteCapability):
@@ -73,6 +106,12 @@ class LiveExecutionController(ExecutionController):
             raise TypeError("live execution requires ExecutionWindowPolicy")
         if not callable(sleep):
             raise TypeError("live execution sleep must be callable")
+        if lease_guard is None or not callable(getattr(lease_guard, "check", None)):
+            raise TypeError("live execution requires lease guard")
+        if not callable(monotonic_clock):
+            raise TypeError("live execution requires monotonic clock")
+        if not isinstance(execution_deadlines, ExecutionDeadlines):
+            raise TypeError("live execution requires ExecutionDeadlines")
         super().__init__(
             gateway=capability,
             ledger=ledger,
@@ -83,7 +122,41 @@ class LiveExecutionController(ExecutionController):
         self._capability = capability
         self._production_ledger = ledger
         self._window_policy = window_policy
+        self._lease_guard = lease_guard
+        self._monotonic_clock = monotonic_clock
+        self._deadlines = execution_deadlines
         self._sleep = sleep
+        self._last_monotonic: float | None = None
+
+    def _monotonic(self) -> float:
+        observed = self._monotonic_clock()
+        if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+            raise RuntimeError("MONOTONIC_CLOCK_INVALID")
+        value = float(observed)
+        if value < 0 or (self._last_monotonic is not None and value < self._last_monotonic):
+            raise RuntimeError("MONOTONIC_CLOCK_ROLLBACK")
+        self._last_monotonic = value
+        return value
+
+    def _guard(self, aggregate: OrderAggregate | None = None) -> None:
+        try:
+            self._lease_guard.check()
+        except WriterLeaseLost:
+            self._cancel_only_after_lease_loss(aggregate)
+            raise
+
+    def _cancel_only_after_lease_loss(self, aggregate: OrderAggregate | None) -> None:
+        """Best-effort broker-only cancel; durable state is recovered after restart."""
+
+        if aggregate is None or aggregate.state not in _OPEN_STATES or aggregate.broker_order_id is None:
+            return
+        try:
+            if self._monotonic() >= self._deadlines.latest_cancel_initiation:
+                return
+            self._capability.cancel_order(aggregate.broker_order_id)
+        except Exception:
+            # No database write is legal after lease loss. Recovery must reconcile the broker truth.
+            return
 
     @staticmethod
     def _failure_evidence(error: BaseException) -> str:
@@ -103,6 +176,7 @@ class LiveExecutionController(ExecutionController):
 
     def _submit_live(self, aggregate: OrderAggregate, planned: PlannedOrder) -> OrderAggregate:
         command = self._command(aggregate.intent, planned)
+        self._guard()
         started_at = self._clock()
         with self._production_ledger.database.transaction():
             submitting, attempt = self._production_ledger.begin_submit(
@@ -110,10 +184,12 @@ class LiveExecutionController(ExecutionController):
                 command,
                 started_at=started_at,
             )
+        self._guard()
         try:
             response = self._capability.submit_order(command)
         except Exception as error:
             evidence = self._failure_evidence(error)
+            self._guard()
             with self._production_ledger.database.transaction():
                 if classify_write_failure(error) is WriteFailureClass.NOT_ACCEPTED:
                     return self._production_ledger.resolve_submit_not_accepted(
@@ -132,6 +208,7 @@ class LiveExecutionController(ExecutionController):
             fills = self._broker_fills(response.broker_order_id)
         except Exception:
             fills = ()
+        self._guard()
         with self._production_ledger.database.transaction():
             return self._production_ledger.record_submit_result(
                 submitting,
@@ -144,16 +221,19 @@ class LiveExecutionController(ExecutionController):
     def _cancel_live(self, aggregate: OrderAggregate) -> OrderAggregate:
         if aggregate.broker_order_id is None:
             raise ValueError("cannot cancel live order without broker order id")
+        self._guard(aggregate)
         started_at = self._clock()
         with self._production_ledger.database.transaction():
             cancelling, attempt = self._production_ledger.begin_cancel(
                 aggregate,
                 started_at=started_at,
             )
+        self._guard(aggregate)
         try:
             response = self._capability.cancel_order(aggregate.broker_order_id)
         except Exception as error:
             evidence = self._failure_evidence(error)
+            self._guard(aggregate)
             with self._production_ledger.database.transaction():
                 if classify_write_failure(error) is WriteFailureClass.NOT_ACCEPTED:
                     return self._production_ledger.resolve_cancel_not_accepted(
@@ -172,6 +252,7 @@ class LiveExecutionController(ExecutionController):
             fills = self._broker_fills(response.broker_order_id)
         except Exception:
             fills = ()
+        self._guard(aggregate)
         with self._production_ledger.database.transaction():
             return self._production_ledger.record_cancel_result(
                 cancelling,
@@ -185,6 +266,7 @@ class LiveExecutionController(ExecutionController):
         broker_order_id = aggregate.broker_order_id
         if broker_order_id is None:
             return aggregate
+        self._guard(aggregate)
         orders = tuple(
             item for item in self._capability.query_orders() if item.broker_order_id == broker_order_id
         )
@@ -195,6 +277,7 @@ class LiveExecutionController(ExecutionController):
         fills = tuple(
             item for item in self._capability.query_fills() if item.broker_order_id == broker_order_id
         )
+        self._guard(aggregate)
         with self._production_ledger.database.transaction():
             return self._production_ledger.reconcile_broker_fact(
                 aggregate,
@@ -207,22 +290,28 @@ class LiveExecutionController(ExecutionController):
         self,
         aggregate: OrderAggregate,
         *,
-        submitted_at: datetime,
+        submitted_monotonic: float,
         side: Side,
     ) -> OrderAggregate:
-        deadline = submitted_at + self._window_policy.window_for(side)
+        order_deadline = min(
+            submitted_monotonic + self._window_policy.window_for(side).total_seconds(),
+            self._deadlines.latest_cancel_initiation,
+        )
         poll_seconds = self._window_policy.poll_interval.total_seconds()
-        window_seconds = self._window_policy.window_for(side).total_seconds()
-        max_polls = max(1, math.ceil(window_seconds / poll_seconds) + 2)
         current = aggregate
-        for _ in range(max_polls):
-            if current.state not in _OPEN_STATES:
-                return current
-            now = self._clock()
-            if now >= deadline:
+        while current.state in _OPEN_STATES:
+            self._guard(current)
+            now = self._monotonic()
+            if now >= order_deadline or now >= self._deadlines.absolute_completion:
                 break
-            remaining = max(0.0, (deadline - now).total_seconds())
-            self._sleep(min(poll_seconds, remaining))
+            remaining = min(
+                poll_seconds,
+                order_deadline - now,
+                self._deadlines.absolute_completion - now,
+            )
+            if remaining <= 0:
+                break
+            self._sleep(remaining)
             current = self._refresh_open_order(current)
         return current
 
@@ -230,24 +319,42 @@ class LiveExecutionController(ExecutionController):
         self,
         aggregate: OrderAggregate,
         *,
-        submitted_at: datetime,
+        submitted_monotonic: float,
         side: Side,
     ) -> OrderAggregate:
         current = self._wait_until_deadline(
             aggregate,
-            submitted_at=submitted_at,
+            submitted_monotonic=submitted_monotonic,
             side=side,
         )
         if current.state not in _OPEN_STATES:
             return current
-        earliest_cancel = submitted_at + self._window_policy.minimum_order_lifetime
-        now = self._clock()
+        earliest_cancel = submitted_monotonic + self._window_policy.minimum_order_lifetime.total_seconds()
+        now = self._monotonic()
         if now < earliest_cancel:
-            self._sleep((earliest_cancel - now).total_seconds())
-            current = self._refresh_open_order(current)
+            remaining = min(
+                earliest_cancel - now,
+                self._deadlines.latest_cancel_initiation - now,
+                self._deadlines.absolute_completion - now,
+            )
+            if remaining > 0:
+                self._sleep(remaining)
+                current = self._refresh_open_order(current)
         if current.state in _OPEN_STATES:
-            current = self._cancel_live(current)
+            now = self._monotonic()
+            if now < self._deadlines.latest_cancel_initiation and now < self._deadlines.absolute_completion:
+                current = self._cancel_live(current)
         return current
+
+    def _safe_to_start(self, side: Side) -> bool:
+        now = self._monotonic()
+        if now >= self._deadlines.latest_new_submit:
+            return False
+        window_end = now + self._window_policy.window_for(side).total_seconds()
+        return (
+            window_end <= self._deadlines.latest_cancel_initiation
+            and self._deadlines.latest_cancel_initiation <= self._deadlines.absolute_completion
+        )
 
     def execute(self, plan: ExecutionPlan) -> ExecutionSessionResult:
         if not isinstance(plan, ExecutionPlan):
@@ -261,13 +368,7 @@ class LiveExecutionController(ExecutionController):
         cancel_calls = 0
         for planned in plan.orders:
             if unresolved_unknown:
-                outcomes.append(
-                    self._outcome(
-                        planned,
-                        None,
-                        reason_code="BLOCKED_BY_UNRESOLVED_UNKNOWN",
-                    )
-                )
+                outcomes.append(self._outcome(planned, None, reason_code="BLOCKED_BY_UNRESOLVED_UNKNOWN"))
                 continue
             if planned.side is Side.BUY and incomplete_sell:
                 outcomes.append(
@@ -295,6 +396,17 @@ class LiveExecutionController(ExecutionController):
                     incomplete_sell = existing.state is not OrderState.FILLED
                     cash_after_sells = self._capability.query_account().available_cash
                 continue
+            if not self._safe_to_start(planned.side):
+                outcomes.append(
+                    self._outcome(
+                        planned,
+                        None,
+                        reason_code="BLOCKED_BY_GLOBAL_EXECUTION_DEADLINE",
+                    )
+                )
+                if planned.side is Side.SELL:
+                    incomplete_sell = True
+                continue
 
             shares, sizing_reason = self._shares_for_current_facts(planned)
             if shares <= 0:
@@ -304,6 +416,7 @@ class LiveExecutionController(ExecutionController):
                     cash_after_sells = self._capability.query_account().available_cash
                 continue
 
+            submitted_monotonic = self._monotonic()
             submitted_at = self._clock()
             aggregate = self._new_aggregate(planned, shares=shares, occurred_at=submitted_at)
             aggregate = self._submit_live(aggregate, planned)
@@ -317,7 +430,7 @@ class LiveExecutionController(ExecutionController):
                 before_cancel_requests = aggregate.cancel_requests
                 aggregate = self._finish_open_order(
                     aggregate,
-                    submitted_at=submitted_at,
+                    submitted_monotonic=submitted_monotonic,
                     side=planned.side,
                 )
                 cancel_calls += aggregate.cancel_requests - before_cancel_requests
@@ -345,4 +458,9 @@ class LiveExecutionController(ExecutionController):
         )
 
 
-__all__ = ("ExecutionWindowPolicy", "LiveExecutionController")
+__all__ = (
+    "ExecutionDeadlines",
+    "ExecutionWindowPolicy",
+    "LeaseGuard",
+    "LiveExecutionController",
+)

@@ -32,6 +32,7 @@ from firmquant.risk.capability import (
 )
 from firmquant.risk.gate import GateAction, GateDecision
 from firmquant.risk.kill_switch import KillSwitch
+from firmquant.scheduling.clock import ClockGuard, ClockObservation
 from firmquant.security.secrets import SecretBytes
 from tests.fixtures.broker_contract import (
     gateway_facts,
@@ -131,6 +132,13 @@ def context(
         command_within_uquant_intent=True,
         cash_and_positions_safe=True,
         frequency_within_limits=True,
+        clock_receipt=ClockGuard(max_drift=timedelta(seconds=2)).verify(
+            ClockObservation(
+                system_time=NOW,
+                reference_time=NOW,
+                local_timezone="Asia/Shanghai",
+            )
+        ),
     )
 
 

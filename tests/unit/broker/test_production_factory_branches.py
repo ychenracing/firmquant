@@ -96,7 +96,7 @@ def test_factory_classifies_sdk_manifest_failures_and_composes_identity_wrapper(
         def missing_import(_name: str) -> object:
             raise ModuleNotFoundError("xtquant")
 
-        with pytest.raises(BrokerDependencyMissing, match="SDK modules"):
+        with pytest.raises(BrokerDependencyMissing, match="XTQUANT_SDK_UNAVAILABLE"):
             factory.build_production_xtquant_gateway(
                 settings=settings,
                 database=database,

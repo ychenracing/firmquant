@@ -18,12 +18,17 @@ from firmquant.persistence.writer_lease import WriterLease
 class Clock:
     def __init__(self) -> None:
         self.value = datetime(2026, 8, 25, 1, 30, tzinfo=UTC)
+        self.elapsed = 0.0
 
     def __call__(self) -> datetime:
         return self.value
 
     def sleep(self, seconds: float) -> None:
         self.value += timedelta(seconds=seconds)
+        self.elapsed += seconds
+
+    def monotonic(self) -> float:
+        return self.elapsed
 
 
 class Broker:
@@ -119,6 +124,7 @@ def test_daemon_drains_callbacks_renews_writer_and_stops_cleanly(tmp_path: Path)
             pump=pump,
             hooks=hooks,
             clock=clock,
+            monotonic_clock=clock.monotonic,
             sleep=clock.sleep,
             stop_requested=stop_requested,
             poll_interval=timedelta(seconds=2),
@@ -129,7 +135,7 @@ def test_daemon_drains_callbacks_renews_writer_and_stops_cleanly(tmp_path: Path)
     assert broker.connected is False
     assert hooks.handled == 2
     assert hooks.cycles == 3
-    assert hooks.heartbeats == 3
+    assert hooks.heartbeats == 1
     assert receipt.event_count == 2
     assert receipt.decision_count == 1
     assert receipt.writer_renewals >= 2
@@ -157,6 +163,7 @@ def test_daemon_halts_before_cycle_when_event_pump_requires_halt(tmp_path: Path)
             pump=pump,
             hooks=hooks,
             clock=clock,
+            monotonic_clock=clock.monotonic,
             sleep=clock.sleep,
             stop_requested=lambda: False,
         )
@@ -185,6 +192,7 @@ def test_daemon_rejects_nonproduction_mode(tmp_path: Path) -> None:
             pump=Pump(),
             hooks=Hooks(),
             clock=clock,
+            monotonic_clock=clock.monotonic,
             sleep=clock.sleep,
             stop_requested=lambda: True,
         )

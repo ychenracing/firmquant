@@ -292,7 +292,7 @@ def test_finish_open_order_honors_minimum_lifetime_before_cancel(
         monkeypatch.setattr(executor, "_wait_until_deadline", lambda current, **_kwargs: current)
         finished = executor._finish_open_order(
             aggregate,
-            submitted_at=NOW,
+            submitted_monotonic=clock.monotonic(),
             side=planned.side,
         )
         assert finished.state is OrderState.CANCELLED

@@ -219,6 +219,19 @@ def seed_live_readiness(config: Path) -> None:
                 """,
                 (NOW.isoformat(),),
             )
+            database.write(
+                """
+                INSERT INTO production_heartbeat(
+                    singleton_id, mode, runtime_state, observed_at, host_hash, process_id,
+                    writer_generation, broker_connected, broker_read_healthy, broker_write_healthy,
+                    pending_events, last_broker_event, last_quote, last_reconciliation,
+                    last_decision, last_execution, control_request_state, processed_events,
+                    decisions, executions, eod
+                ) VALUES (1, 'CANARY', 'READY', ?, ?, 12345, 1, 1, 1, 1, 0, NULL, NULL, ?,
+                          NULL, NULL, 'IDLE', 0, 0, 0, 0)
+                """,
+                (NOW.isoformat(), "h" * 64, NOW.isoformat()),
+            )
             AuditLedger(database).append(
                 audit_event_id="shadow-ready-proof",
                 category="RUNTIME",

@@ -32,6 +32,7 @@ from .persistence.writer_lease import WriterLease, WriterLeaseBusy
 _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("init", "初始化本地 PAPER 状态目录"),
     ("doctor", "运行环境、身份与只读连接诊断"),
+    ("smoke-readonly", "读取完整生产 authority surface 并持久化零写调用证据"),
     ("run", "持续运行一个明确模式的 session"),
     ("status", "显示运行状态、阻断原因或本机控制请求状态"),
     ("arm-live", "创建短时效、绑定部署身份的实盘 lease"),

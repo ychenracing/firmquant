@@ -17,12 +17,14 @@ ExecutionRiskGate 的结果只有 ALLOW、SHRINK、DELAY、BLOCK、HALT。授权
 - uquant 目标、gross cap、freeze-new-risk 与实际持仓；
 - 可卖数量、T+1、交易单位、证券风险状态、停牌；
 - broker instrument/quote 给出的价格 tick、上下限、市场阶段和 freshness；
-- 单笔/日累计/单票/总敞口、未完成订单、拒单、断线、生命周期、撤改和频率；
+- 单笔/日累计/单票/总敞口、未完成订单、拒单、断线持续时间、已有订单年龄和 submit/cancel 频率；
 - uquant 成交量参与率、账户权益异常、日内损失与回撤警戒；
 - 启动/盘中对账、外部人工订单、未解释持仓、疑似公司行动；
-- 时钟、数据/配置/代码身份、UNKNOWN、kill switch。
+- 时钟 receipt、数据/配置/代码身份、UNKNOWN、kill switch。
 
 系统不硬编码交易所涨跌停比例。instrument、upper/lower limit 或 market status 缺失时停止交易，不根据板块历史经验猜测。所有金额、价格和费用使用 Decimal；与 uquant float 边界只接受有限值并执行精度/容差校验。
+
+生产风险事实不允许用“有利占位值”填空。broker 断线持续时间、已有订单年龄、reconciliation mismatch、未解释持仓、公司行动和 clock drift 必须来自 broker、ledger、reconciliation 或 ClockGuard 的实际证据；事实缺失时失败关闭。当前产品没有 replacement/reprice 功能，因此相关无效配置与风险字段已删除，而不是保留 `replacement_count=0` 一类恒真默认值。
 
 ## 模式与写权限
 
@@ -36,11 +38,21 @@ ExecutionRiskGate 的结果只有 ALLOW、SHRINK、DELAY、BLOCK、HALT。授权
 
 CANARY 不自动升级 LIVE；模式必须与配置一致。当前 XtQuant 真实环境未验证，相关模式在安装组合中失败关闭。
 
-## Arm lease 与 submit capability
+## WriterLease 与 arm lease
+
+WriterLease 是进程级唯一写权威，不是普通 TTL 缓存。续租必须在同一 EXCLUSIVE transaction 内验证 owner、host、pid、generation 和 stored `expires_at`；当前时间达到或超过 stored `expires_at`、generation 被其他 owner 取代或 CAS rowcount 不为 1 时立即失租。旧 lease 对象不能在系统暂停或睡眠恢复后复活。
+
+长时间执行由 lease guard/keepalive port 复用同一 WriterLease 实现；controller 不复制 lease 算法。submit、poll、cancel 和状态提交前都重新检查 lease，达到续租间隔时续租。失租后所有新增 submit 被禁止；已有 SYSTEM 活动订单仅可按受控 cancel-only/UNKNOWN 语义缩减风险，随后进入 HALT 与恢复流程。
 
 `arm-live` 只能在交互终端执行，在 CI 中拒绝。确认短语通过 getpass 临时读取，不写日志；lease 默认短时且最长受 CLI 限制。lease 通过 MAC 认证并绑定 host、账户、mode、firmquant commit、uquant source SHA 和配置摘要。配置或代码变化后旧 lease 失效，不能用环境变量永久解锁。
 
-正常策略 submit 以及执行窗口内的普通 cancel 仍通过 `BrokerWriteCapability`。每次写操作重新构造最新 WriteAuthorizationContext，并检查 mode、live flag、lease、合规、broker 健康、启动对账、snapshot/quote freshness、session/market status、fingerprints、kill switch、UNKNOWN、外部活动、逐单 gate、现金/持仓和频率。capability 不是启动时一次性通行证。
+正常策略 submit 以及执行窗口内的普通 cancel 仍通过 `BrokerWriteCapability`。每次写操作重新构造最新 WriteAuthorizationContext，并检查 mode、live flag、lease、合规、broker 健康、启动对账、snapshot/quote freshness、session/market status、fingerprints、kill switch、UNKNOWN、外部活动、逐单 gate、现金/持仓、频率和最新 ClockReceipt。capability 不是启动时一次性通行证。
+
+## 时钟事实与时间围栏
+
+wall clock 负责交易日、session 和市场时间；monotonic clock 负责持续时长、poll interval、订单生命周期和组合 deadline。ClockGuard 只接受明确 `ClockReferenceProvider` 提供的可信参考时间。真实模式没有可信参考时间或券商 quote event time 证据时，doctor、write authorization 与 ExecutionRiskContext 必须进入 `CLOCK_DRIFT_UNVERIFIED`，不能硬编码零漂移。
+
+runtime 维护 wall/monotonic observation。检测到 sleep/resume gap、wall clock 回拨或两者差异异常时，撤销 arm、阻止新增订单并要求重新启动恢复与对账。时间跳变不是可自动忽略的零漂移事件。
 
 ## cancel-only capability
 
@@ -58,6 +70,6 @@ HALT 是最高优先级的本机控制：daemon 在 broker callback、策略执�
 
 DISARM 只撤销新的实盘授权并推进安全运行状态，不伪造订单终态，不把 UNKNOWN 标记为 CANCELLED。STOP 停止新增工作、撤销 arm、持久化 STOPPING；只有 broker 断开完成后才进入 DISARMED。SIGINT/SIGTERM 只设置内存停止标志，实际 STOP 状态推进发生在单 writer daemon 循环内。
 
-`resume` 需要交互确认和重新对账，不能清除 UNKNOWN、外部订单、身份漂移或账户差异。数据库损坏、writer lease 冲突、控制请求身份错误和审计链失败直接阻止运行。紧急默认不是自动清仓。
+`resume` 需要交互确认和重新对账，不能清除 UNKNOWN、外部订单、身份漂移、账户差异、lease loss 或 clock discontinuity。数据库损坏、writer lease 冲突、控制请求身份错误和审计链失败直接阻止运行。紧急默认不是自动清仓。
 
 合规前置条件见 [COMPLIANCE.md](COMPLIANCE.md)，操作流程见 [OPERATIONS.md](OPERATIONS.md)。

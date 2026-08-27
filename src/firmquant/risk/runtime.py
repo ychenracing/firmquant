@@ -29,7 +29,6 @@ def risk_limits_from_settings(settings: Settings) -> RiskLimits:
         max_consecutive_rejections=runtime.max_consecutive_rejections,
         max_disconnect_duration=timedelta(seconds=runtime.max_disconnect_seconds),
         max_order_lifetime=timedelta(seconds=runtime.max_order_lifetime_seconds),
-        max_replacements=runtime.max_replacements,
         max_submit_count_window=runtime.max_submit_count_window,
         max_cancel_count_window=runtime.max_cancel_count_window,
         max_quote_age=timedelta(seconds=runtime.max_quote_age_seconds),

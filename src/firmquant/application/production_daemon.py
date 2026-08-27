@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import time as time_module
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -13,7 +15,15 @@ from firmquant.application.production_runtime import ProductionRuntime, Producti
 from firmquant.application.runtime_control import RuntimeControlExecutor
 from firmquant.broker.gateway import BrokerEventSink, BrokerGateway
 from firmquant.config import Mode, Settings
-from firmquant.persistence.writer_lease import WriterLease
+from firmquant.domain.states import RuntimeState
+from firmquant.persistence.writer_lease import WriterLease, WriterLeaseGuard, WriterLeaseLost
+from firmquant.scheduling.clock import (
+    RuntimeClockDiscontinuity,
+    RuntimeClockMonitor,
+    RuntimeClockObservation,
+)
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ProductionDaemonHalted(RuntimeError):
@@ -38,10 +48,24 @@ class ProductionCycleResult:
 
 @dataclass(frozen=True, slots=True)
 class ProductionHeartbeat:
+    """One lightweight process-liveness observation; persistence is owned by hooks."""
+
     mode: Mode
+    runtime_state: RuntimeState
     observed_at: datetime
+    host_hash: str
+    process_id: int
     writer_generation: int
+    broker_connected: bool
+    broker_read_healthy: bool
+    broker_write_healthy: bool
     pending_events: int
+    last_broker_event: datetime | None
+    last_quote: datetime | None
+    last_reconciliation: datetime | None
+    last_decision: datetime | None
+    last_execution: datetime | None
+    control_request_state: str
     processed_events: int
     decisions: int
     executions: int
@@ -50,13 +74,18 @@ class ProductionHeartbeat:
     def __post_init__(self) -> None:
         if self.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
             raise ValueError("heartbeat mode must be a production mode")
+        if not isinstance(self.runtime_state, RuntimeState):
+            raise TypeError("heartbeat runtime state must be RuntimeState")
         if (
             not isinstance(self.observed_at, datetime)
             or self.observed_at.tzinfo is None
             or self.observed_at.utcoffset() is None
         ):
             raise ValueError("heartbeat time must be timezone-aware")
-        for label, value in (
+        if not isinstance(self.host_hash, str) or _SHA256.fullmatch(self.host_hash) is None:
+            raise ValueError("heartbeat host hash must be SHA-256")
+        for label, integer_value in (
+            ("process id", self.process_id),
             ("writer generation", self.writer_generation),
             ("pending events", self.pending_events),
             ("processed events", self.processed_events),
@@ -64,8 +93,37 @@ class ProductionHeartbeat:
             ("executions", self.executions),
             ("EOD", self.eod),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if isinstance(integer_value, bool) or not isinstance(integer_value, int) or integer_value < 0:
                 raise ValueError(f"heartbeat {label} must be a nonnegative integer")
+        for label, boolean_value in (
+            ("broker connected", self.broker_connected),
+            ("broker read health", self.broker_read_healthy),
+            ("broker write health", self.broker_write_healthy),
+        ):
+            if type(boolean_value) is not bool:
+                raise TypeError(f"heartbeat {label} must be bool")
+        if self.broker_write_healthy and not self.broker_read_healthy:
+            raise ValueError("heartbeat write health requires read health")
+        for label, timestamp_value in (
+            ("last broker event", self.last_broker_event),
+            ("last quote", self.last_quote),
+            ("last reconciliation", self.last_reconciliation),
+            ("last decision", self.last_decision),
+            ("last execution", self.last_execution),
+        ):
+            if timestamp_value is not None and (
+                not isinstance(timestamp_value, datetime)
+                or timestamp_value.tzinfo is None
+                or timestamp_value.utcoffset() is None
+            ):
+                raise ValueError(f"heartbeat {label} must be timezone-aware or null")
+        if (
+            not isinstance(self.control_request_state, str)
+            or not self.control_request_state
+            or self.control_request_state != self.control_request_state.strip()
+            or len(self.control_request_state) > 64
+        ):
+            raise ValueError("heartbeat control request state must be canonical text")
 
 
 @runtime_checkable
@@ -139,9 +197,11 @@ class ProductionDaemon(ProductionRuntime):
         clock: Callable[[], datetime],
         sleep: Callable[[float], None],
         stop_requested: Callable[[], bool],
+        monotonic_clock: Callable[[], float] = time_module.monotonic,
         control_inbox: ControlInbox | None = None,
         poll_interval: timedelta = timedelta(seconds=1),
         renew_interval: timedelta = timedelta(seconds=10),
+        heartbeat_interval: timedelta = timedelta(seconds=10),
         max_events_per_cycle: int = 1024,
     ) -> None:
         if mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
@@ -154,7 +214,7 @@ class ProductionDaemon(ProductionRuntime):
             raise TypeError("production daemon event pump does not satisfy its contract")
         if not isinstance(hooks, ProductionHooks):
             raise TypeError("production daemon hooks do not satisfy their contract")
-        if not all(callable(item) for item in (clock, sleep, stop_requested)):
+        if not all(callable(item) for item in (clock, sleep, stop_requested, monotonic_clock)):
             raise TypeError("production daemon clock/sleep/stop ports must be callable")
         if control_inbox is not None and not isinstance(control_inbox, ControlInbox):
             raise TypeError("production daemon control inbox must be ControlInbox")
@@ -164,6 +224,7 @@ class ProductionDaemon(ProductionRuntime):
         self._pump = pump
         self._hooks = hooks
         self._clock = clock
+        self._monotonic_clock = monotonic_clock
         self._sleep = sleep
         self._stop_requested = stop_requested
         self._control_inbox = control_inbox or ControlInbox(writer.database.path.parent, clock=clock)
@@ -177,6 +238,18 @@ class ProductionDaemon(ProductionRuntime):
         self._risk_blocked = False
         self._poll_interval = _positive_duration(poll_interval, label="poll interval")
         self._renew_interval = _positive_duration(renew_interval, label="writer renewal interval")
+        self._heartbeat_interval = _positive_duration(heartbeat_interval, label="heartbeat interval")
+        if self._heartbeat_interval < self._poll_interval:
+            raise ValueError("heartbeat interval cannot be shorter than poll interval")
+        self._lease_guard = WriterLeaseGuard(
+            writer,
+            monotonic_clock=monotonic_clock,
+            renew_interval=self._renew_interval,
+        )
+        self._clock_monitor = RuntimeClockMonitor(
+            max_observation_gap=timedelta(seconds=30),
+            max_wall_monotonic_divergence=timedelta(seconds=3),
+        )
         if isinstance(max_events_per_cycle, bool) or not isinstance(max_events_per_cycle, int):
             raise TypeError("maximum events per cycle must be an integer")
         if max_events_per_cycle <= 0:
@@ -185,6 +258,12 @@ class ProductionDaemon(ProductionRuntime):
 
     def _now(self) -> datetime:
         return _aware(self._clock(), label="production daemon clock")
+
+    def _monotonic(self) -> float:
+        value = self._monotonic_clock()
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ProductionDaemonHalted("MONOTONIC_CLOCK_INVALID")
+        return float(value)
 
     @staticmethod
     def _reconciliation_id(value: str) -> str:
@@ -217,21 +296,57 @@ class ProductionDaemon(ProductionRuntime):
             self._risk_blocked = True
         return batch
 
+    @staticmethod
+    def _control_state(batch: ControlBatch) -> str:
+        if batch.stop:
+            return "STOP_PENDING"
+        if batch.halted:
+            return "HALTED"
+        if not batch.receipts:
+            return "IDLE"
+        return batch.receipts[-1].status.value
+
+    def _runtime_state(self) -> RuntimeState:
+        status = getattr(self._hooks, "status", None)
+        state = getattr(status, "state", None)
+        return state if isinstance(state, RuntimeState) else RuntimeState.HALTED
+
     def _heartbeat(
         self,
         *,
         now: datetime,
+        controls: ControlBatch,
         event_count: int,
         decision_count: int,
         execution_count: int,
         eod_count: int,
     ) -> None:
+        connected = False
+        read_healthy = False
+        write_healthy = False
+        if isinstance(self._broker, BrokerGateway):
+            health = self._broker.health()
+            connected = health.connected
+            read_healthy = health.read_healthy
+            write_healthy = health.write_healthy
         self._hooks.heartbeat(
             ProductionHeartbeat(
                 mode=self._mode,
+                runtime_state=self._runtime_state(),
                 observed_at=now,
+                host_hash=self._writer.host_hash,
+                process_id=self._writer.process_id,
                 writer_generation=self._writer.generation,
+                broker_connected=connected,
+                broker_read_healthy=read_healthy,
+                broker_write_healthy=write_healthy,
                 pending_events=self._pump.pending_count,
+                last_broker_event=None,
+                last_quote=None,
+                last_reconciliation=None,
+                last_decision=None,
+                last_execution=None,
+                control_request_state=self._control_state(controls),
                 processed_events=event_count,
                 decisions=decision_count,
                 executions=execution_count,
@@ -239,10 +354,28 @@ class ProductionDaemon(ProductionRuntime):
             )
         )
 
+    def _observe_runtime_clock(self, *, wall_time: datetime, monotonic_time: float) -> None:
+        try:
+            self._clock_monitor.observe(
+                RuntimeClockObservation(
+                    wall_time=wall_time,
+                    monotonic_time=monotonic_time,
+                )
+            )
+        except RuntimeClockDiscontinuity as error:
+            self._risk_blocked = True
+            with suppress(Exception):
+                self._control_executor.execute_internal_stop(source=error.code)
+            with suppress(Exception):
+                self._hooks.halt(error.code)
+            raise ProductionDaemonHalted(error.code) from error
+
     def run(self) -> ProductionRuntimeReceipt:
         self._writer.assert_current()
         started_at = self._now()
-        last_renewed_at = started_at
+        started_monotonic = self._monotonic()
+        self._observe_runtime_clock(wall_time=started_at, monotonic_time=started_monotonic)
+        last_heartbeat_monotonic = started_monotonic - self._heartbeat_interval.total_seconds()
         writer_renewals = 0
         event_count = 0
         decision_count = 0
@@ -252,23 +385,24 @@ class ProductionDaemon(ProductionRuntime):
         connected = False
         clean_stop = False
         disconnect_error: Exception | None = None
+        controls = ControlBatch(receipts=(), halted=False, stop=False)
         try:
             self._broker.connect()
             connected = True
             self._broker.subscribe(self._pump.sink)
 
-            initial_controls = self._process_controls()
-            if not initial_controls.stop and not self._risk_blocked:
+            controls = self._process_controls()
+            if not controls.stop and not self._risk_blocked:
                 startup_reconciliation_id = self._reconciliation_id(self._hooks.startup())
 
-            while not initial_controls.stop:
+            while not controls.stop:
                 now = self._now()
-                if now - last_renewed_at >= self._renew_interval:
-                    self._writer.renew()
+                monotonic_now = self._monotonic()
+                self._observe_runtime_clock(wall_time=now, monotonic_time=monotonic_now)
+                previous_expiry = self._writer.expires_at
+                self._lease_guard.check()
+                if self._writer.expires_at != previous_expiry:
                     writer_renewals += 1
-                    last_renewed_at = now
-                else:
-                    self._writer.assert_current()
 
                 controls = self._process_controls()
                 if controls.stop:
@@ -289,15 +423,27 @@ class ProductionDaemon(ProductionRuntime):
                     decision_count += cycle.decisions
                     execution_count += cycle.executions
                     eod_count += cycle.eod
-                self._heartbeat(
-                    now=now,
-                    event_count=event_count,
-                    decision_count=decision_count,
-                    execution_count=execution_count,
-                    eod_count=eod_count,
-                )
+                monotonic_after_cycle = self._monotonic()
+                if (
+                    monotonic_after_cycle - last_heartbeat_monotonic
+                    >= self._heartbeat_interval.total_seconds()
+                ):
+                    heartbeat_now = self._now()
+                    self._heartbeat(
+                        now=heartbeat_now,
+                        controls=controls,
+                        event_count=event_count,
+                        decision_count=decision_count,
+                        execution_count=execution_count,
+                        eod_count=eod_count,
+                    )
+                    last_heartbeat_monotonic = monotonic_after_cycle
                 self._sleep(self._poll_interval.total_seconds())
             clean_stop = True
+        except WriterLeaseLost as error:
+            # A lost lease may no longer persist HALT safely. Broker writes are already fenced by
+            # the same guard; stale heartbeat forces recovery on the next local start.
+            raise ProductionDaemonHalted("WRITER_LEASE_LOST") from error
         except ProductionDaemonHalted:
             raise
         except Exception as error:

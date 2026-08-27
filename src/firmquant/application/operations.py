@@ -19,7 +19,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Never, Protocol, runtime_checkable
 
+from firmquant.broker.production_smoke import run_readonly_production_smoke
 from firmquant.broker.replay import RecordedReplayBroker
+from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
 from firmquant.build_identity import load_locked_source_identity
 from firmquant.config import Mode, PathSettings, Settings, load_settings
 from firmquant.domain.states import RuntimeState, RuntimeStatus
@@ -107,6 +109,7 @@ class OperatorCommand(StrEnum):
     BACKUP = "backup"
     VERIFY_BACKUP = "verify-backup"
     CANCEL_SYSTEM_ORDERS = "cancel-system-orders"
+    SMOKE_READONLY = "smoke-readonly"
 
 
 class OperatorCommandDenied(RuntimeError):
@@ -432,6 +435,7 @@ class LocalOperatorService:
             OperatorCommand.BACKUP: lambda: self._backup(request),
             OperatorCommand.VERIFY_BACKUP: lambda: self._verify_backup(request),
             OperatorCommand.CANCEL_SYSTEM_ORDERS: lambda: self._cancel_system_orders(),
+            OperatorCommand.SMOKE_READONLY: lambda: self._smoke_readonly(),
         }
         return handlers[request.command]()
 
@@ -579,10 +583,7 @@ class LocalOperatorService:
         resolved_settings = settings.model_copy(update={"paths": paths})
         broker: ReadOnlyDoctorBroker | None = None
         if self._doctor_broker_provider is not None:
-            try:
-                broker = self._doctor_broker_provider()
-            except Exception:
-                broker = None
+            broker = self._doctor_broker_provider()
         doctor = Doctor.for_local_environment(
             resolved_settings,
             database_path=paths.state_directory / "firmquant.sqlite3",
@@ -590,6 +591,11 @@ class LocalOperatorService:
             repository_root=Path(__file__).resolve().parents[3],
             clock=self._clock,
             clock_drift_seconds=None,
+            safety_manifest_path=(
+                None
+                if settings.broker.safety_manifest_path is None
+                else self._resolved(settings.broker.safety_manifest_path)
+            ),
         )
         results = doctor.run()
         payload = {
@@ -865,19 +871,64 @@ class LocalOperatorService:
         )
         last_quote = database.scalar("SELECT max(received_at) FROM broker_events WHERE event_type = 'QUOTE'")
         source = load_locked_source_identity()
+        production_mode = settings.mode in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}
+        heartbeat = database.query_one("SELECT * FROM production_heartbeat WHERE singleton_id = 1")
+        heartbeat_age: float | None = None
+        process_health = "NOT_APPLICABLE"
+        broker_connection = "NOT_APPLICABLE"
+        broker_read_healthy = False
+        broker_write_healthy = False
+        effective_state = status.state.value
+        if production_mode:
+            process_health = "NOT_RUNNING"
+            broker_connection = "NOT_RUNNING"
+            effective_state = RuntimeState.HALTED.value
+            if heartbeat is None:
+                blockers.add("PROCESS_NOT_RUNNING")
+            else:
+                try:
+                    heartbeat_at = datetime.fromisoformat(str(heartbeat["observed_at"]))
+                    if heartbeat_at.tzinfo is None or heartbeat_at.utcoffset() is None:
+                        raise ValueError
+                    age = now - heartbeat_at
+                    heartbeat_age = age.total_seconds()
+                    if heartbeat_age < 0:
+                        raise ValueError
+                except ValueError as error:
+                    raise OperatorCommandDenied("HEARTBEAT_INVALID") from error
+                broker_connection = "CONNECTED" if int(heartbeat["broker_connected"]) == 1 else "DISCONNECTED"
+                broker_read_healthy = int(heartbeat["broker_read_healthy"]) == 1
+                broker_write_healthy = int(heartbeat["broker_write_healthy"]) == 1
+                if heartbeat_age > 30.0:
+                    process_health = "STALE"
+                    blockers.add("HEARTBEAT_STALE")
+                else:
+                    process_health = "HEALTHY"
+                    effective_state = status.state.value
         return {
             "mode": settings.mode.value,
-            "runtime_state": status.state.value,
+            "runtime_state": effective_state,
+            "stored_runtime_state": status.state.value,
+            "process_health": process_health,
+            "heartbeat_age": heartbeat_age,
             "armed": armed,
             "arm_expires_at": expires_at,
             "firmquant_commit": firmquant_commit,
             "uquant_commit": source.uquant_commit,
             "strategy_session": strategy_session,
-            "broker_connection": "UNKNOWN",
-            "last_quote": last_quote,
-            "last_reconciliation": (
-                None if latest_reconciliation is None else latest_reconciliation["completed_at"]
-            ),
+            "broker_connection": broker_connection,
+            "broker_read_healthy": broker_read_healthy,
+            "broker_write_healthy": broker_write_healthy,
+            "last_quote": (last_quote if heartbeat is None else heartbeat["last_quote"]),
+            "last_reconciliation": (None if heartbeat is None else heartbeat["last_reconciliation"]),
+            "last_broker_event": None if heartbeat is None else heartbeat["last_broker_event"],
+            "last_decision": None if heartbeat is None else heartbeat["last_decision"],
+            "last_execution": None if heartbeat is None else heartbeat["last_execution"],
+            "control_request_state": None if heartbeat is None else heartbeat["control_request_state"],
+            "writer_generation": None if heartbeat is None else heartbeat["writer_generation"],
+            "process_id": None if heartbeat is None else heartbeat["process_id"],
+            "host_hash": None if heartbeat is None else heartbeat["host_hash"],
+            "pending_events": None if heartbeat is None else heartbeat["pending_events"],
             "unresolved_orders": unresolved,
             "current_cash": current_cash,
             "actual_gross": actual_gross,
@@ -1725,6 +1776,58 @@ class LocalOperatorService:
                 "schema_version": verification.schema_version,
                 "verified": True,
             },
+        )
+
+    def _smoke_readonly(self) -> OperatorResult:
+        settings = self._settings()
+        if settings.mode not in {Mode.SHADOW, Mode.CANARY, Mode.LIVE}:
+            raise OperatorCommandDenied("MODE_NOT_PRODUCTION_XTQUANT")
+        if self._doctor_broker_provider is None:
+            raise OperatorCommandDenied("BROKER_CLIENT_UNAVAILABLE")
+        manifest_path = settings.broker.safety_manifest_path
+        if manifest_path is None:
+            raise OperatorCommandDenied("XTQUANT_SAFETY_MANIFEST_MISSING")
+        try:
+            manifest = XtQuantSafetyManifest.load(self._resolved(manifest_path))
+            identity = StrategyIdentity.locked()
+            identity.verify()
+            broker = self._doctor_broker_provider()
+            if broker is None:
+                raise OperatorCommandDenied("BROKER_CLIENT_UNAVAILABLE")
+        except OperatorCommandDenied:
+            raise
+        except Exception as error:
+            raise OperatorCommandDenied("READONLY_SMOKE_PREREQUISITES_UNAVAILABLE") from error
+        database_path = self._database_path(settings)
+        with WriterLease.acquire(
+            database_path,
+            owner="smoke-readonly",
+            clock=self._clock,
+        ) as writer:
+            connected_here = False
+            try:
+                health = broker.health()
+                if not health.connected:
+                    broker.connect()
+                    connected_here = True
+                receipt = run_readonly_production_smoke(
+                    broker=broker,
+                    database=writer.database,
+                    probe_symbol=manifest.probe_symbol,
+                    firmquant_commit=self._firmquant_commit(),
+                    uquant_commit=identity.uquant_commit,
+                    config_sha256=self._configuration_sha256(),
+                    safety_manifest_sha256=manifest.sha256,
+                    clock=self._clock,
+                )
+            finally:
+                if connected_here:
+                    broker.disconnect()
+        if receipt.real_order_calls != 0:
+            raise OperatorCommandDenied("READONLY_SMOKE_WRITE_CALL_DETECTED")
+        return OperatorResult(
+            message="生产只读 smoke 已完成并持久化证据。券商写调用为 0。",
+            payload={**receipt.payload(), "receipt_sha256": receipt.sha256},
         )
 
     def _cancel_system_orders(self) -> OperatorResult:
