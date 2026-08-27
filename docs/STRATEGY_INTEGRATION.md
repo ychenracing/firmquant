@@ -65,3 +65,11 @@ StrategyAdapter 只允许在精确验证、干净且锁定 commit 的 uquant sou
 parity 测试在同一 commit、配置、数据、universe、账户、broker snapshot 与 as-of 下，对 adapter 和直接调用 uquant
 比较完整 opportunity、risk、sentinel、targets、pending orders、reason codes、账户经济状态和 fingerprints。比较为
 严格相等，不使用容差掩盖经济差异。
+
+## 收盘数据、停牌 mark 与冻结决策
+
+收盘策略数据不通过补 bar 改写 uquant 经济语义。正常交易证券、沪深 300 等策略参考指数必须存在目标 trading session 的真实日线；仅当同一 session 的权威 instrument fact 明确为 `SUSPENDED` 或非交易、且状态仍在 freshness 窗口内时，股票才允许最后真实 bar 早于目标 session。该证券继续使用最后合法策略 mark，数据 manifest 同时封存 `latest_observed_session` 与 suspension evidence hash；一旦恢复交易，目标 session 完整性立即恢复为强制条件。状态缺失、陈旧、session 不匹配或实际处于 TRADING 时都失败关闭，永远不会复制昨日 OHLCV、写零成交假 bar 或修改价格。
+
+历史 prefix 改变仍被视为 source identity 事件而不是普通数据刷新。生产 active generation 不会被覆盖；新的历史被隔离为 state directory 下的 rewrite candidate，直到本机 operator 在 DISARMED、无活动订单、无 UNKNOWN 的条件下重新验证并显式批准。promotion 原子切换 active generation，保留旧 generation，并要求策略 engine reload 到新 active data store；uquant 本身及其参数、状态机、配置不因此改变。
+
+完整收盘只在 EOD reconciliation 已通过、目标数据 manifest 已验证后产生当天唯一冻结决策。`DecisionSnapshot` 与 uquant AccountState 仍由原有 StrategyAdapter/账户提交协议共同约束；报告和最终 backup 必须引用同一个 decision id。次日执行要求上一交易日同时存在冻结决策和 completed close-session receipt：两者任一缺失均为 `MISSING_DECISION` blocker 并 HALT，不再解释为“零订单”。存在合法冻结决策但其订单数组为空时才是 `NO_INTENT`，这是正常的零执行结果，日报会与 `MISSING_DECISION` 明确区分。
