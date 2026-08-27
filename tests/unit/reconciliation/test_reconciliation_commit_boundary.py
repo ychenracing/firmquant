@@ -121,8 +121,9 @@ def test_failed_account_commit_cannot_publish_passed_reconciliation_receipt(tmp_
             )
 
         assert database.scalar("SELECT count(*) FROM reconciliation_runs") == 0
-        assert database.scalar(
-            "SELECT count(*) FROM audit_events WHERE category = 'reconciliation.receipt'"
-        ) == 0
+        assert (
+            database.scalar("SELECT count(*) FROM audit_events WHERE category = 'reconciliation.receipt'")
+            == 0
+        )
     finally:
         database.close()
