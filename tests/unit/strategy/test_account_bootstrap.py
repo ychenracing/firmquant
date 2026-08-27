@@ -10,6 +10,7 @@ from uquant.account import load_account, save_account
 from uquant.types import AccountState
 
 from firmquant.domain.values import Money
+from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
 from firmquant.strategy.account_bootstrap import (
     AccountBootstrapDenied,
@@ -121,5 +122,77 @@ def test_nonempty_seed_mismatch_is_rejected_without_partial_write(tmp_path: Path
         assert not (tmp_path / "uquant-account.json").exists()
         assert database.scalar("SELECT count(*) FROM account_bindings") == 0
         assert database.scalar("SELECT count(*) FROM account_bootstrap_operations") == 0
+    finally:
+        database.close()
+
+
+def test_bootstrap_resumes_prepared_operation_after_crash_before_file_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    service = _service(tmp_path, database)
+    store_type = type(service._store)
+    original_save = store_type.save
+
+    def crash_before_save(self, state, path) -> None:
+        del self, state, path
+        raise SystemExit("simulated crash before account save")
+
+    try:
+        monkeypatch.setattr(store_type, "save", crash_before_save)
+        with pytest.raises(SystemExit, match="simulated crash"):
+            service.bootstrap(_empty_snapshot())
+
+        assert not (tmp_path / "uquant-account.json").exists()
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "PREPARED"
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 0
+
+        monkeypatch.setattr(store_type, "save", original_save)
+        recovered = _service(tmp_path, database).bootstrap(_empty_snapshot())
+
+        assert recovered.account_state_sha256
+        assert database.scalar("SELECT count(*) FROM account_bootstrap_operations") == 1
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "BINDING_COMMITTED"
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 1
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.binding'") == 1
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.bootstrap'") == 1
+    finally:
+        database.close()
+
+
+def test_bootstrap_recovers_file_applied_before_atomic_binding_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    service = _service(tmp_path, database)
+    original_append = AuditLedger.append
+
+    def crash_during_finalization(self, **kwargs):
+        if kwargs.get("category") == "account.bootstrap":
+            raise SystemExit("simulated crash during bootstrap finalization")
+        return original_append(self, **kwargs)
+
+    try:
+        monkeypatch.setattr(AuditLedger, "append", crash_during_finalization)
+        with pytest.raises(SystemExit, match="simulated crash"):
+            service.bootstrap(_empty_snapshot())
+
+        account_path = tmp_path / "uquant-account.json"
+        durable_hash = service._store.hash_file(account_path)
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 1
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "FILE_COMMITTED"
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.bootstrap'") == 0
+
+        monkeypatch.setattr(AuditLedger, "append", original_append)
+        recovered = _service(tmp_path, database).bootstrap(_empty_snapshot())
+
+        assert recovered.account_state_sha256 == durable_hash
+        assert service._store.hash_file(account_path) == durable_hash
+        assert database.scalar("SELECT stage FROM account_bootstrap_operations") == "BINDING_COMMITTED"
+        assert database.scalar("SELECT count(*) FROM account_bindings") == 1
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.binding'") == 1
+        assert database.scalar("SELECT count(*) FROM audit_events WHERE category = 'account.bootstrap'") == 1
     finally:
         database.close()
