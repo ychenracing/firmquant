@@ -157,7 +157,8 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             if fact.event_sequence < stored_sequence:
                 raise PersistenceConflict("broker order event sequence regressed")
             if fact.event_sequence == stored_sequence and (
-                fact.status.value != str(existing["status"]) or fact.filled_shares.value != previous_filled
+                fact.status.value != str(existing["status"])
+                or fact.filled_shares.value != previous_filled
             ):
                 raise PersistenceConflict("broker order sequence was reused for different truth")
         self.database.write(
@@ -283,7 +284,6 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
             or fact.symbol != aggregate.intent.symbol
             or fact.side is not aggregate.intent.side
             or fact.requested_shares != aggregate.intent.requested_shares
-            or fact.session_date != aggregate.intent.strategy_session
         ):
             raise PersistenceConflict("queried broker order contradicts execution intent")
         if fact.status is BrokerOrderStatus.FILLED and fact.filled_shares != fact.requested_shares:
@@ -333,7 +333,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
                 "price_type": fact.price_type.value,
                 "requested_shares": fact.requested_shares.value,
                 "limit_price": fact.limit_price.canonical,
-                "strategy_session": fact.session_date.isoformat(),
+                "strategy_session": aggregate.intent.strategy_session.isoformat(),
             }
             if {key: payload.get(key) for key in expected} != expected:
                 raise PersistenceConflict("broker submit result contradicts durable command")
@@ -508,6 +508,7 @@ class MonotonicExecutionLedgerRepository(ExecutionLedgerRepository):
         proven = self._proven_cumulative_shares(aggregate, ordered)
         if proven > fact.filled_shares.value:
             raise PersistenceConflict("broker cumulative fill contradicts confirmed fills")
+        self._record_broker_order(fact, execution_id=aggregate.intent.execution_id)
         self._complete_attempt(attempt, fact, response_kind=response_kind, received_at=received_at)
         current = self._apply_broker_economics(aggregate, fact, ordered, received_at=received_at)
         if proven < fact.filled_shares.value:
