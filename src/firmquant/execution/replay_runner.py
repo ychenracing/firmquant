@@ -7,7 +7,7 @@ import importlib
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
@@ -39,6 +39,7 @@ from firmquant.execution.execution_replay import (
     ReplayAccount,
     ReplayCosts,
     ReplayOrder,
+    ReplaySessionResult,
     ReplaySide,
     execute_session,
 )
@@ -603,7 +604,7 @@ def _tracking(
         if bar is None:
             raise ExecutionReplayError(f"tracking bar is unavailable for {symbol}")
         weight = target_weights.get(symbol, _ZERO)
-        raw_target_shares = int((target_equity * weight / bar.open).to_integral_value(rounding="ROUND_FLOOR"))
+        raw_target_shares = int((target_equity * weight / bar.open).to_integral_value(rounding=ROUND_FLOOR))
         target_shares = raw_target_shares - raw_target_shares % 100
         actual_shares = account.positions.get(symbol, 0)
         actual_notional = Decimal(actual_shares) * bar.open
@@ -621,7 +622,7 @@ def _updated_average_costs(
     before: ReplayAccount,
     after: ReplayAccount,
     prior: dict[str, Decimal],
-    result: object,
+    result: ReplaySessionResult,
 ) -> dict[str, Decimal]:
     observed = dict(prior)
     order_results = getattr(result, "orders", None)
@@ -662,7 +663,7 @@ def _updated_average_costs(
 
 def _broker_execution_facts(
     plan: ExecutionPlan,
-    result: object | None,
+    result: ReplaySessionResult | None,
     *,
     session: date,
 ) -> tuple[tuple[BrokerOrderFact, ...], tuple[BrokerFillFact, ...]]:
@@ -756,42 +757,6 @@ def _broker_execution_facts(
                     raw_payload_sha256=canonical_sha256(fill_payload),
                 )
             )
-    for blocker in plan.blockers:
-        sequence += 1
-        broker_order_id = (
-            "replay-order:"
-            + hashlib.sha256(f"{session.isoformat()} {blocker.uquant_order_id}".encode()).hexdigest()
-        )
-        order_payload = {
-            "schema": "firmquant.execution-replay-order.v1",
-            "broker_order_id": broker_order_id,
-            "client_order_id": blocker.uquant_order_id,
-            "symbol": blocker.symbol.canonical,
-            "side": blocker.side.value,
-            "requested_shares": blocker.requested_shares.value,
-            "filled_shares": 0,
-            "status": BrokerOrderStatus.CANCELLED.value,
-            "session": session.isoformat(),
-            "reason": blocker.reason_code,
-        }
-        orders.append(
-            BrokerOrderFact(
-                broker_order_id=broker_order_id,
-                client_order_id=blocker.uquant_order_id,
-                symbol=blocker.symbol,
-                side=blocker.side,
-                price_type=PriceType.LIMIT,
-                status=BrokerOrderStatus.CANCELLED,
-                requested_shares=blocker.requested_shares,
-                filled_shares=Shares(0),
-                limit_price=blocker.reference_price,
-                session_date=session,
-                event_time=_timestamp(session, time(14, 55)),
-                received_at=_timestamp(session, time(14, 55)),
-                event_sequence=sequence,
-                raw_payload_sha256=canonical_sha256(order_payload),
-            )
-        )
     return tuple(orders), tuple(fills)
 
 
@@ -871,7 +836,7 @@ def run_execution_replay(
             plan = planner.plan(pending, facts)
             target_equity = facts.broker_snapshot.account.total_assets.value
             before_execution = replay_account
-            execution_result: object | None = None
+            execution_result: ReplaySessionResult | None = None
             orders = _replay_orders(
                 plan,
                 replay_account,
