@@ -24,7 +24,9 @@ from .application.operations import (
     create_local_operator_service,
 )
 from .application.runtime_control import RuntimeControlExecutor
+from .broker.gateway import BrokerGateway
 from .config import Mode, Settings, load_settings
+from .persistence.database import Database
 from .persistence.writer_lease import WriterLease, WriterLeaseBusy
 
 _COMMAND_HELP: tuple[tuple[str, str], ...] = (
@@ -57,6 +59,7 @@ _CONTROL_COMMANDS = {
 
 type ServiceFactory = Callable[[Path], OperatorService]
 type ConfirmationReader = Callable[[str], str]
+type ControlBrokerFactory = Callable[[Settings, Database, Callable[[], datetime]], BrokerGateway]
 
 
 def _bounded_integer(*, minimum: int, maximum: int) -> Callable[[str], int]:
@@ -280,6 +283,80 @@ def _control_status(*, config_path: Path, request_id: str) -> OperatorResult:
     return OperatorResult(message=message, payload=payload)
 
 
+def _default_control_broker(
+    settings: Settings,
+    database: Database,
+    clock: Callable[[], datetime],
+) -> BrokerGateway:
+    from .broker.production_factory import build_production_xtquant_gateway
+
+    return build_production_xtquant_gateway(
+        settings=settings,
+        database=database,
+        clock=clock,
+    )
+
+
+def _direct_cancel_or_queue(
+    *,
+    config_path: Path,
+    reason: str | None,
+    broker_factory: ControlBrokerFactory,
+) -> OperatorResult:
+    settings, state = _load_control_settings(config_path)
+    database_path = state / "firmquant.sqlite3"
+    inbox = ControlInbox(state)
+    clock = lambda: datetime.now(UTC)
+    try:
+        with WriterLease.acquire(database_path, owner="operator-cancel-system-orders") as writer:
+            broker: BrokerGateway | None = None
+            connected = False
+            executor = RuntimeControlExecutor(
+                mode=settings.mode,
+                writer=writer,
+                broker=None,
+                clock=clock,
+            )
+            try:
+                if settings.mode in {Mode.CANARY, Mode.LIVE}:
+                    broker = broker_factory(settings, writer.database, clock)
+                    if not isinstance(broker, BrokerGateway):
+                        raise TypeError("control broker factory returned invalid gateway")
+                    broker.connect()
+                    connected = True
+                    executor = RuntimeControlExecutor(
+                        mode=settings.mode,
+                        writer=writer,
+                        broker=broker,
+                        clock=clock,
+                    )
+                request = inbox.enqueue(ControlCommand.CANCEL_SYSTEM_ORDERS, reason=reason)
+                inbox.process_pending(executor.execute)
+                observed = inbox.status(request.request_id)
+            finally:
+                if connected and broker is not None:
+                    broker.disconnect()
+            if executor.stop_pending:
+                executor.finalize_stop()
+    except WriterLeaseBusy:
+        return _queue_control(
+            config_path=config_path,
+            command=ControlCommand.CANCEL_SYSTEM_ORDERS,
+            reason=reason,
+        )
+    payload: dict[str, object] = {
+        "command": ControlCommand.CANCEL_SYSTEM_ORDERS.value,
+        "control_status": observed.status.value,
+        "request_id": observed.request_id,
+    }
+    if observed.outcome is not None:
+        payload["outcome"] = dict(observed.outcome)
+    return OperatorResult(
+        message="本机安全撤单请求已处理; 具体结果以 durable receipt 为准。",
+        payload=payload,
+    )
+
+
 def _direct_stop_or_queue(*, config_path: Path, reason: str | None) -> OperatorResult:
     settings, state = _load_control_settings(config_path)
     inbox = ControlInbox(state)
@@ -317,6 +394,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     service_factory: ServiceFactory = create_local_operator_service,
+    control_broker_factory: ControlBrokerFactory = _default_control_broker,
     interactive_terminal: bool | None = None,
     confirmation_reader: ConfirmationReader | None = None,
     environment: Mapping[str, str] | None = None,
@@ -339,6 +417,14 @@ def main(
             result = _direct_stop_or_queue(
                 config_path=config_path,
                 reason=cast(str | None, getattr(arguments, "reason", None)),
+            )
+            _render(result, output_json=output_json)
+            return result.exit_code
+        if raw_command == "cancel-system-orders":
+            result = _direct_cancel_or_queue(
+                config_path=config_path,
+                reason=cast(str | None, getattr(arguments, "reason", None)),
+                broker_factory=control_broker_factory,
             )
             _render(result, output_json=output_json)
             return result.exit_code
