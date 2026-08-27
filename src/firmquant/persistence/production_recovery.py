@@ -47,7 +47,8 @@ class ProductionRecoveryService(RecoveryService):
             gateway=gateway,
             clock=clock,
         )
-        self._orders = MonotonicExecutionLedgerRepository(database)
+        self._production_orders = MonotonicExecutionLedgerRepository(database)
+        self._orders = self._production_orders
 
     def _durable_submit_command(self, attempt: BrokerAttempt) -> tuple[BrokerOrderCommand, datetime] | None:
         row = self._database.query_one(
@@ -106,7 +107,7 @@ class ProductionRecoveryService(RecoveryService):
         proof = observed
         if proof.command != command or proof.captured_at < started_at or proof.captured_at > now:
             return None
-        aggregate = self._orders.load(attempt.execution_id)
+        aggregate = self._production_orders.load(attempt.execution_id)
         if aggregate is None:
             return OrderRecoveryReceipt(
                 execution_id=attempt.execution_id,
@@ -115,7 +116,7 @@ class ProductionRecoveryService(RecoveryService):
             )
         try:
             with self._database.transaction():
-                self._orders.resolve_submit_not_accepted(
+                self._production_orders.resolve_submit_not_accepted(
                     aggregate,
                     attempt,
                     evidence_sha256=proof.evidence_sha256,
