@@ -34,7 +34,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           version: "0.11.33"
-      - name: Apply root-cause repairs
+      - name: Build clean local repair candidate
         shell: bash
         run: |
           printf '%s\n' '.uquant-source/' >> .git/info/exclude
@@ -51,7 +51,16 @@ jobs:
             tests/integration/test_cli_operations.py \
             tests/unit/execution/test_execution_replay.py
           uv run mypy src scripts
-      - name: Verify failed L4 nodes and price precision
+          rm -f scripts/fix_l4_execution_contracts.py
+          rm -f .github/workflows/fix-l4-execution-contracts.yml
+          rm -f .github/workflows/full-execution-replay.yml
+          git config user.name firmquant-bot
+          git config user.email firmquant-bot@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m "Fix L4 execution evidence contracts"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Verify failed L4 nodes and price precision on clean commit
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
           PYTHONPATH: ${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
@@ -64,15 +73,5 @@ jobs:
             tests/integration/test_execution_replay_restart.py \
             tests/unit/execution/test_execution_replay.py \
             -q
-      - name: Commit verified repair
-        shell: bash
-        run: |
-          rm -f scripts/fix_l4_execution_contracts.py
-          rm -f .github/workflows/fix-l4-execution-contracts.yml
-          rm -f .github/workflows/full-execution-replay.yml
-          git config user.name firmquant-bot
-          git config user.email firmquant-bot@users.noreply.github.com
-          git add -A
-          git diff --cached --check
-          git commit -m "Fix L4 execution evidence contracts"
-          git push origin HEAD:codex/execution-evidence-readiness
+      - name: Push verified repair
+        run: git push origin HEAD:codex/execution-evidence-readiness
