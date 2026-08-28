@@ -1,0 +1,30 @@
+name: Adjusted price-limit contract
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FIRMQ_CI: "1"
+  FIRMQ_MODE: REPLAY
+  FIRMQ_LIVE_TRADING_ENABLED: "false"
+  UV_FROZEN: "1"
+
+jobs:
+  contract:
+    if: github.head_ref == 'codex/execution-evidence-readiness'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: "0.11.33"
+      - name: Run adjusted price-limit contract
+        run: |
+          uv sync --frozen --extra dev
+          uv run pytest tests/unit/execution/test_adjusted_price_limits.py -q
