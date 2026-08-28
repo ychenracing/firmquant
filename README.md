@@ -54,7 +54,7 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 `ProductionEngine.decide()` 生成不可变决策；下一交易日只执行该冻结决策。盘中持续运行仅处理订单生命周期、成交、
 断线、quote freshness、风险阻断和对账，不重新选股或优化组合。
 
-`execution-replay` 使用同一个锁定 `ProductionEngine`、canonical universe、冻结历史数据和同一账户经济状态：收盘产生决策，下一交易日以因果 next-open/OHLCV 模型执行，再把模拟 broker orders/fills/cash/positions 通过现有 uquant account sync 回灌后进入下一次决策。模型覆盖 T+1、100 股交易单位、0.01 tick、涨跌停/停牌、volume participation、sell-before-buy、依赖卖出资金的买入阻断、部分成交、手续费/印花税/过户费、slippage 和 unfilled loss；它是日频执行模型，不是逐 tick 撮合器。
+`execution-replay` 使用同一个锁定 `ProductionEngine`、canonical universe、冻结历史数据和同一账户经济状态：收盘产生决策，下一交易日以因果 next-open/OHLCV 模型执行，再把模拟 broker orders/fills/cash/positions 通过现有 uquant account sync 回灌后进入下一次决策。模型覆盖 T+1、100 股交易单位、0.01 tick、涨跌停/停牌、volume participation、sell-before-buy、依赖卖出资金的买入阻断、部分成交、手续费/印花税/过户费、slippage 和 unfilled loss；它是日频执行模型，不是逐 tick 撮合器。生产验收使用锁定 uquant 的 `continuous_ai_era` 区间（2023-01-03 至 2026-08-05）做完整对照，不通过调参修饰执行差异。
 
 运行状态不是布尔值，而是：`DISARMED`、`STARTING`、`RECONCILING`、`READY`、`EXECUTING`、`DEGRADED`、
 `HALTED`、`STOPPING`。订单状态持久化为：`PLANNED`、`VALIDATED`、`ARMED`、`SUBMITTING`、
