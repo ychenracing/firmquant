@@ -44,8 +44,7 @@ jobs:
             src/firmquant/execution/execution_replay.py \
             src/firmquant/execution/replay_runner.py \
             tests/integration/test_cli_operations.py \
-            tests/unit/execution/test_execution_replay.py \
-            .github/workflows/ci.yml
+            tests/unit/execution/test_execution_replay.py
           uv run ruff check \
             src/firmquant/execution/execution_replay.py \
             src/firmquant/execution/replay_runner.py \
