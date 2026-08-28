@@ -1,0 +1,59 @@
+name: Fix execution evidence mypy
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+env:
+  FIRMQ_CI: "1"
+  FIRMQ_MODE: PAPER
+  FIRMQ_LIVE_TRADING_ENABLED: "false"
+  UV_FROZEN: "1"
+
+jobs:
+  repair:
+    if: github.head_ref == 'codex/execution-evidence-readiness'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.head_ref }}
+          clean: false
+          fetch-depth: 1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: "0.11.33"
+      - name: Apply root-cause fixes
+        shell: bash
+        run: |
+          uv sync --frozen --extra dev
+          uv run python scripts/fix_execution_evidence_mypy.py
+          uv run ruff format \
+            src/firmquant/application/execution_evidence_runtime.py \
+            src/firmquant/application/live_readiness_runtime.py \
+            src/firmquant/application/operations.py \
+            src/firmquant/execution/replay_runner.py
+          uv run ruff check \
+            src/firmquant/application/execution_evidence_runtime.py \
+            src/firmquant/application/live_readiness_runtime.py \
+            src/firmquant/application/operations.py \
+            src/firmquant/execution/replay_runner.py
+          uv run mypy src scripts
+      - name: Commit verified type repair
+        shell: bash
+        run: |
+          rm -f scripts/fix_execution_evidence_mypy.py
+          rm -f .github/workflows/mypy-diagnostic.yml
+          rm -f .github/workflows/mypy-commit-diagnostic.yml
+          rm -f .github/workflows/fix-execution-evidence-mypy.yml
+          git config user.name firmquant-bot
+          git config user.email firmquant-bot@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m "Fix execution evidence type contracts"
+          git push origin HEAD:codex/execution-evidence-readiness
