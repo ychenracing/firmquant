@@ -271,7 +271,7 @@ def collect_live_readiness(
     try:
         calendar = load_trading_calendar_manifest(calendar_path)
         session = now.astimezone(_SHANGHAI).date()
-        calendar_coverage = calendar.coverage_start <= session <= calendar.coverage_end
+        calendar_coverage = calendar.covered_from <= session <= calendar.covered_through
     except Exception:
         pass
 

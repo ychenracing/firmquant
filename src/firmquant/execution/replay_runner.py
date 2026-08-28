@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]  # uquant owns the runtime pandas dependency
 
 from firmquant.application.production_identity import current_clean_firmquant_commit
 from firmquant.build_identity import load_locked_source_identity, verify_uquant_source_checkout
@@ -45,7 +45,7 @@ from firmquant.execution.execution_replay import (
 )
 from firmquant.execution.planner import ExecutionBrokerSnapshot, ExecutionPlan, ExecutionPlanner
 from firmquant.persistence.repositories import canonical_sha256
-from firmquant.strategy.account_sync import sync_account
+from firmquant.strategy.account_sync import AccountStateContract, sync_account
 from firmquant.strategy.identity import StrategyIdentity
 from firmquant.strategy.snapshots import DecisionSnapshot
 from firmquant.strategy.universe import UniversePolicy
@@ -181,7 +181,7 @@ def _engine(source_checkout: Path, data_root: Path) -> _ProductionEngine:
     return cast(_ProductionEngine, engine_type(data_root))
 
 
-def _account_state(initial_cash: float) -> object:
+def _account_state(initial_cash: float) -> AccountStateContract:
     module = importlib.import_module("uquant.types")
     account_type = getattr(module, "AccountState", None)
     if not isinstance(account_type, type):
@@ -189,7 +189,7 @@ def _account_state(initial_cash: float) -> object:
     empty = getattr(account_type, "empty", None)
     if not callable(empty):
         raise ExecutionReplayError("locked uquant AccountState.empty is unavailable")
-    return empty(initial_cash)
+    return cast(AccountStateContract, empty(initial_cash))
 
 
 def _account_sha256(account: object) -> str:
@@ -286,7 +286,7 @@ def _daily_bar(symbol: str, panel: pd.DataFrame, session: date) -> DailyBar:
         raise ExecutionReplayError(f"previous close is missing for {symbol} on {session}")
     if row is None:
         # Missing row on an authoritative index trading session is a suspension, not a fabricated K-line.
-        fraction = _limit_fraction(parsed, panel, session) or _ONE
+        suspension_fraction = _limit_fraction(parsed, panel, session) or _ONE
         return DailyBar(
             session=session,
             symbol=symbol,
@@ -297,16 +297,16 @@ def _daily_bar(symbol: str, panel: pd.DataFrame, session: date) -> DailyBar:
             previous_close=previous,
             volume=0,
             suspended=True,
-            limit_up=_tick_price(previous * (_ONE + fraction)),
-            limit_down=_tick_price(previous * max(_ONE - fraction, Decimal("0.01"))),
+            limit_up=_tick_price(previous * (_ONE + suspension_fraction)),
+            limit_down=_tick_price(previous * max(_ONE - suspension_fraction, Decimal("0.01"))),
         )
-    fraction = _limit_fraction(parsed, panel, session)
-    if fraction is None:
+    limit_fraction = _limit_fraction(parsed, panel, session)
+    if limit_fraction is None:
         upper = _tick_price(previous * Decimal("10"))
         lower = _tick_price(previous * Decimal("0.10"))
     else:
-        upper = _tick_price(previous * (_ONE + fraction))
-        lower = _tick_price(previous * (_ONE - fraction))
+        upper = _tick_price(previous * (_ONE + limit_fraction))
+        lower = _tick_price(previous * (_ONE - limit_fraction))
     return DailyBar(
         session=session,
         symbol=symbol,
@@ -410,11 +410,11 @@ def _execution_facts(
 ) -> tuple[ExecutionBrokerSnapshot, dict[str, DailyBar]]:
     bars: dict[str, DailyBar] = {}
     symbols = tuple(sorted(set(plan_symbols) | set(account.positions)))
-    for symbol in symbols:
-        panel = panels.get(symbol)
+    for symbol_text in symbols:
+        panel = panels.get(symbol_text)
         if panel is None:
-            raise ExecutionReplayError(f"frozen panel is unavailable for {symbol}")
-        bars[symbol] = _daily_bar(symbol, panel, session)
+            raise ExecutionReplayError(f"frozen panel is unavailable for {symbol_text}")
+        bars[symbol_text] = _daily_bar(symbol_text, panel, session)
     snapshot = _snapshot(
         account,
         bars,
@@ -427,10 +427,10 @@ def _execution_facts(
     quotes: list[QuoteFact] = []
     for symbol_text in symbols:
         bar = bars[symbol_text]
-        symbol = Symbol.parse(symbol_text)
+        parsed_symbol = Symbol.parse(symbol_text)
         status = SecurityStatus.SUSPENDED if bar.suspended else SecurityStatus.TRADING
         instrument = InstrumentFact(
-            symbol=symbol,
+            symbol=parsed_symbol,
             security_type=SecurityType.EQUITY,
             status=status,
             trading_unit=Shares(100),
@@ -443,7 +443,7 @@ def _execution_facts(
         )
         quote_price = Price(bar.open)
         quote = QuoteFact(
-            symbol=symbol,
+            symbol=parsed_symbol,
             last_price=quote_price,
             previous_close=Price(bar.previous_close),
             bid_price=None if bar.suspended else quote_price,
@@ -551,7 +551,7 @@ def _replay_orders(
 ) -> tuple[ReplayOrder, ...]:
     total_buy_cash = sum(
         (
-            item.limit_price.value * Decimal(item.authorized_shares.value)
+            item.limit_price.value * Decimal(item.uquant_authorized_shares.value)
             for item in plan.orders
             if item.side is Side.BUY
         ),
@@ -562,7 +562,7 @@ def _replay_orders(
         ReplayOrder(
             symbol=item.symbol.canonical,
             side=ReplaySide(item.side.value),
-            shares=item.authorized_shares.value,
+            shares=item.uquant_authorized_shares.value,
             limit_price=item.limit_price.value,
             max_volume_participation=max_volume_participation,
             depends_on_sell_proceeds=item.side is Side.BUY and cash_dependency,
@@ -681,7 +681,7 @@ def _broker_execution_facts(
         if observed is None:
             raise ExecutionReplayError("planned execution result is missing")
         filled = int(observed.filled_shares)
-        requested = planned.authorized_shares.value
+        requested = planned.uquant_authorized_shares.value
         broker_order_id = (
             "replay-order:"
             + hashlib.sha256(f"{session.isoformat()}\0{planned.uquant_order_id}".encode()).hexdigest()

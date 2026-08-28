@@ -192,16 +192,16 @@ class OperatorRequest:
             raise TypeError("operator run mode must be typed")
         if self.session is not None and type(self.session) is not date:
             raise TypeError("operator session must be a date")
-        for value in (self.start_session, self.end_session):
-            if value is not None and type(value) is not date:
+        for session_value in (self.start_session, self.end_session):
+            if session_value is not None and type(session_value) is not date:
                 raise TypeError("operator replay range must contain dates")
         if self.command is OperatorCommand.EXECUTION_REPLAY:
             if self.start_session is None or self.end_session is None:
                 raise ValueError("execution replay requires start and end sessions")
             if self.start_session >= self.end_session:
                 raise ValueError("execution replay start must precede end")
-        for value in (self.events_path, self.bundle_path, self.account_state_path):
-            if value is not None and not isinstance(value, Path):
+        for path_value in (self.events_path, self.bundle_path, self.account_state_path):
+            if path_value is not None and not isinstance(path_value, Path):
                 raise TypeError("operator path values must be pathlib.Path")
         if (
             isinstance(self.ttl_seconds, bool)

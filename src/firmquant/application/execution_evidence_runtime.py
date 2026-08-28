@@ -93,7 +93,7 @@ def _idempotency_key(plan_id: str, order: PlannedOrder) -> str:
         "uquant_order_id": order.uquant_order_id,
         "symbol": order.symbol.canonical,
         "side": order.side.value,
-        "shares": order.authorized_shares.value,
+        "shares": order.uquant_authorized_shares.value,
         "limit_price": order.limit_price.canonical,
         "strategy_session": order.strategy_session.isoformat(),
         "execution_session": order.execution_session.isoformat(),
@@ -250,7 +250,10 @@ def _market_facts(
     instruments = {item.symbol: item for item in facts.instruments}
     quotes = {item.symbol: item for item in facts.quotes}
     symbols = {item.symbol for item in facts.broker_snapshot.positions}
-    for raw in decision.uquant_payload.get("targets", []):
+    raw_targets = decision.uquant_payload.get("targets", [])
+    if not isinstance(raw_targets, list):
+        raise RuntimeEvidenceError("decision target evidence is malformed")
+    for raw in raw_targets:
         if isinstance(raw, dict) and isinstance(raw.get("symbol"), str):
             symbols.add(Symbol.parse(str(raw["symbol"])))
     for symbol in sorted(symbols, key=lambda value: value.canonical):
@@ -341,7 +344,7 @@ def build_shadow_observation(
                         uquant_order_id=planned.uquant_order_id,
                         symbol=planned.symbol.canonical,
                         side=planned.side.value,
-                        planned_shares=planned.authorized_shares.value,
+                        planned_shares=planned.uquant_authorized_shares.value,
                         filled_shares=0,
                         reference_price=planned.limit_price.value,
                         blocker=BlockerCode.INCOMPLETE_SELL,
@@ -356,7 +359,7 @@ def build_shadow_observation(
                 symbol=planned.symbol,
                 side=planned.side,
                 price_type=PriceType.LIMIT,
-                requested_shares=planned.authorized_shares,
+                requested_shares=planned.uquant_authorized_shares,
                 limit_price=planned.limit_price,
                 strategy_session=planned.execution_session,
             )
@@ -365,7 +368,7 @@ def build_shadow_observation(
             reason = paper.reason_for(result.broker_order_id)
             blocker = _blocker_from_reason(
                 reason,
-                partial=0 < filled < planned.authorized_shares.value,
+                partial=0 < filled < planned.uquant_authorized_shares.value,
             )
             order_observations.append(
                 OrderObservation(
@@ -373,7 +376,7 @@ def build_shadow_observation(
                     uquant_order_id=planned.uquant_order_id,
                     symbol=planned.symbol.canonical,
                     side=planned.side.value,
-                    planned_shares=planned.authorized_shares.value,
+                    planned_shares=planned.uquant_authorized_shares.value,
                     filled_shares=filled,
                     reference_price=planned.limit_price.value,
                     blocker=blocker,
@@ -478,7 +481,7 @@ def _plan_payload(
                 "uquant_order_id": item.uquant_order_id,
                 "symbol": item.symbol.canonical,
                 "side": item.side.value,
-                "planned_shares": item.authorized_shares.value,
+                "planned_shares": item.uquant_authorized_shares.value,
                 "reference_price": item.limit_price.canonical,
             }
             for item in plan.orders
@@ -640,7 +643,10 @@ def finalize_canary_observation(
             rejection_count += 1
         if state in {"UNKNOWN", "SUBMITTING", "CANCEL_REQUESTED"}:
             unknown_count += 1
-        planned_shares = int(planned["planned_shares"])
+        raw_planned_shares = planned.get("planned_shares")
+        if isinstance(raw_planned_shares, bool) or not isinstance(raw_planned_shares, int):
+            raise RuntimeEvidenceError("CANARY planned shares are malformed")
+        planned_shares = raw_planned_shares
         blocker = None
         if state == "UNKNOWN":
             blocker = BlockerCode.UNKNOWN
