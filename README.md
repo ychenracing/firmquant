@@ -10,8 +10,10 @@ firmquant 负责券商事实接入、订单执行、前置安全门、对账、�
 
 - 默认 PAPER，实盘功能默认关闭，默认配置固定为 `live_trading_enabled = false`。
 - REPLAY、PAPER、SHADOW 不具有真实券商写权限；CI 和示例配置也不具有实盘写权限。
-- CANARY/LIVE 需要明确配置、短时 arm lease、部署身份绑定、券商 API 权限和程序化交易合规确认、启动对账、最新
-  券商/行情事实、完整逐单风控及无 UNKNOWN 状态；任一条件缺失即失败关闭。
+- SHADOW 每个交易 session 只写一条 identity-bound、不可变 execution observation；相同 identity 重跑幂等，内容冲突失败关闭。其成交由与生产一致的执行政策在隔离 `PaperBroker` 中模拟，不假定全部成交，也不触达真实券商写接口。
+- CANARY 证据独立于 SHADOW：真实 submit/cancel、真实 broker fills、EOD broker positions、拒单、UNKNOWN、外部活动和目标跟踪误差都从实际持久事实形成不可变 observation。SHADOW READY 审计不能代替 CANARY。
+- LIVE 软件准入同时要求合格 SHADOW、合格 CANARY、无 UNKNOWN/重复经济订单/重复 fill/外部活动、匹配的 production read-only smoke、验证通过且 identity 一致的完整 backup，以及账户/代码/配置/数据/日历/时钟/对账/控制/heartbeat 等机器门槛全部通过。
+- CANARY/LIVE 仍需要明确配置、短时 arm lease、券商 API 权限和程序化交易合规确认；`live-readiness` 只读汇总机器门槛，不创建 arm、不发送订单，也不自动批准人工条件。
 - uquant Risk Sentinel 仍为 `FREEZE_ONLY`：只能冻结新增风险，不直接卖出、不改 gross cap，也不创建第二风险账户。
 - firmquant 的安全层只能阻止、缩小、延迟或取消订单以及进入 HALT，绝不扩大 uquant 的目标或订单意图。
 - 紧急状态默认阻止新订单、取消系统拥有的未成交订单并 HALT，不自动清仓，更不会在状态不确定时发无保护市价单。
@@ -52,6 +54,10 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 `ProductionEngine.decide()` 生成不可变决策；下一交易日只执行该冻结决策。盘中持续运行仅处理订单生命周期、成交、
 断线、quote freshness、风险阻断和对账，不重新选股或优化组合。
 
+`execution-replay` 使用同一个锁定 `ProductionEngine`、canonical universe、冻结历史数据和同一账户经济状态：收盘产生决策，下一交易日以因果 next-open/OHLCV 模型执行，再把模拟 broker orders/fills/cash/positions 通过现有 uquant account sync 回灌后进入下一次决策。模型覆盖 T+1、100 股交易单位、0.01 tick、涨跌停/停牌、volume participation、sell-before-buy、依赖卖出资金的买入阻断、部分成交、手续费/印花税/过户费、slippage 和 unfilled loss；它是日频执行模型，不是逐 tick 撮合器。生产验收使用锁定 uquant 的 `continuous_ai_era` 区间（2023-01-03 至 2026-08-05）做完整对照，不通过调参修饰执行差异。
+
+冻结数据使用前复权价格坐标，但不保存交易所未复权参考价或复权因子；因此 Replay 先按板块规则和前收盘计算名义涨跌停。若权威 frozen OHLC 因复权/分位精度落在该名义带外，只把 synthetic limit **向外**取整到最小 0.01 元边界以包住已经发生的 OHLC，不向内收紧、不改变 0.01 tick，也不把该重建边界当成策略信号或 uquant 输入。
+
 运行状态不是布尔值，而是：`DISARMED`、`STARTING`、`RECONCILING`、`READY`、`EXECUTING`、`DEGRADED`、
 `HALTED`、`STOPPING`。订单状态持久化为：`PLANNED`、`VALIDATED`、`ARMED`、`SUBMITTING`、
 `ACKNOWLEDGED`、`PARTIALLY_FILLED`、`FILLED`、`CANCEL_REQUESTED`、`CANCELLED`、`REJECTED`、`EXPIRED`、
@@ -69,7 +75,8 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 | `firmquant smoke-readonly` | 在真实部署机读取完整生产 authority surface 并持久化零写调用 receipt |
 | `firmquant run` | 运行与配置一致的 session；模式不一致即拒绝 |
 | `firmquant status` | 输出模式、运行状态、arm、身份、券商、对账、订单、现金、敞口与阻断原因 |
-| `firmquant arm-live` | 交互式创建短时、认证且绑定部署身份的 lease |
+| `firmquant live-readiness` | 只读汇总全部机器可验证生产门槛；完整返回 blockers；不 arm、不下单 |
+| `firmquant arm-live` | 交互式创建短时、认证且绑定部署身份的 lease；LIVE 还要求 `live-readiness` 全部通过 |
 | `firmquant disarm` | 撤销活动 lease |
 | `firmquant halt` | 触发 kill switch 并阻止新增订单 |
 | `firmquant resume` | 经显式复核后请求恢复，不清除未解决差异 |
@@ -80,6 +87,7 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 | `firmquant fills` | 查询已规范化成交与费用事实 |
 | `firmquant report` | 生成/读取 session 的 Markdown 与 JSON 报告 |
 | `firmquant replay` | 确定性重放冻结的券商事件 |
+| `firmquant execution-replay` | 通过 `--start YYYY-MM-DD --end YYYY-MM-DD` 使用锁定 uquant source 与 frozen data 运行跨日 execution-aware Replay，并输出稳定 JSON 摘要 |
 | `firmquant backup` | 创建原子、一致性状态备份 |
 | `firmquant verify-backup` | 在隔离目录验证可恢复性、schema 与审计链 |
 | `firmquant cancel-system-orders` | 请求取消 firmquant 拥有的未完成订单；仍需完整写门禁 |

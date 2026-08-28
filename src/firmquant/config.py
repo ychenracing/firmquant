@@ -197,8 +197,16 @@ class PromotionSettings(SafeConfigModel):
     min_shadow_sessions: PositiveInteger = 20
     min_shadow_orders: PositiveInteger = 50
     max_target_tracking_error: SafeFraction = Decimal("0.05")
+    min_canary_sessions: PositiveInteger = 3
+    min_canary_orders: PositiveInteger = 3
+    min_canary_fills: PositiveInteger = 1
+    max_canary_target_tracking_error: SafeFraction = Decimal("0.05")
 
-    @field_validator("max_target_tracking_error", mode="before")
+    @field_validator(
+        "max_target_tracking_error",
+        "max_canary_target_tracking_error",
+        mode="before",
+    )
     @classmethod
     def reject_binary_float(cls, value: object) -> object:
         if isinstance(value, float):

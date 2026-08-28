@@ -60,10 +60,15 @@ jobs:
           ref: 105695aacd3d1c7e62705f64188da88d202db4cd
           path: .uquant-source
           persist-credentials: false
+      - name: Exclude locked uquant checkout from firmquant Git identity
+        if: runner.os == 'Linux'
+        shell: bash
+        run: printf '%s\n' '.uquant-source/' >> .git/info/exclude
       - name: Full tests with branch coverage
         if: runner.os == 'Linux'
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
+          PYTHONPATH: ${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
         run: uv run pytest --cov=firmquant --cov-branch --cov-fail-under=85
       - name: Windows unit tests
         if: runner.os == 'Windows'

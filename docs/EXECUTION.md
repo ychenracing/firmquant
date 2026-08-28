@@ -48,6 +48,26 @@ confirmed fill 以 `broker_fill_id`、`broker_order_id`、session、execution se
 
 callback 丢失、队列溢出或 writer 失败都会保留失败 envelope、触发 HALT 并要求查询券商恢复。恢复依赖 authoritative order/fill query，而不是 callback 完整性假设；迟到成交与重复启动使用同一幂等合同。
 
+## 每 session 执行证据
+
+SHADOW 与 CANARY 都以“一交易日一条不可变 execution observation”为事实来源，不保存可继续自增的累计计数。稳定 identity 绑定 stage、execution session、firmquant commit、uquant commit、promotion config hash 和 account hash；data/calendar identity 属于不可变内容。同一 identity 与完全相同内容重跑幂等，同一 identity 出现任何不同内容时失败关闭。
+
+observation 记录 decision id、plan id、计划订单、planning blockers、目标股数/目标权重、成交股数/价格、未成交股数、费用、slippage、实际/假设期末持仓以及 UNKNOWN、外部活动和重复经济事实。聚合器只从这些明细计算 observed sessions、orders、fills、unresolved、external、duplicates、tracking error 和未成交 notional，不把上一条累计值“再加一”。
+
+逐 symbol tracking error 定义为 `abs(target_weight - ending_market_value / portfolio_equity)`；ending market value 使用该 observation 的 reference price 和执行后股数。SHADOW 使用同一 execution policy 的假设期末持仓，CANARY 使用 EOD broker positions。组合报告同时给出 symbol error 的 max、算术 mean 和以 `max(target_notional, actual_notional)` 为权重的 notional-weighted mean。blocker 仅说明执行原因，不能把 tracking error 固定成 1；已满足目标、不可交易、价格限制、volume 限制、quote stale、现金不足、sell 未完成、UNKNOWN 与外部活动分别记录。
+
+SHADOW 的零写模拟器使用实际 broker snapshot/instrument/quote 作为当日执行前事实，在隔离 PaperBroker 中复用生产手续费合同、锁定 uquant volume participation 与 slippage 假设；因此可出现部分成交和未成交。CANARY 则只使用真实持久 submit/cancel、broker order/fill 和 EOD broker positions，SHADOW observation 或 SHADOW READY audit 均不能替代 CANARY evidence。
+
+## Execution-aware Replay
+
+`execution-replay` 是确定性的日频执行模型，不是逐 tick 撮合器。经济决策唯一来自锁定 uquant `ProductionEngine`：交易日 N 收盘生成决策，最早在下一权威交易日 N+1 执行；执行后的现金、持仓、订单和成交以 synthetic broker facts 通过现有 uquant account-sync 公共合同回灌同一个 AccountState，下一次决策因此真实承受执行摩擦。Replay 不实现第二套策略、第二套持仓状态机，也不修改 uquant 参数。
+
+订单 authorization 时只允许看到执行 session 的账户/T+1 可卖状态、instrument 合同和开盘价等当时已知事实，绝不读取当日未来 high/low。授权完成后，已结束交易日的 high/low 只用于事后判断该保护限价是否曾具备成交条件；成交价从 open、保护限价与固定 slippage 规则确定，不能使用未来极值择优成交。volume cap 使用锁定 uquant `max_volume_participation`，BUY 按 100 股交易单位，价格按 0.01 tick；A 股现金多头、禁止杠杆和做空，sell-before-buy，未完成 sell 会阻断依赖卖出资金的 BUY。
+
+普通主板按 10%、创业板/科创板按 20%、北交所按 30% 日涨跌幅边界建模，上市最初五个交易 session 不套用普通日限幅。权威指数开市但单股没有该 session K 线时视为停牌/不可交易，不伪造可成交 K 线；前收只用于估值和边界参考。模型计入佣金、最低佣金、卖出印花税、过户费、slippage、部分成交与未成交，并输出 price-limit/suspension/incomplete-sell blockers。
+
+`unfilled_notional` 定义为未成交股数乘 execution-session open；`unfilled_loss` 是执行事后机会损失：未成交 BUY 取 `max(close-open, 0) × unfilled_shares`，未成交 SELL 取 `max(open-close, 0) × unfilled_shares`。该指标只用于评估执行拖累，不参与 authorization、成交判断或策略决策，因此不会把未来数据反馈进交易路径。
+
 ## 撤单与紧急行为
 
 撤单也是可能产生 UNKNOWN 的真实写操作，必须经过相同 capability、arm、身份、健康、频率和风险门禁。cancel 返回活动态或返回信息不足时，不能推断撤单成功；系统保持 UNKNOWN，查询 broker 后再恢复。
