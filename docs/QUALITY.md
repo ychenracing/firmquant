@@ -23,6 +23,8 @@ L4。失败先定位并运行失败节点与直接相邻检查。
 - fault：callback、submit/cancel 不确定性、断线、stale quote、交易状态、人工活动、身份漂移、锁/损坏和关键崩溃点。
 - e2e：盘后决策、次日执行、SELL 后 BUY、部分成交、迟到成交、EOD、日报、restart/replay 等价。
 - parity：StrategyAdapter 与直接 uquant 决策完整严格相等。
+- execution evidence：SHADOW/CANARY observation 必须按 session 不可变、identity-bound，聚合只能从 observation 派生；LIVE 不能把旧 READY audit 当成替代证据。
+- execution-aware replay：理论端和执行端必须使用同一锁定 uquant、canonical universe 和 frozen data；完整验收区间固定采用 uquant `continuous_ai_era`（2023-01-03 至 2026-08-05），输出累计收益、回撤、换手、费用、slippage、未成交损失和目标跟踪误差，不通过调参修饰差异。
 
 ## 最终工程门
 
