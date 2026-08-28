@@ -21,6 +21,7 @@ def _locked_source_checkout() -> Path:
 
 
 def test_execution_replay_restart_each_session_matches_continuous_summary() -> None:
+    # The public uquant persistence roundtrip must preserve the canonical replay result.
     source_checkout = _locked_source_checkout()
     data_root = source_checkout / "data" / "frozen"
     kwargs = {
