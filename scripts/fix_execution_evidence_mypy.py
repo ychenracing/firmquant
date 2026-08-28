@@ -19,8 +19,8 @@ def replace_once(path: Path, old: str, new: str, *, label: str) -> None:
 
 runtime = RUNTIME.read_text(encoding="utf-8")
 authorized_count = runtime.count(".authorized_shares")
-if authorized_count != 7:
-    raise RuntimeError(f"runtime authorized shares: expected 7 matches, found {authorized_count}")
+if authorized_count != 6:
+    raise RuntimeError(f"runtime authorized shares: expected 6 matches, found {authorized_count}")
 RUNTIME.write_text(runtime.replace(".authorized_shares", ".uquant_authorized_shares"), encoding="utf-8")
 
 replace_once(
