@@ -7,7 +7,7 @@ import importlib
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol, cast
@@ -309,13 +309,30 @@ def _daily_bar(symbol: str, panel: pd.DataFrame, session: date) -> DailyBar:
     else:
         upper = _tick_price(previous * (_ONE + limit_fraction))
         lower = _tick_price(previous * (_ONE - limit_fraction))
+
+    # The locked frozen series is forward-adjusted and does not retain the raw
+    # exchange reference price or adjustment factor needed to reproduce an
+    # official cent-denominated price limit exactly in adjusted coordinates.
+    # Keep the nominal rule whenever it is consistent with observed trading;
+    # otherwise expand outward only to the smallest cent-denominated band that
+    # can contain the authoritative OHLC. This preserves the real A-share
+    # two-decimal instrument precision, never narrows a legal band, and changes
+    # neither uquant decisions nor the strategy's economic behavior.
+    observed_open = Decimal(str(row["open"]))
+    observed_high = Decimal(str(row["high"]))
+    observed_low = Decimal(str(row["low"]))
+    observed_close = Decimal(str(row["close"]))
+    observed_upper = observed_high.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    observed_lower = observed_low.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    upper = max(upper, observed_upper)
+    lower = min(lower, observed_lower)
     return DailyBar(
         session=session,
         symbol=symbol,
-        open=Decimal(str(row["open"])),
-        high=Decimal(str(row["high"])),
-        low=Decimal(str(row["low"])),
-        close=Decimal(str(row["close"])),
+        open=observed_open,
+        high=observed_high,
+        low=observed_low,
+        close=observed_close,
         previous_close=previous,
         volume=max(0, int(Decimal(str(row["volume"])))),
         suspended=False,
