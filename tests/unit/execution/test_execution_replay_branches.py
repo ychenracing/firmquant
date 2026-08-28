@@ -365,7 +365,7 @@ def test_cash_volume_and_sellable_edges_preserve_explicit_blockers() -> None:
                 Decimal("1"),
             ),
         ),
-        {"600000.SH": _bar(close="9")},
+        {"600000.SH": _bar(low="9", close="9")},
         _costs(),
     )
     assert full_sell.ending_account.positions == {}
@@ -373,7 +373,7 @@ def test_cash_volume_and_sellable_edges_preserve_explicit_blockers() -> None:
 
 
 def test_private_execution_math_edges_are_deterministic() -> None:
-    bar = _bar(volume=105, close="11")
+    bar = _bar(volume=105, high="11", close="11")
     assert replay._volume_cap(bar, Decimal("1"), side=replay.ReplaySide.SELL) == 105
     assert replay._fees(Decimal("0"), replay.ReplaySide.BUY, _costs()) == (
         Decimal("0"),
@@ -391,28 +391,34 @@ def test_private_execution_math_edges_are_deterministic() -> None:
         bar,
         0,
     ) == Decimal("0")
-    assert replay._unfilled_loss(
-        replay.ReplayOrder(
-            "600000.SH",
-            replay.ReplaySide.BUY,
+    assert (
+        replay._unfilled_loss(
+            replay.ReplayOrder(
+                "600000.SH",
+                replay.ReplaySide.BUY,
+                100,
+                Decimal("10"),
+                Decimal("1"),
+            ),
+            bar,
             100,
-            Decimal("10"),
-            Decimal("1"),
-        ),
-        bar,
-        100,
-    ) > 0
-    assert replay._unfilled_loss(
-        replay.ReplayOrder(
-            "600000.SH",
-            replay.ReplaySide.SELL,
+        )
+        > 0
+    )
+    assert (
+        replay._unfilled_loss(
+            replay.ReplayOrder(
+                "600000.SH",
+                replay.ReplaySide.SELL,
+                100,
+                Decimal("10"),
+                Decimal("1"),
+            ),
+            _bar(low="9", close="9"),
             100,
-            Decimal("10"),
-            Decimal("1"),
-        ),
-        _bar(close="9"),
-        100,
-    ) > 0
+        )
+        > 0
+    )
 
     blocked = replay._blocked_result(
         replay.ReplayOrder(

@@ -115,8 +115,8 @@ def test_limit_fraction_and_daily_bar_model_listing_and_suspension() -> None:
 
     normal = runner._daily_bar("600000.SH", panel, SESSION)
     assert normal.suspended is False
-    assert normal.limit_up == Decimal("11.66")
-    assert normal.limit_down == Decimal("9.54")
+    assert normal.limit_up == Decimal("11.55")
+    assert normal.limit_down == Decimal("9.45")
 
     suspended = runner._daily_bar("600000.SH", panel, date(2026, 8, 8))
     assert suspended.suspended is True
@@ -173,7 +173,7 @@ def test_market_value_snapshot_and_execution_facts_preserve_account_truth() -> N
         session=SESSION,
     )
     assert bars["600000.SH"].suspended is False
-    assert facts.instruments[0].symbol.canonical == "600000.SH"
+    assert facts.instruments[0].symbol.canonical == "sh600000"
     assert facts.quotes[0].bid_price is not None
 
     suspended_facts, suspended_bars = runner._execution_facts(
@@ -205,7 +205,7 @@ def test_decision_plan_and_cost_helpers_reject_malformed_evidence() -> None:
             }
         )
     )
-    assert runner._plan_symbols(valid) == ("300001.SZ", "600000.SH")  # type: ignore[arg-type]
+    assert runner._plan_symbols(valid) == ("sh600000", "sz300001")  # type: ignore[arg-type]
 
     config = SimpleNamespace(
         slippage=0.0005,
