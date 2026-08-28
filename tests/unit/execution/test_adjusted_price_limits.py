@@ -32,7 +32,7 @@ def _panel(
     ).astype({column: float for column in ("open", "high", "low", "close")})
 
 
-def test_forward_adjusted_upper_limit_expands_only_to_observed_traded_envelope() -> None:
+def test_forward_adjusted_upper_limit_expands_outward_to_valid_cent_precision() -> None:
     panel = _panel(
         current_open="24.108",
         current_high="24.108",
@@ -43,9 +43,9 @@ def test_forward_adjusted_upper_limit_expands_only_to_observed_traded_envelope()
     bar = runner._daily_bar("601869.SH", panel, SESSION)
 
     assert bar.previous_close == Decimal("21.848")
-    assert bar.limit_up == Decimal("24.108")
+    assert bar.limit_up == Decimal("24.11")
     assert bar.limit_down == Decimal("19.66")
-    assert bar.open == bar.limit_up
+    assert bar.open <= bar.limit_up
 
     facts, bars = runner._execution_facts(
         ReplayAccount(cash=Decimal("100000"), positions={}, sellable={}),
@@ -54,13 +54,14 @@ def test_forward_adjusted_upper_limit_expands_only_to_observed_traded_envelope()
         {"601869.SH": panel},
         session=SESSION,
     )
-    assert bars["601869.SH"].limit_up == Decimal("24.108")
-    assert facts.quotes[0].upper_limit.value == Decimal("24.108")
+    assert bars["601869.SH"].limit_up == Decimal("24.11")
+    assert facts.instruments[0].price_precision == 2
+    assert facts.quotes[0].upper_limit.value == Decimal("24.11")
     assert facts.quotes[0].ask_price is not None
     assert facts.quotes[0].ask_price.value == Decimal("24.108")
 
 
-def test_forward_adjusted_low_or_high_only_expands_outward_and_normal_band_is_unchanged() -> None:
+def test_forward_adjusted_band_only_expands_outward_and_normal_band_is_unchanged() -> None:
     high_only = runner._daily_bar(
         "601869.SH",
         _panel(
@@ -79,13 +80,14 @@ def test_forward_adjusted_low_or_high_only_expands_outward_and_normal_band_is_un
         _panel(
             current_open="21.0",
             current_high="22.5",
-            current_low="19.60",
+            current_low="19.604",
             current_close="20.0",
         ),
         SESSION,
     )
     assert low_only.limit_up == Decimal("24.03")
     assert low_only.limit_down == Decimal("19.60")
+    assert low_only.low >= low_only.limit_down
 
     normal = runner._daily_bar(
         "601869.SH",
