@@ -34,11 +34,33 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          path = Path("tests/unit/execution/test_replay_runner_branches.py")
-          text = path.read_text(encoding="utf-8")
-          text = text.replace('assert normal.limit_up == Decimal("11.66")', 'assert normal.limit_up == Decimal("11.55")')
-          text = text.replace('assert normal.limit_down == Decimal("9.54")', 'assert normal.limit_down == Decimal("9.45")')
-          path.write_text(text, encoding="utf-8")
+          runner_path = Path("tests/unit/execution/test_replay_runner_branches.py")
+          runner_text = runner_path.read_text(encoding="utf-8")
+          replacements = {
+              'assert normal.limit_up == Decimal("11.66")': 'assert normal.limit_up == Decimal("11.55")',
+              'assert normal.limit_down == Decimal("9.54")': 'assert normal.limit_down == Decimal("9.45")',
+              'assert facts.instruments[0].symbol.canonical == "600000.SH"': 'assert facts.instruments[0].symbol.canonical == "sh600000"',
+              'assert runner._plan_symbols(valid) == ("300001.SZ", "600000.SH")': 'assert runner._plan_symbols(valid) == ("sh600000", "sz300001")',
+          }
+          for old, new in replacements.items():
+              if old not in runner_text:
+                  raise SystemExit(f"runner test target not found: {old}")
+              runner_text = runner_text.replace(old, new, 1)
+          runner_path.write_text(runner_text, encoding="utf-8")
+
+          replay_path = Path("tests/unit/execution/test_execution_replay_branches.py")
+          replay_text = replay_path.read_text(encoding="utf-8")
+          if 'bar = _bar(volume=105, close="11")' not in replay_text:
+              raise SystemExit("high/close fixture target not found")
+          replay_text = replay_text.replace(
+              'bar = _bar(volume=105, close="11")',
+              'bar = _bar(volume=105, high="11", close="11")',
+              1,
+          )
+          if replay_text.count('_bar(close="9")') < 2:
+              raise SystemExit("low/close fixture targets not found")
+          replay_text = replay_text.replace('_bar(close="9")', '_bar(low="9", close="9")')
+          replay_path.write_text(replay_text, encoding="utf-8")
           PY
           uv run ruff format tests/unit/execution/test_execution_replay_branches.py tests/unit/execution/test_replay_runner_branches.py
           uv run ruff check tests/unit/execution/test_execution_replay_branches.py tests/unit/execution/test_replay_runner_branches.py
