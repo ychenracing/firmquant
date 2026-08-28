@@ -28,13 +28,24 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           version: "0.11.33"
-      - name: Format and verify readiness tests
+      - name: Repair current heartbeat fixture and format tests
         run: |
           uv sync --frozen --extra dev
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/unit/application/test_readiness_and_canary_runtime.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''            database.write(\n                "INSERT INTO production_heartbeat(singleton_id,observed_at,control_request_state) VALUES(1,?,?)",\n                ((NOW - timedelta(seconds=5)).isoformat(), "IDLE"),\n            )'''
+          new = '''            database.write(\n                "INSERT INTO production_heartbeat("\n                "singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,"\n                "broker_connected,broker_read_healthy,broker_write_healthy,pending_events,"\n                "control_request_state,processed_events,decisions,executions,eod"\n                ") VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",\n                (\n                    "SHADOW",\n                    "READY",\n                    (NOW - timedelta(seconds=5)).isoformat(),\n                    "h" * 64,\n                    1,\n                    1,\n                    1,\n                    1,\n                    1,\n                    0,\n                    "IDLE",\n                    0,\n                    0,\n                    0,\n                    0,\n                ),\n            )'''
+          if old not in text:
+              raise SystemExit("heartbeat fixture target not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
           uv run ruff format tests/unit/application/test_readiness_and_canary_runtime.py
           uv run ruff check tests/unit/application/test_readiness_and_canary_runtime.py
           uv run pytest tests/unit/application/test_readiness_and_canary_runtime.py -q
-      - name: Commit formatted test candidate
+      - name: Commit verified test candidate
         run: |
           git rm .github/workflows/format-readiness-tests.yml
           git config user.name firmquant-bot
