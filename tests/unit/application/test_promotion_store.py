@@ -42,6 +42,7 @@ def observation(*, stage: EvidenceStage, session: date, config: str = "c" * 64) 
         plan_id="plan-" + session.isoformat(),
         portfolio_equity=Decimal("10000"),
         planned_orders=(),
+        planning_blockers=(),
         targets=(target,),
         fills=(),
         actual_ending_positions=(position,),

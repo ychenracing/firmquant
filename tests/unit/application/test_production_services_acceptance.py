@@ -13,6 +13,15 @@ import pytest
 
 import firmquant.application.production_services as ps
 from firmquant.application.close_checkpoint import CloseStep
+from firmquant.application.execution_evidence import (
+    BlockerCode,
+    EvidenceIdentity,
+    EvidenceStage,
+    ExecutionObservation,
+    OrderObservation,
+    PositionObservation,
+    TargetObservation,
+)
 from firmquant.application.production_events import ProductionEventJournal
 from firmquant.application.production_services import (
     ProductionServiceHooks,
@@ -573,22 +582,62 @@ def test_canary_promotion_gate_is_identity_bound(tmp_path: Path) -> None:
             hooks._require_promotion(account_hash)
 
         thresholds = hooks._settings.promotion
-        ps.PromotionStore(hooks._database).append(
-            ps.ShadowPromotionEvidence(
-                firmquant_commit=hooks._identity.firmquant_commit,
-                uquant_commit=hooks._identity.uquant_commit,
-                config_sha256=hooks._identity.promotion_config_sha256,
-                account_hash=account_hash,
-                observed_sessions=thresholds.min_shadow_sessions,
-                hypothetical_orders=thresholds.min_shadow_orders,
-                unresolved_orders=0,
-                external_orders=0,
-                duplicate_economic_orders=0,
-                duplicate_fills=0,
-                max_target_tracking_error=Decimal("0"),
-                created_at=NOW,
+        store = ps.PromotionStore(hooks._database)
+        orders_per_session = max(1, thresholds.min_shadow_orders)
+        for index in range(thresholds.min_shadow_sessions):
+            session = date.fromordinal(EXECUTION_SESSION.toordinal() - thresholds.min_shadow_sessions + index)
+            target = TargetObservation(
+                symbol="600000.SH",
+                target_shares=100,
+                target_weight=Decimal("0.10"),
+                reference_price=Decimal("10"),
             )
-        )
+            position = PositionObservation(symbol="600000.SH", shares=100)
+            orders = tuple(
+                OrderObservation(
+                    execution_id=f"shadow-{index}-{order_index}",
+                    uquant_order_id=f"uq-shadow-{index}-{order_index}",
+                    symbol="600000.SH",
+                    side="BUY",
+                    planned_shares=100,
+                    filled_shares=0,
+                    reference_price=Decimal("10"),
+                    blocker=BlockerCode.TARGET_ALREADY_SATISFIED,
+                )
+                for order_index in range(orders_per_session)
+            )
+            store.append(
+                ExecutionObservation(
+                    identity=EvidenceIdentity(
+                        stage=EvidenceStage.SHADOW,
+                        execution_session=session,
+                        firmquant_commit=hooks._identity.firmquant_commit,
+                        uquant_commit=hooks._identity.uquant_commit,
+                        promotion_config_sha256=hooks._identity.promotion_config_sha256,
+                        account_sha256=account_hash,
+                        data_sha256="d" * 64,
+                        calendar_sha256="e" * 64,
+                    ),
+                    decision_id=f"decision-shadow-{index}",
+                    plan_id=f"plan-shadow-{index}",
+                    portfolio_equity=Decimal("10000"),
+                    planned_orders=orders,
+                    planning_blockers=(),
+                    targets=(target,),
+                    fills=(),
+                    actual_ending_positions=(position,),
+                    hypothetical_ending_positions=(position,),
+                    submit_count=0,
+                    cancel_count=0,
+                    rejection_count=0,
+                    unknown_count=0,
+                    external_activity=0,
+                    duplicate_economic_orders=0,
+                    duplicate_fills=0,
+                    data_quality_failures=0,
+                    created_at=NOW,
+                )
+            )
         hooks._require_promotion(account_hash)
 
 
@@ -677,21 +726,22 @@ def test_shadow_execution_records_hypothetical_orders_and_never_writes(
         decision = decision_snapshot(include_sell=False, include_buy=True)
         facts = execution_snapshot()
         plan = ExecutionPlanner().plan(decision, facts)
-        hooks._shadow_execute(plan, decision)
-        hooks._shadow_execute(plan, decision)
+        hooks._shadow_execute(plan, decision, facts)
+        hooks._shadow_execute(plan, decision, facts)
 
         assert broker.submitted_commands == ()
         assert broker.cancelled_order_ids == ()
         assert hooks.real_order_calls() == 0
-        evidence = ps.PromotionStore(hooks._database).latest(
+        evidence = ps.PromotionStore(hooks._database).aggregate(
+            stage=EvidenceStage.SHADOW,
             firmquant_commit=hooks._identity.firmquant_commit,
             uquant_commit=hooks._identity.uquant_commit,
             config_sha256=hooks._identity.promotion_config_sha256,
             account_hash=broker.query_account().account_id_hash,
         )
         assert evidence is not None
-        assert evidence.observed_sessions == 2
-        assert evidence.hypothetical_orders == len(plan.orders) * 2
+        assert evidence.observed_sessions == 1
+        assert evidence.order_count == len(plan.orders)
 
         complete_close(hooks)
         hooks._decisions = SimpleNamespace(for_session=lambda _session: (decision,))

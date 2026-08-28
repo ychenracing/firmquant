@@ -85,7 +85,7 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 | `firmquant fills` | 查询已规范化成交与费用事实 |
 | `firmquant report` | 生成/读取 session 的 Markdown 与 JSON 报告 |
 | `firmquant replay` | 确定性重放冻结的券商事件 |
-| `firmquant execution-replay --start YYYY-MM-DD --end YYYY-MM-DD` | 使用锁定 uquant source 与 frozen data 运行跨日 execution-aware Replay，并输出稳定 JSON 摘要 |
+| `firmquant execution-replay` | 通过 `--start YYYY-MM-DD --end YYYY-MM-DD` 使用锁定 uquant source 与 frozen data 运行跨日 execution-aware Replay，并输出稳定 JSON 摘要 |
 | `firmquant backup` | 创建原子、一致性状态备份 |
 | `firmquant verify-backup` | 在隔离目录验证可恢复性、schema 与审计链 |
 | `firmquant cancel-system-orders` | 请求取消 firmquant 拥有的未完成订单；仍需完整写门禁 |
