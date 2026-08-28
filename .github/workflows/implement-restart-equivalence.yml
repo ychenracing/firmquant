@@ -34,19 +34,17 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           version: "0.11.33"
-      - name: Implement and verify restart roundtrip
+      - name: Build clean local GREEN candidate
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
           PYTHONPATH: ${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
         run: |
+          printf '%s\n' '.uquant-source/' >> .git/info/exclude
           uv sync --frozen --extra dev
           uv run python scripts/implement_restart_equivalence.py
           uv run ruff format src/firmquant/execution/replay_runner.py tests/integration/test_execution_replay_restart.py
           uv run ruff check src/firmquant/execution/replay_runner.py tests/integration/test_execution_replay_restart.py
           uv run mypy src scripts
-          uv run pytest tests/integration/test_execution_replay_restart.py -q
-      - name: Commit GREEN restart contract
-        run: |
           rm -f scripts/implement_restart_equivalence.py
           rm -f .github/workflows/implement-restart-equivalence.yml
           rm -f .github/workflows/restart-equivalence-red.yml
@@ -55,4 +53,11 @@ jobs:
           git add -A
           git diff --cached --check
           git commit -m "Prove replay restart equivalence"
-          git push origin HEAD:codex/execution-evidence-readiness
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Verify restart equivalence on clean committed checkout
+        env:
+          FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
+          PYTHONPATH: ${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
+        run: uv run pytest tests/integration/test_execution_replay_restart.py -q
+      - name: Push verified GREEN candidate
+        run: git push origin HEAD:codex/execution-evidence-readiness
