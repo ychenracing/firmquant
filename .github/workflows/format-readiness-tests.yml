@@ -28,7 +28,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           version: "0.11.33"
-      - name: Repair current heartbeat fixture and format tests
+      - name: Repair current fixtures and format tests
         run: |
           uv sync --frozen --extra dev
           python - <<'PY'
@@ -36,11 +36,17 @@ jobs:
 
           path = Path("tests/unit/application/test_readiness_and_canary_runtime.py")
           text = path.read_text(encoding="utf-8")
-          old = '''            database.write(\n                "INSERT INTO production_heartbeat(singleton_id,observed_at,control_request_state) VALUES(1,?,?)",\n                ((NOW - timedelta(seconds=5)).isoformat(), "IDLE"),\n            )'''
-          new = '''            database.write(\n                "INSERT INTO production_heartbeat("\n                "singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,"\n                "broker_connected,broker_read_healthy,broker_write_healthy,pending_events,"\n                "control_request_state,processed_events,decisions,executions,eod"\n                ") VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",\n                (\n                    "SHADOW",\n                    "READY",\n                    (NOW - timedelta(seconds=5)).isoformat(),\n                    "h" * 64,\n                    1,\n                    1,\n                    1,\n                    1,\n                    1,\n                    0,\n                    "IDLE",\n                    0,\n                    0,\n                    0,\n                    0,\n                ),\n            )'''
-          if old not in text:
+          heartbeat_old = '''            database.write(\n                "INSERT INTO production_heartbeat(singleton_id,observed_at,control_request_state) VALUES(1,?,?)",\n                ((NOW - timedelta(seconds=5)).isoformat(), "IDLE"),\n            )'''
+          heartbeat_new = '''            database.write(\n                "INSERT INTO production_heartbeat("\n                "singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,"\n                "broker_connected,broker_read_healthy,broker_write_healthy,pending_events,"\n                "control_request_state,processed_events,decisions,executions,eod"\n                ") VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",\n                (\n                    "SHADOW",\n                    "READY",\n                    (NOW - timedelta(seconds=5)).isoformat(),\n                    "h" * 64,\n                    1,\n                    1,\n                    1,\n                    1,\n                    1,\n                    0,\n                    "IDLE",\n                    0,\n                    0,\n                    0,\n                    0,\n                ),\n            )'''
+          backup_old = '''            database.write(\n                "INSERT INTO backup_receipts(backup_id,created_at,manifest_json,verification_status) VALUES(?,?,?,?)",\n                ("backup-1", NOW.isoformat(), manifest, "VERIFIED"),\n            )'''
+          backup_new = '''            database.write(\n                "INSERT INTO backup_receipts("\n                "backup_id,database_sha256,account_state_sha256,manifest_json,manifest_sha256,"\n                "created_at,verified_at,verification_status"\n                ") VALUES(?,?,?,?,?,?,?,?)",\n                (\n                    "backup-1",\n                    "d" * 64,\n                    "e" * 64,\n                    manifest,\n                    "f" * 64,\n                    NOW.isoformat(),\n                    NOW.isoformat(),\n                    "VERIFIED",\n                ),\n            )'''
+          if heartbeat_old not in text:
               raise SystemExit("heartbeat fixture target not found")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          if backup_old not in text:
+              raise SystemExit("backup fixture target not found")
+          text = text.replace(heartbeat_old, heartbeat_new, 1)
+          text = text.replace(backup_old, backup_new, 1)
+          path.write_text(text, encoding="utf-8")
           PY
           uv run ruff format tests/unit/application/test_readiness_and_canary_runtime.py
           uv run ruff check tests/unit/application/test_readiness_and_canary_runtime.py
