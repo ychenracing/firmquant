@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date
-from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from enum import Enum
 
 from firmquant.application.execution_evidence import BlockerCode
@@ -14,6 +14,7 @@ _ZERO = Decimal(0)
 _ONE = Decimal(1)
 _BPS = Decimal("10000")
 _FEE_QUANTUM = Decimal("0.0001")
+_PRICE_TICK = Decimal("0.01")
 _LOT_SIZE = 100
 
 
@@ -281,9 +282,13 @@ def _candidate_fill_price(order: ReplayOrder, bar: DailyBar, costs: ReplayCosts)
     slippage = costs.slippage_bps / _BPS
     if order.side is ReplaySide.BUY:
         nominal = bar.open if order.limit_price >= bar.open else order.limit_price
-        return min(order.limit_price, nominal * (_ONE + slippage))
+        raw = nominal * (_ONE + slippage)
+        ticked = raw.quantize(_PRICE_TICK, rounding=ROUND_CEILING)
+        return min(order.limit_price, ticked)
     nominal = bar.open if order.limit_price <= bar.open else order.limit_price
-    return max(order.limit_price, nominal * (_ONE - slippage))
+    raw = nominal * (_ONE - slippage)
+    ticked = raw.quantize(_PRICE_TICK, rounding=ROUND_FLOOR)
+    return max(order.limit_price, ticked)
 
 
 def _price_reached(order: ReplayOrder, bar: DailyBar, fill_price: Decimal) -> bool:

@@ -142,6 +142,34 @@ def test_t_plus_one_and_sell_before_buy_with_incomplete_sell_dependency() -> Non
     assert next_day_sell.orders[0].filled_shares == 100
 
 
+def test_fill_price_respects_a_share_tick_with_conservative_directional_rounding() -> None:
+    costs = ReplayCosts(
+        commission_rate=Decimal("0"),
+        minimum_commission=Decimal("0"),
+        sell_stamp_duty_rate=Decimal("0"),
+        transfer_fee_rate=Decimal("0"),
+        slippage_bps=Decimal("3"),
+    )
+    buy = execute_session(
+        ReplayAccount(cash=Decimal("100000"), positions={}, sellable={}),
+        (ReplayOrder("600000.SH", ReplaySide.BUY, 100, Decimal("10.10"), Decimal("1")),),
+        {"600000.SH": _bar("600000.SH")},
+        costs,
+    )
+    sell = execute_session(
+        ReplayAccount(
+            cash=Decimal("0"),
+            positions={"600000.SH": 100},
+            sellable={"600000.SH": 100},
+        ),
+        (ReplayOrder("600000.SH", ReplaySide.SELL, 100, Decimal("9.90"), Decimal("1")),),
+        {"600000.SH": _bar("600000.SH")},
+        costs,
+    )
+    assert buy.orders[0].fill_price == Decimal("10.01")
+    assert sell.orders[0].fill_price == Decimal("9.99")
+
+
 def test_fees_slippage_unfilled_and_determinism_are_stable() -> None:
     order = ReplayOrder("600000.SH", ReplaySide.BUY, 1000, Decimal("10.10"), Decimal("0.05"))
     account = ReplayAccount(cash=Decimal("100000"), positions={}, sellable={})

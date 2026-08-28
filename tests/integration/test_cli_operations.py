@@ -5,6 +5,7 @@ import json
 import threading
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,15 @@ from uquant.account import save_account
 from uquant.data import DataStore
 from uquant.types import AccountState
 
+from firmquant.application.execution_evidence import (
+    BlockerCode,
+    EvidenceIdentity,
+    EvidenceStage,
+    ExecutionObservation,
+    OrderObservation,
+    PositionObservation,
+    TargetObservation,
+)
 from firmquant.application.operations import (
     LocalOperatorService,
     OperatorCommand,
@@ -22,7 +32,9 @@ from firmquant.application.operations import (
     SystemOrderCancellationPort,
     create_local_operator_service,
 )
-from firmquant.config import Mode
+from firmquant.application.production_identity import promotion_config_sha256
+from firmquant.application.promotion_store import PromotionStore
+from firmquant.config import Mode, load_settings
 from firmquant.domain.broker_facts import Side
 from firmquant.domain.orders import ExecutionIntent
 from firmquant.domain.values import Shares, Symbol
@@ -246,6 +258,63 @@ def seed_live_readiness(config: Path) -> None:
                 },
                 created_at=NOW,
             )
+            settings = load_settings(config)
+            promotion_sha = promotion_config_sha256(settings)
+            uquant_commit = StrategyIdentity.locked().uquant_commit
+            target = TargetObservation(
+                symbol="600000.SH",
+                target_shares=100,
+                target_weight=Decimal("0.10"),
+                reference_price=Decimal("10"),
+            )
+            position = PositionObservation(symbol="600000.SH", shares=100)
+            promotion_store = PromotionStore(database)
+            for index in range(settings.promotion.min_shadow_sessions):
+                orders = tuple(
+                    OrderObservation(
+                        execution_id=f"shadow-seed-{index}-{order_index}",
+                        uquant_order_id=f"shadow-uq-{index}-{order_index}",
+                        symbol="600000.SH",
+                        side="BUY",
+                        planned_shares=100,
+                        filled_shares=0,
+                        reference_price=Decimal("10"),
+                        blocker=BlockerCode.TARGET_ALREADY_SATISFIED,
+                    )
+                    for order_index in range(3)
+                )
+                promotion_store.append(
+                    ExecutionObservation(
+                        identity=EvidenceIdentity(
+                            stage=EvidenceStage.SHADOW,
+                            execution_session=date(2026, 7, index + 1),
+                            firmquant_commit=FIRMQUANT_COMMIT,
+                            uquant_commit=uquant_commit,
+                            promotion_config_sha256=promotion_sha,
+                            account_sha256="a" * 64,
+                            data_sha256="d" * 64,
+                            calendar_sha256="e" * 64,
+                        ),
+                        decision_id=f"shadow-decision-{index}",
+                        plan_id=f"shadow-plan-{index}",
+                        portfolio_equity=Decimal("10000"),
+                        planned_orders=orders,
+                        planning_blockers=(),
+                        targets=(target,),
+                        fills=(),
+                        actual_ending_positions=(position,),
+                        hypothetical_ending_positions=(position,),
+                        submit_count=0,
+                        cancel_count=0,
+                        rejection_count=0,
+                        unknown_count=0,
+                        external_activity=0,
+                        duplicate_economic_orders=0,
+                        duplicate_fills=0,
+                        data_quality_failures=0,
+                        created_at=NOW,
+                    )
+                )
     finally:
         database.close()
 

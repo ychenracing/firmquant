@@ -55,6 +55,7 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _ACCOUNT_HASH = hashlib.sha256(b"firmquant-execution-replay-account").hexdigest()
 _ZERO = Decimal(0)
 _ONE = Decimal(1)
+_AVERAGE_COST_QUANTUM = Decimal("0.00000001")
 
 
 class ExecutionReplayError(RuntimeError):
@@ -655,7 +656,8 @@ def _updated_average_costs(
         old_cost = observed.get(symbol, price)
         added_cost = price * Decimal(filled) + commission + transfer
         new_shares = old_shares + filled
-        observed[symbol] = (old_cost * Decimal(old_shares) + added_cost) / Decimal(new_shares)
+        raw_average_cost = (old_cost * Decimal(old_shares) + added_cost) / Decimal(new_shares)
+        observed[symbol] = raw_average_cost.quantize(_AVERAGE_COST_QUANTUM, rounding=ROUND_HALF_UP)
         running_shares[symbol] = new_shares
     if set(observed) != set(after.positions):
         raise ExecutionReplayError("average-cost state differs from replay positions")
