@@ -56,6 +56,8 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 
 `execution-replay` 使用同一个锁定 `ProductionEngine`、canonical universe、冻结历史数据和同一账户经济状态：收盘产生决策，下一交易日以因果 next-open/OHLCV 模型执行，再把模拟 broker orders/fills/cash/positions 通过现有 uquant account sync 回灌后进入下一次决策。模型覆盖 T+1、100 股交易单位、0.01 tick、涨跌停/停牌、volume participation、sell-before-buy、依赖卖出资金的买入阻断、部分成交、手续费/印花税/过户费、slippage 和 unfilled loss；它是日频执行模型，不是逐 tick 撮合器。生产验收使用锁定 uquant 的 `continuous_ai_era` 区间（2023-01-03 至 2026-08-05）做完整对照，不通过调参修饰执行差异。
 
+冻结数据使用前复权价格坐标，但不保存交易所未复权参考价或复权因子；因此 Replay 先按板块规则和前收盘计算名义涨跌停。若权威 frozen OHLC 因复权/分位精度落在该名义带外，只把 synthetic limit **向外**取整到最小 0.01 元边界以包住已经发生的 OHLC，不向内收紧、不改变 0.01 tick，也不把该重建边界当成策略信号或 uquant 输入。
+
 运行状态不是布尔值，而是：`DISARMED`、`STARTING`、`RECONCILING`、`READY`、`EXECUTING`、`DEGRADED`、
 `HALTED`、`STOPPING`。订单状态持久化为：`PLANNED`、`VALIDATED`、`ARMED`、`SUBMITTING`、
 `ACKNOWLEDGED`、`PARTIALLY_FILLED`、`FILLED`、`CANCEL_REQUESTED`、`CANCELLED`、`REJECTED`、`EXPIRED`、
