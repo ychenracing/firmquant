@@ -1,0 +1,45 @@
+name: Format readiness tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+env:
+  FIRMQ_CI: "1"
+  FIRMQ_MODE: PAPER
+  FIRMQ_LIVE_TRADING_ENABLED: "false"
+  UV_FROZEN: "1"
+
+jobs:
+  format:
+    if: github.head_ref == 'codex/execution-evidence-readiness'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.head_ref }}
+          clean: false
+          fetch-depth: 1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: "0.11.33"
+      - name: Format and verify readiness tests
+        run: |
+          uv sync --frozen --extra dev
+          uv run ruff format tests/unit/application/test_readiness_and_canary_runtime.py
+          uv run ruff check tests/unit/application/test_readiness_and_canary_runtime.py
+          uv run pytest tests/unit/application/test_readiness_and_canary_runtime.py -q
+      - name: Commit formatted test candidate
+        run: |
+          git rm .github/workflows/format-readiness-tests.yml
+          git config user.name firmquant-bot
+          git config user.email firmquant-bot@users.noreply.github.com
+          git add tests/unit/application/test_readiness_and_canary_runtime.py
+          git diff --cached --check
+          git commit -m "Format and verify readiness evidence tests"
+          git push origin HEAD:codex/execution-evidence-readiness
