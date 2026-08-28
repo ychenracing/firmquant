@@ -263,7 +263,7 @@ def collect_live_readiness(
         active = DataGenerationStore(_resolved(config_path, settings.paths.state_directory)).active()
         active_manifest_sha256 = active.manifest_sha256
     except Exception:
-        pass
+        active_manifest_sha256 = None
 
     calendar_path = data_root / "trading_calendar.json"
     calendar_sha256 = _file_sha256(calendar_path)
@@ -273,7 +273,7 @@ def collect_live_readiness(
         session = now.astimezone(_SHANGHAI).date()
         calendar_coverage = calendar.covered_from <= session <= calendar.covered_through
     except Exception:
-        pass
+        calendar_coverage = False
 
     safety: XtQuantSafetyManifest | None = None
     if settings.broker.safety_manifest_path is not None:
