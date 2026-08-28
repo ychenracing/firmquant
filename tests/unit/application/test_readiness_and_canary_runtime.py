@@ -156,8 +156,28 @@ def test_live_readiness_heartbeat_and_backup_identity_match(tmp_path: Path) -> N
     try:
         with database.transaction():
             database.write(
-                "INSERT INTO production_heartbeat(singleton_id,observed_at,control_request_state) VALUES(1,?,?)",
-                ((NOW - timedelta(seconds=5)).isoformat(), "IDLE"),
+                "INSERT INTO production_heartbeat("
+                "singleton_id,mode,runtime_state,observed_at,host_hash,process_id,writer_generation,"
+                "broker_connected,broker_read_healthy,broker_write_healthy,pending_events,"
+                "control_request_state,processed_events,decisions,executions,eod"
+                ") VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "SHADOW",
+                    "READY",
+                    (NOW - timedelta(seconds=5)).isoformat(),
+                    "h" * 64,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    "IDLE",
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
             )
         assert readiness_runtime._heartbeat(database, NOW) == (True, True, 5.0)
         with database.transaction():
@@ -179,8 +199,20 @@ def test_live_readiness_heartbeat_and_backup_identity_match(tmp_path: Path) -> N
         manifest = json.dumps({"schema_version": 2, "deployment": deployment}, sort_keys=True)
         with database.transaction():
             database.write(
-                "INSERT INTO backup_receipts(backup_id,created_at,manifest_json,verification_status) VALUES(?,?,?,?)",
-                ("backup-1", NOW.isoformat(), manifest, "VERIFIED"),
+                "INSERT INTO backup_receipts("
+                "backup_id,database_sha256,account_state_sha256,manifest_json,manifest_sha256,"
+                "created_at,verified_at,verification_status"
+                ") VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "backup-1",
+                    "d" * 64,
+                    "e" * 64,
+                    manifest,
+                    "f" * 64,
+                    NOW.isoformat(),
+                    NOW.isoformat(),
+                    "VERIFIED",
+                ),
             )
         assert readiness_runtime._latest_backup_matches(
             database,
@@ -349,7 +381,9 @@ def test_collect_live_readiness_covers_positive_identity_and_promotion_paths(
         monkeypatch.setattr(readiness_runtime, "PromotionStore", Store)
         monkeypatch.setattr(readiness_runtime, "_heartbeat", lambda database, now: (True, True, 1.0))
         monkeypatch.setattr(readiness_runtime, "_latest_reconciliation_passed", lambda database, kind: True)
-        monkeypatch.setattr(readiness_runtime, "_latest_backup_matches", lambda database, **kwargs: (True, "backup-1"))
+        monkeypatch.setattr(
+            readiness_runtime, "_latest_backup_matches", lambda database, **kwargs: (True, "backup-1")
+        )
         monkeypatch.setattr(readiness_runtime, "_kill_switch", lambda database: False)
         monkeypatch.setattr(readiness_runtime, "_armed", lambda database, now: True)
         monkeypatch.setattr(Database, "query_one", query_one)
@@ -466,7 +500,9 @@ def test_canary_finalize_full_execution_path(tmp_path: Path, monkeypatch: pytest
         return 0
 
     try:
-        monkeypatch.setattr(evidence_runtime, "_load_canary_plan", lambda database, session: _canary_payload())
+        monkeypatch.setattr(
+            evidence_runtime, "_load_canary_plan", lambda database, session: _canary_payload()
+        )
         monkeypatch.setattr(Database, "query_one", query_one)
         monkeypatch.setattr(Database, "query_all", query_all)
         monkeypatch.setattr(Database, "scalar", scalar)
@@ -536,7 +572,9 @@ def test_canary_decoder_and_blocker_edges_fail_closed(tmp_path: Path) -> None:
         database.close()
 
 
-def test_load_canary_plan_invalid_payloads_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_canary_plan_invalid_payloads_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     database = Database.open(tmp_path / "ledger.sqlite3")
     try:
         monkeypatch.setattr(Database, "query_all", lambda self, sql, parameters=(): ({"payload_json": "{"},))
