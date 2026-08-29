@@ -18,21 +18,21 @@
 
 ## Git 现场
 
-核验时间：`2026-08-29T08:14:46Z`。
+核验时间：`2026-08-29T08:20:22Z`。
 
 | 字段 | 当前有效值 | 核验说明 |
 |---|---|---|
 | 仓库 | `ychenracing/firmquant` | GitHub 仓库元数据已核验 |
 | 工作树绝对路径 | `/workspace/scratch/f7a20d7cb22e/firmquant` | `pwd -P` 已核验；scratch 路径不具备跨会话稳定性，下次会话必须重新核验 |
 | 当前分支 | `codex/minimal-context-project-state` | `git branch --show-current` 已核验 |
-| 本地 `HEAD` | `3be0367344452e54a30251b5cabaf8ca9a7d8edb` | 本状态更新前的已核验内容提交；提交本文件自身会产生新 HEAD，下次任务开始必须替换而非并列追加 |
+| 本地 `HEAD` | `6800e37821c3907a3b9c3278c8b18bc08fb2902b` | 本状态更新前的本地状态提交；其 tree 与远端候选完全相同 |
 | `origin/main` | `1d2770a5cc2298f37e9bb928bb572394c9625e3c` | `git fetch origin main:refs/remotes/origin/main` 后核验 |
 | 远端功能分支 | `codex/minimal-context-project-state` | 已创建并可读取 |
-| 远端功能分支 SHA | `3be0367344452e54a30251b5cabaf8ca9a7d8edb` | 本状态更新前通过 `git ls-remote` 和 GitHub branch ref 双重核验；状态提交后必须重新核验替换 |
+| 远端功能分支 SHA | `69a358744f642f64365cf67205eea53adef70ff1` | 本状态更新前通过 fetch 和 GitHub branch ref 核验；状态提交后必须重新核验替换 |
 | `merge-base(HEAD, origin/main)` | `1d2770a5cc2298f37e9bb928bb572394c9625e3c` | `git merge-base HEAD origin/main` 已核验 |
 | `git status --short` | 空 | 本状态更新前核验；仅 `.venv` 被 `.gitignore` 排除 |
 | staged / unstaged / untracked | 空 / 空 / 空 | 本状态更新前核验 |
-| push 状态 | 已同步：`+0 -0` | `branch.upstream=origin/codex/minimal-context-project-state`；本状态更新前本地/远端均为 `3be0367344452e54a30251b5cabaf8ca9a7d8edb` |
+| push 状态 | 远端内容已同步；本地 commit graph 为 `+1 -1` | shell push 因无 HTTPS 凭据失败后改用已授权仓库写入；本地/远端 commit id 不同，但 tree 均为 `89a594cca594731de56588297c4b24d88760ba37`，`git diff --exit-code HEAD origin/codex/minimal-context-project-state` 为 0 |
 
 ## 已完成并验证事项
 
@@ -48,12 +48,10 @@
 ## 剩余事项及执行顺序
 
 1. 本任务范围内没有剩余业务或治理内容改动。
-2. GitHub Actions 的 CI / Security / Windows deployment safety 可作为附加证据；未结束前保持“待核验”，不阻塞本次纯文档 L1 验收，也不得外推为 MiniQMT 已验证。
-3. 由后续集成流程决定是否创建 PR/合入 `main`；本任务未授权直接合并 `main`。
+2. 由后续集成流程决定是否创建 PR/合入 `main`；本任务未授权直接合并 `main`。
 
 ## 当前阻塞、风险和 UNKNOWN
 
-- `UNKNOWN`：GitHub Actions CI / Security / Windows deployment safety 的最终结果尚未核验，禁止预写为通过。
 - 状态文件无法在自身提交前包含该提交的 SHA；上表保留最近已核验提交并明确要求下次任务开头用 live Git 状态替换，禁止把它误当成永久 HEAD。
 - 当前有效交接包未在仓库或持久化文件区检索到；如果另有未提供的外部交接包，其语义尚未纳入，必须在发现后按当前现场重新比对，不能直接覆盖本文件。
 - `docs/SOURCE_BASELINE.md` 记录的是当前锁定 uquant 基线；升级 uquant 时必须更新其机器/人类权威文件，不应把旧 SHA 固化到 `PROJECT_BRIEF.md`。
@@ -72,7 +70,10 @@
 | `uv run python scripts/secret_scan.py` | PASS，exit 0，无 stdout/stderr |
 | 三文件结构、归属和冲突检查 | PASS，exit 0：3 文件存在；全部必需章节和 9 个严格 AND token 存在；Brief 无 40 位 SHA、无 `codex/`；无行尾空白 |
 | GitHub compare：`1d2770a5...` → `3be03673...` | PASS：仅新增 `ACCEPTANCE.md`、`PROJECT_BRIEF.md`、`TASK_STATE.md`；348 additions / 0 deletions；merge-base 精确为 `1d2770a5cc2298f37e9bb928bb572394c9625e3c` |
-| GitHub Actions：CI / Security / Windows deployment safety | 待核验；不得表述为通过 |
+| GitHub Actions Security run `33242786127`（commit `69a358744f642f64365cf67205eea53adef70ff1`） | PASS：completed / success，2026-08-29T08:17:29Z |
+| GitHub Actions Windows deployment safety run `33242786106`（同 commit） | PASS：completed / success，2026-08-29T08:17:49Z |
+| GitHub Actions CI run `33242786103`（同 commit） | PASS：completed / success，2026-08-29T08:19:40Z；Linux、Windows、uquant parity jobs 全部 success |
+| 最终 `TASK_STATE.md` 状态刷新提交的 GitHub Actions | 未运行：提交信息使用 `[skip ci]` 避免状态回写无限触发；该 skip 不表述为新一轮 workflow 通过，文档 L1 在提交前单独运行 |
 
 ## 下一步具体动作
 
@@ -80,4 +81,4 @@
 
 ## 最后更新时间
 
-`2026-08-29T08:14:46Z`
+`2026-08-29T08:20:22Z`
