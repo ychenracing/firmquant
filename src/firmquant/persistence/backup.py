@@ -2285,6 +2285,11 @@ def _probe_existing_restore(
     restore_id: str,
     destination_sha256: str,
 ) -> tuple[str, str, RestoreReceipt | None]:
+    try:
+        if {path.name for path in destination.iterdir()} != _V3_MEMBERS | {"manifest.json"}:
+            raise BackupVerificationError("restore destination directory entries are not exact")
+    except OSError as exc:
+        raise BackupVerificationError("restore destination cannot be inspected immutably") from exc
     database_path = destination / "firmquant.sqlite3"
     if database_path.is_symlink() or not database_path.is_file():
         raise BackupVerificationError("restore destination is not exact recoverable evidence")
@@ -2298,7 +2303,7 @@ def _probe_existing_restore(
                 """
                 SELECT stage,backup_id,source_reason,source_manifest_sha256,
                        source_database_sha256,destination_identity_sha256,
-                       sanitized_state_sha256,deployment_identity_sha256,
+                       sanitized_state_sha256,final_directory_name,deployment_identity_sha256,
                        operational_evidence_identity_sha256,account_authority_epoch,mode_epoch
                 FROM restore_operations WHERE restore_id=?
                 """,
@@ -2331,6 +2336,11 @@ def _probe_existing_restore(
             )
             if stage not in {"STAGED", "PUBLISHED", "RECEIPT_COMMITTED"} or observed != expected:
                 raise BackupVerificationError("restore destination operation proof conflicts")
+            final_name = operation["final_directory_name"]
+            if (stage == "STAGED" and final_name is not None) or (
+                stage != "STAGED" and final_name != destination.name
+            ):
+                raise BackupVerificationError("restore destination publication name conflicts")
             sanitized_state_sha256 = str(operation["sanitized_state_sha256"])
             _verify_sanitized_restore(
                 database,

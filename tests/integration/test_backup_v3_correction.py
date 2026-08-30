@@ -685,3 +685,87 @@ def test_restore_exact_retry_recovers_each_sql_publication_boundary(
         )
     finally:
         restored.close()
+
+
+def _published_restore_without_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path, str]:
+    source, _inputs = _source_backup(tmp_path)
+    destination = tmp_path / "published-restore"
+    real_write = Database.write
+    injected = False
+
+    def fail_receipt(
+        target: Database,
+        sql: str,
+        parameters: Sequence[object] = (),
+    ):
+        nonlocal injected
+        if (
+            target.path == destination / "firmquant.sqlite3"
+            and "INSERT INTO restore_receipts" in sql
+            and not injected
+        ):
+            injected = True
+            raise sqlite3.OperationalError("injected published restore receipt failure")
+        return real_write(target, sql, parameters)
+
+    monkeypatch.setattr(Database, "write", fail_receipt)
+    with pytest.raises(sqlite3.OperationalError, match="published restore receipt"):
+        restore_backup(source.bundle_path, destination, restored_at=NOW)
+    database = Database.open_read_only(destination / "firmquant.sqlite3", immutable=True)
+    try:
+        operation = database.query_one("SELECT restore_id,stage FROM restore_operations")
+        assert operation is not None
+        assert str(operation["stage"]) == "PUBLISHED"
+        return source.bundle_path, destination, str(operation["restore_id"])
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize("entry_kind", ["file", "directory"])
+def test_published_restore_with_unrelated_entry_is_rejected_immutably(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_kind: str,
+) -> None:
+    source, destination, _restore_id = _published_restore_without_receipt(tmp_path, monkeypatch)
+    unrelated = destination / "unrelated-evidence"
+    if entry_kind == "file":
+        unrelated.write_bytes(b"preserve incident evidence")
+    else:
+        unrelated.mkdir()
+        (unrelated / "nested.bin").write_bytes(b"preserve nested evidence")
+    before = _tree_bytes(destination)
+
+    with pytest.raises(BackupVerificationError, match=r"destination|directory|publication"):
+        restore_backup(source, destination, restored_at=NOW)
+
+    assert _tree_bytes(destination) == before
+
+
+@pytest.mark.parametrize("final_directory_name", [None, "wrong-published-name"])
+def test_published_restore_with_wrong_final_name_is_rejected_immutably(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    final_directory_name: str | None,
+) -> None:
+    source, destination, restore_id = _published_restore_without_receipt(tmp_path, monkeypatch)
+    database = Database.open(destination / "firmquant.sqlite3")
+    try:
+        with database.transaction():
+            database.write("DROP TRIGGER restore_operations_forward_only")
+            database.write("DROP TRIGGER restore_operations_publication_output_guard")
+            database.write(
+                "UPDATE restore_operations SET final_directory_name=? WHERE restore_id=?",
+                (final_directory_name, restore_id),
+            )
+    finally:
+        database.close()
+    before = _tree_bytes(destination)
+
+    with pytest.raises(BackupVerificationError, match=r"destination|directory|publication"):
+        restore_backup(source, destination, restored_at=NOW)
+
+    assert _tree_bytes(destination) == before
