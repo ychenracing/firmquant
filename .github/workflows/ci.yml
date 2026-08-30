@@ -57,18 +57,21 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ychenracing/uquant
-          ref: 105695aacd3d1c7e62705f64188da88d202db4cd
+          ref: a17322f6330953a27c77f70d463a713c9a48ebc9
           path: .uquant-source
           persist-credentials: false
       - name: Exclude locked uquant checkout from firmquant Git identity
         if: runner.os == 'Linux'
         shell: bash
         run: printf '%s\n' '.uquant-source/' >> .git/info/exclude
+      - name: Verify detached uquant source identity
+        if: runner.os == 'Linux'
+        run: uv run python scripts/verify_source_baseline.py --source-root .uquant-source
       - name: Full tests with branch coverage
         if: runner.os == 'Linux'
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
-          PYTHONPATH: ${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
         run: uv run pytest --cov=firmquant --cov-branch --cov-fail-under=85
       - name: Windows unit tests
         if: runner.os == 'Windows'
@@ -89,7 +92,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ychenracing/uquant
-          ref: 105695aacd3d1c7e62705f64188da88d202db4cd
+          ref: a17322f6330953a27c77f70d463a713c9a48ebc9
           path: .uquant-source
           persist-credentials: false
       - name: Set up Python
@@ -103,6 +106,8 @@ jobs:
           enable-cache: true
       - name: Sync locked environment
         run: uv sync --frozen --extra dev
+      - name: Verify detached source and installed public contract identity
+        run: uv run python scripts/verify_source_baseline.py --source-root .uquant-source
       - name: Run strategy integration and exact parity
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source

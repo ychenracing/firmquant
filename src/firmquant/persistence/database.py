@@ -98,7 +98,13 @@ class Database:
         return database
 
     @classmethod
-    def open_read_only(cls, path: Path, *, busy_timeout_ms: int = 5_000) -> Database:
+    def open_read_only(
+        cls,
+        path: Path,
+        *,
+        busy_timeout_ms: int = 5_000,
+        immutable: bool = False,
+    ) -> Database:
         """Open and verify an existing ledger without migration or write authority."""
 
         if isinstance(busy_timeout_ms, bool) or not isinstance(busy_timeout_ms, int):
@@ -112,8 +118,9 @@ class Database:
             raise DatabaseUnavailable("read-only database does not exist")
         connection: sqlite3.Connection | None = None
         try:
+            immutable_query = "&immutable=1" if immutable else ""
             connection = sqlite3.connect(
-                database_path.resolve(strict=True).as_uri() + "?mode=ro",
+                database_path.resolve(strict=True).as_uri() + "?mode=ro" + immutable_query,
                 timeout=busy_timeout_ms / 1_000,
                 isolation_level=None,
                 check_same_thread=True,

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from firmquant.application.operations import OperatorCommandDenied, OperatorReconciliation
+from firmquant.application.production_identity import configuration_sha256
 from firmquant.application.production_runtime import ProductionRuntimeFactory
 from firmquant.application.runtime import ReadOnlyBrokerSession
 from firmquant.broker.gateway import BrokerGateway
@@ -530,8 +531,8 @@ class ConfiguredOperatorPorts:
 
     def _configuration_sha256(self) -> str:
         try:
-            return hashlib.sha256(self._config_path.read_bytes()).hexdigest()
-        except OSError as error:
+            return configuration_sha256(self._config_path)
+        except RuntimeError as error:
             raise OperatorCommandDenied("CONFIGURATION_UNAVAILABLE") from error
 
     @staticmethod

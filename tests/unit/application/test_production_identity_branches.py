@@ -9,6 +9,7 @@ import pytest
 
 import firmquant.application.production_identity as identity
 import tests.unit.application.test_production_services_acceptance as base
+from firmquant.build_identity import load_locked_source_identity
 from firmquant.config import Mode
 
 
@@ -111,3 +112,42 @@ def test_current_clean_commit_requires_git_and_valid_clean_identity(
     monkeypatch.setattr(identity, "load_locked_source_identity", lambda: LockedIdentity())
     assert identity.current_clean_firmquant_commit(tmp_path) == "c" * 40
     assert verified_roots == [tmp_path.resolve()]
+
+
+def test_deployment_identity_consumes_locked_source_and_binds_semantics_and_caps(
+    tmp_path: Path,
+) -> None:
+    settings, config = base.settings_for(tmp_path, Mode.CANARY)
+    source = load_locked_source_identity()
+
+    first = identity.DeploymentIdentity.from_inputs(
+        firmquant_commit="a" * 40,
+        source_identity=source,
+        settings=settings,
+        raw_config_sha256=identity.configuration_sha256(config),
+        xtquant_safety_manifest_sha256="b" * 64,
+        account_id_hash="c" * 64,
+        account_authority_epoch=4,
+        mode_epoch=5,
+    )
+    stricter = settings.model_copy(
+        update={"execution": settings.execution.model_copy(update={"max_quote_age_seconds": 4})}
+    )
+    changed = identity.DeploymentIdentity.from_inputs(
+        firmquant_commit="a" * 40,
+        source_identity=source,
+        settings=stricter,
+        raw_config_sha256=identity.configuration_sha256(config),
+        xtquant_safety_manifest_sha256="b" * 64,
+        account_id_hash="c" * 64,
+        account_authority_epoch=4,
+        mode_epoch=5,
+    )
+
+    assert first.uquant_commit == source.uquant_commit
+    assert first.uquant_tree == source.uquant_tree
+    assert first.uquant_package_manifest_sha256 == source.uquant_package_manifest_sha256
+    assert first.uquant_config_fingerprint == source.config_fingerprint
+    assert first.semantic_config_sha256 != changed.semantic_config_sha256
+    assert first.production_policy_sha256 != changed.production_policy_sha256
+    assert first.caps_sha256 == changed.caps_sha256

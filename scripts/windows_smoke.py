@@ -240,7 +240,7 @@ def run_smoke() -> dict[str, object]:
             receipt.bundle_path,
             expected_manifest_sha256=receipt.manifest_sha256,
         )
-        if verification.schema_version != CURRENT_SCHEMA_VERSION:
+        if verification.operational_schema_version != CURRENT_SCHEMA_VERSION:
             raise AssertionError("restored database schema is not current")
         if verification.audit_count != 1:
             raise AssertionError("restored audit chain does not match the source")

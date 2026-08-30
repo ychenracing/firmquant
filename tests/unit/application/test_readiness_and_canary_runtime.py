@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -12,7 +13,11 @@ from firmquant.application import execution_evidence_runtime as evidence_runtime
 from firmquant.application import live_readiness_runtime as readiness_runtime
 from firmquant.application.execution_evidence import BlockerCode
 from firmquant.application.execution_evidence_runtime import RuntimeEvidenceError
-from firmquant.config import Settings
+from firmquant.application.production_identity import (
+    DeploymentIdentity,
+    OperationalEvidenceIdentity,
+)
+from firmquant.config import Mode, Settings
 from firmquant.domain.broker_facts import AccountType, BrokerAccountFact, BrokerSnapshot
 from firmquant.domain.values import Money
 from firmquant.persistence.audit import AuditLedger
@@ -47,6 +52,7 @@ def _canary_payload() -> dict[str, object]:
     return {
         "schema": "firmquant.canary-plan-evidence.v1",
         "execution_session": SESSION.isoformat(),
+        "strategy_session": SESSION.isoformat(),
         "decision_id": "decision-canary",
         "plan_id": "plan-canary",
         "firmquant_commit": "1" * 40,
@@ -82,6 +88,43 @@ def _canary_payload() -> dict[str, object]:
         ],
         "created_at": NOW.isoformat(),
     }
+
+
+def _canary_operational_identity() -> OperationalEvidenceIdentity:
+    deployment = DeploymentIdentity(
+        firmquant_commit="1" * 40,
+        uquant_commit="2" * 40,
+        uquant_tree="6" * 40,
+        uquant_package_manifest_sha256="7" * 64,
+        uquant_code_fingerprint="8" * 64,
+        uquant_config_fingerprint="9" * 64,
+        semantic_config_sha256="3" * 64,
+        raw_config_sha256="a" * 64,
+        xtquant_safety_manifest_sha256="b" * 64,
+        account_id_hash=ACCOUNT,
+        account_authority_epoch=2,
+        mode_epoch=3,
+        mode=Mode.CANARY,
+        caps_sha256="c" * 64,
+        production_policy_sha256="d" * 64,
+    )
+    return OperationalEvidenceIdentity(
+        deployment_identity=deployment,
+        account_state_sha256="e" * 64,
+        broker_snapshot_id="snapshot-eod",
+        broker_snapshot_sha256="f" * 64,
+        broker_event_watermark=0,
+        snapshot_started_at=NOW,
+        snapshot_completed_at=NOW,
+        snapshot_duration_ms=17,
+        calendar_sha256="5" * 64,
+        active_data_generation_sha256="4" * 64,
+        strategy_data_manifest_sha256="4" * 64,
+        strategy_session=SESSION,
+        decision_id="decision-canary",
+        phase="EOD",
+        kind="CANARY_EXECUTION",
+    )
 
 
 def test_collect_live_readiness_empty_authority_surface_fails_closed(
@@ -454,6 +497,7 @@ def test_canary_missing_execution_becomes_unknown_observation(tmp_path: Path) ->
             eod_snapshot=_snapshot(),
             session=SESSION,
             created_at=NOW,
+            operational_identity=_canary_operational_identity(),
         )
         assert observed is not None
         assert observed.unknown_count == 1
@@ -464,6 +508,40 @@ def test_canary_missing_execution_becomes_unknown_observation(tmp_path: Path) ->
         assert observed.planned_orders[0].blocker is BlockerCode.UNKNOWN
         assert observed.planning_blockers[0].reason_code == "TARGET_ALREADY_SATISFIED"
         assert observed.targets[0].target_shares == 100
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        replace(_canary_operational_identity(), strategy_session=date(2020, 1, 1)),
+        replace(_canary_operational_identity(), phase="READINESS"),
+        replace(_canary_operational_identity(), kind="BACKUP"),
+    ],
+)
+def test_canary_operational_context_must_match_durable_plan(
+    tmp_path: Path,
+    identity: OperationalEvidenceIdentity,
+) -> None:
+    database = Database.open(tmp_path / "ledger.sqlite3")
+    try:
+        with database.transaction():
+            AuditLedger(database).append(
+                audit_event_id="canary-plan:plan-canary",
+                category="CANARY_PLAN_EVIDENCE",
+                actor="execution-evidence",
+                payload=_canary_payload(),
+                created_at=NOW,
+            )
+        with pytest.raises(RuntimeEvidenceError, match=r"strategy session|phase|kind"):
+            evidence_runtime.finalize_canary_observation(
+                database=database,
+                eod_snapshot=_snapshot(),
+                session=SESSION,
+                created_at=NOW,
+                operational_identity=identity,
+            )
     finally:
         database.close()
 
@@ -511,6 +589,7 @@ def test_canary_finalize_full_execution_path(tmp_path: Path, monkeypatch: pytest
             eod_snapshot=_snapshot(),
             session=SESSION,
             created_at=NOW,
+            operational_identity=_canary_operational_identity(),
         )
         assert observed is not None
         assert observed.submit_count == 1
@@ -567,6 +646,7 @@ def test_canary_decoder_and_blocker_edges_fail_closed(tmp_path: Path) -> None:
                 eod_snapshot=_snapshot(),
                 session=SESSION,
                 created_at=NOW,
+                operational_identity=_canary_operational_identity(),
             )
     finally:
         database.close()

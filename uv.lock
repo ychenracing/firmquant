@@ -223,7 +223,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "tzdata", specifier = ">=2025.2" },
-    { name = "uquant", git = "https://github.com/ychenracing/uquant.git?rev=105695aacd3d1c7e62705f64188da88d202db4cd" },
+    { name = "uquant", git = "https://github.com/ychenracing/uquant.git?rev=a17322f6330953a27c77f70d463a713c9a48ebc9" },
 ]
 provides-extras = ["dev"]
 
@@ -826,7 +826,7 @@ wheels = [
 [[package]]
 name = "uquant"
 version = "1.1.0"
-source = { git = "https://github.com/ychenracing/uquant.git?rev=105695aacd3d1c7e62705f64188da88d202db4cd#105695aacd3d1c7e62705f64188da88d202db4cd" }
+source = { git = "https://github.com/ychenracing/uquant.git?rev=a17322f6330953a27c77f70d463a713c9a48ebc9#a17322f6330953a27c77f70d463a713c9a48ebc9" }
 dependencies = [
     { name = "numpy" },
     { name = "pandas" },

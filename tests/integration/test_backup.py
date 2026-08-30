@@ -50,7 +50,8 @@ def test_backup_uses_online_copy_atomic_bundle_and_restore_verification(tmp_path
     assert verification.database_sha256 == receipt.database_sha256
     assert verification.account_state_sha256 == receipt.account_state_sha256
     assert verification.audit_count == 1
-    assert verification.schema_version == CURRENT_SCHEMA_VERSION
+    assert verification.schema_version == 1
+    assert verification.operational_schema_version == CURRENT_SCHEMA_VERSION
     assert {path.name for path in receipt.bundle_path.iterdir()} == {
         "account_state.json",
         "firmquant.sqlite3",
@@ -78,6 +79,31 @@ def test_corrupt_backup_is_rejected_without_deleting_incident_evidence(tmp_path:
 
     assert receipt.bundle_path.is_dir()
     assert backup_database.read_bytes() == b"corrupt"
+
+
+def test_legacy_verification_is_byte_and_directory_non_mutating(tmp_path: Path) -> None:
+    database = _database_with_audit(tmp_path / "firmquant.sqlite3")
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    try:
+        receipt = backup_state(
+            database,
+            backup_root,
+            created_at=datetime(2026, 8, 25, 2, tzinfo=UTC),
+        )
+    finally:
+        database.close()
+    before_names = {path.name for path in receipt.bundle_path.iterdir()}
+    before_database = (receipt.bundle_path / "firmquant.sqlite3").read_bytes()
+
+    first = verify_backup(receipt.bundle_path)
+    second = verify_backup(receipt.bundle_path)
+
+    assert first == second
+    assert {path.name for path in receipt.bundle_path.iterdir()} == before_names
+    assert (receipt.bundle_path / "firmquant.sqlite3").read_bytes() == before_database
+    assert not (receipt.bundle_path / "firmquant.sqlite3-wal").exists()
+    assert not (receipt.bundle_path / "firmquant.sqlite3-shm").exists()
 
 
 def test_backup_manifest_never_contains_source_paths_or_account_contents(tmp_path: Path) -> None:

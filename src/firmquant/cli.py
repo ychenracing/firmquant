@@ -52,6 +52,7 @@ _COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("live-readiness", "只读汇总全部机器可验证生产准入门槛"),
     ("backup", "创建一致性状态备份"),
     ("verify-backup", "执行备份恢复验证"),
+    ("restore-backup", "验证 schema-v3 备份并恢复到空目录"),
     ("data-candidates", "查看隔离的历史数据重写候选"),
     ("verify-data-candidate", "重新验证历史数据重写候选完整性"),
     ("approve-data-candidate", "交互式批准并原子切换历史数据 generation"),
@@ -145,6 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
             subparser.add_argument("--end", dest="end_session", type=_session_date, required=True)
         elif name == "verify-backup":
             subparser.add_argument("--bundle", type=Path, required=True, help="备份 bundle 目录")
+        elif name == "restore-backup":
+            subparser.add_argument("--bundle", type=Path, required=True, help="schema-v3 备份 bundle 目录")
+            subparser.add_argument(
+                "--destination",
+                type=Path,
+                required=True,
+                help="不存在或严格空的固定恢复目录",
+            )
         elif name == "backup":
             subparser.add_argument(
                 "--account-state",
@@ -206,6 +215,7 @@ def _request(arguments: argparse.Namespace) -> OperatorRequest:
         end_session=cast(date | None, getattr(arguments, "end_session", None)),
         events_path=cast(Path | None, getattr(arguments, "events", None)),
         bundle_path=cast(Path | None, getattr(arguments, "bundle", None)),
+        destination_path=cast(Path | None, getattr(arguments, "destination", None)),
         account_state_path=cast(Path | None, getattr(arguments, "account_state", None)),
         ttl_seconds=int(getattr(arguments, "ttl_seconds", 300)),
         limit=int(getattr(arguments, "limit", 100)),

@@ -28,6 +28,15 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Preserve exact uquant source bytes
+        run: git config --global core.autocrlf false
+      - name: Checkout locked uquant source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ychenracing/uquant
+          ref: a17322f6330953a27c77f70d463a713c9a48ebc9
+          path: .uquant-source
+          persist-credentials: false
       - name: Set up Python 3.12
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -37,18 +46,19 @@ jobs:
         with:
           version: "0.11.33"
           enable-cache: true
-      - name: Preserve exact uquant source bytes
-        run: git config --global core.autocrlf false
       - name: Sync exact locked environment
         run: uv sync --frozen --extra dev
       - name: Verify locked uquant identity
-        run: uv run python scripts/verify_source_baseline.py
+        run: uv run python scripts/verify_source_baseline.py --source-root .uquant-source
       - name: Run Windows-safe persistence and doctor tests
         run: >-
           uv run pytest
           tests/unit/observability/test_doctor.py
           tests/integration/test_writer_lease.py
           tests/integration/test_backup.py
+          tests/integration/test_backup_v3_restore.py
+          tests/integration/test_backup_v3_correction.py
+          tests/unit/persistence/test_backup_windows_publication.py
           tests/contract/test_xtquant_adapter.py
           tests/integration/test_xtquant_import_smoke.py
           -q

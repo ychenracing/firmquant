@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from uquant.account import economic_state_sha256
+from uquant.types import AccountState
 
 from firmquant.strategy.account_sync import StrategySyncError, sync_account
+from firmquant.strategy.runtime_account import _load_account
 from tests.fixtures.broker_snapshots import (
     cancelled_buy_snapshot,
     completed_buy_snapshot,
@@ -48,3 +52,19 @@ def test_broker_cancellation_confirmation_closes_uquant_pending_order() -> None:
     assert receipt.pending_orders == 0
     assert account.pending_orders == []
     assert account.order_ledger[0].status == "CANCELLED"
+
+
+def test_old_schema_five_account_requires_reviewed_rebaseline(tmp_path: Path) -> None:
+    account = AccountState.empty(1_000.0)
+    account.code_hash = "1" * 64
+    account.data_hash = "2" * 64
+    payload = account.to_dict()
+    payload["schema_version"] = 5
+    path = tmp_path / "schema-five-account.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot be loaded") as captured:
+        _load_account(path)
+
+    assert captured.value.__cause__ is not None
+    assert "schema 5" in str(captured.value.__cause__)

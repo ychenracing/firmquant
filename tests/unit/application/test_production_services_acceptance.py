@@ -23,6 +23,10 @@ from firmquant.application.execution_evidence import (
     TargetObservation,
 )
 from firmquant.application.production_events import ProductionEventJournal
+from firmquant.application.production_identity import (
+    DeploymentIdentity,
+    OperationalEvidenceIdentity,
+)
 from firmquant.application.production_services import (
     ProductionServiceHooks,
     ProductionServicesUnavailable,
@@ -39,7 +43,7 @@ from firmquant.config import (
     PathSettings,
     Settings,
 )
-from firmquant.domain.broker_facts import MarketSessionStatus
+from firmquant.domain.broker_facts import BrokerSnapshot, MarketSessionStatus
 from firmquant.domain.states import RuntimeState
 from firmquant.domain.values import Money, Shares, Symbol
 from firmquant.execution.planner import ExecutionPlanner
@@ -351,6 +355,8 @@ def hook_case(
     mode: Mode = Mode.SHADOW,
     status: MarketSessionStatus = MarketSessionStatus.OPEN,
     clock=lambda: NOW,
+    operational_identity_provider=None,
+    promotion_identity_provider=None,
 ):
     settings, config = settings_for(root, mode)
     identity = ps._RuntimeIdentity(
@@ -381,6 +387,8 @@ def hook_case(
             identity=identity,
             safety_manifest=safety_manifest(),
             clock=clock,
+            operational_identity_provider=operational_identity_provider,
+            promotion_identity_provider=promotion_identity_provider,
         )
         try:
             yield hooks, writer, broker, account_repository
@@ -576,8 +584,35 @@ def test_startup_requires_recovery_then_smoke_reconciliation_and_promotion(
 
 
 def test_canary_promotion_gate_is_identity_bound(tmp_path: Path) -> None:
-    with hook_case(tmp_path, mode=Mode.CANARY) as (hooks, _writer, broker, _accounts):
+    identities: dict[EvidenceStage, DeploymentIdentity] = {}
+
+    def promotion_identity(stage: EvidenceStage) -> DeploymentIdentity:
+        return identities[stage]
+
+    with hook_case(
+        tmp_path,
+        mode=Mode.CANARY,
+        promotion_identity_provider=promotion_identity,
+    ) as (hooks, _writer, broker, _accounts):
         account_hash = broker.query_account().account_id_hash
+        shadow_deployment = DeploymentIdentity(
+            firmquant_commit=hooks._identity.firmquant_commit,
+            uquant_commit=hooks._identity.uquant_commit,
+            uquant_tree="2" * 40,
+            uquant_package_manifest_sha256="3" * 64,
+            uquant_code_fingerprint="4" * 64,
+            uquant_config_fingerprint="5" * 64,
+            semantic_config_sha256=hooks._identity.promotion_config_sha256,
+            raw_config_sha256="6" * 64,
+            xtquant_safety_manifest_sha256="7" * 64,
+            account_id_hash=account_hash,
+            account_authority_epoch=2,
+            mode_epoch=3,
+            mode=Mode.SHADOW,
+            caps_sha256="8" * 64,
+            production_policy_sha256="9" * 64,
+        )
+        identities[EvidenceStage.SHADOW] = shadow_deployment
         with pytest.raises(ProductionServicesUnavailable, match="PROMOTION"):
             hooks._require_promotion(account_hash)
 
@@ -586,6 +621,24 @@ def test_canary_promotion_gate_is_identity_bound(tmp_path: Path) -> None:
         orders_per_session = max(1, thresholds.min_shadow_orders)
         for index in range(thresholds.min_shadow_sessions):
             session = date.fromordinal(EXECUTION_SESSION.toordinal() - thresholds.min_shadow_sessions + index)
+            decision_id = f"decision-shadow-{index}"
+            operational_identity = OperationalEvidenceIdentity(
+                deployment_identity=shadow_deployment,
+                account_state_sha256="b" * 64,
+                broker_snapshot_id=f"snapshot-shadow-{index}",
+                broker_snapshot_sha256="0" * 64,
+                broker_event_watermark=index,
+                snapshot_started_at=NOW,
+                snapshot_completed_at=NOW,
+                snapshot_duration_ms=17,
+                calendar_sha256="e" * 64,
+                active_data_generation_sha256="d" * 64,
+                strategy_data_manifest_sha256="d" * 64,
+                strategy_session=session,
+                decision_id=decision_id,
+                phase="EXECUTION",
+                kind="SHADOW_EXECUTION",
+            )
             target = TargetObservation(
                 symbol="600000.SH",
                 target_shares=100,
@@ -617,8 +670,9 @@ def test_canary_promotion_gate_is_identity_bound(tmp_path: Path) -> None:
                         account_sha256=account_hash,
                         data_sha256="d" * 64,
                         calendar_sha256="e" * 64,
+                        operational_identity=operational_identity,
                     ),
-                    decision_id=f"decision-shadow-{index}",
+                    decision_id=decision_id,
                     plan_id=f"plan-shadow-{index}",
                     portfolio_equity=Decimal("10000"),
                     planned_orders=orders,
@@ -722,8 +776,52 @@ def test_shadow_execution_records_hypothetical_orders_and_never_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with hook_case(tmp_path) as (hooks, _writer, broker, _accounts):
-        decision = decision_snapshot(include_sell=False, include_buy=True)
+    decision = decision_snapshot(include_sell=False, include_buy=True)
+
+    def identity_provider(
+        stage: EvidenceStage,
+        snapshot: BrokerSnapshot,
+    ) -> OperationalEvidenceIdentity:
+        assert stage is EvidenceStage.SHADOW
+        deployment = DeploymentIdentity(
+            firmquant_commit="f" * 40,
+            uquant_commit="1" * 40,
+            uquant_tree="2" * 40,
+            uquant_package_manifest_sha256="3" * 64,
+            uquant_code_fingerprint="4" * 64,
+            uquant_config_fingerprint="5" * 64,
+            semantic_config_sha256="c" * 64,
+            raw_config_sha256="6" * 64,
+            xtquant_safety_manifest_sha256="7" * 64,
+            account_id_hash=snapshot.account.account_id_hash,
+            account_authority_epoch=2,
+            mode_epoch=3,
+            mode=Mode.SHADOW,
+            caps_sha256="8" * 64,
+            production_policy_sha256="9" * 64,
+        )
+        return OperationalEvidenceIdentity(
+            deployment_identity=deployment,
+            account_state_sha256=decision.account_after_sha256,
+            broker_snapshot_id=snapshot.snapshot_id,
+            broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            broker_event_watermark=snapshot.broker_event_watermark,
+            snapshot_started_at=NOW,
+            snapshot_completed_at=NOW,
+            snapshot_duration_ms=17,
+            calendar_sha256=calendar().sha256,
+            active_data_generation_sha256=decision.data_manifest_sha256,
+            strategy_data_manifest_sha256=decision.data_manifest_sha256,
+            strategy_session=decision.strategy_session,
+            decision_id=decision.decision_id,
+            phase="EXECUTION",
+            kind="SHADOW_EXECUTION",
+        )
+
+    with hook_case(
+        tmp_path,
+        operational_identity_provider=identity_provider,
+    ) as (hooks, _writer, broker, _accounts):
         facts = execution_snapshot()
         plan = ExecutionPlanner().plan(decision, facts)
         hooks._shadow_execute(plan, decision, facts)
@@ -732,12 +830,16 @@ def test_shadow_execution_records_hypothetical_orders_and_never_writes(
         assert broker.submitted_commands == ()
         assert broker.cancelled_order_ids == ()
         assert hooks.real_order_calls() == 0
+        deployment = identity_provider(
+            EvidenceStage.SHADOW,
+            facts.broker_snapshot,
+        ).deployment_identity
         evidence = ps.PromotionStore(hooks._database).aggregate(
             stage=EvidenceStage.SHADOW,
-            firmquant_commit=hooks._identity.firmquant_commit,
-            uquant_commit=hooks._identity.uquant_commit,
-            config_sha256=hooks._identity.promotion_config_sha256,
-            account_hash=broker.query_account().account_id_hash,
+            deployment_identity_sha256=deployment.sha256,
+            account_authority_epoch=deployment.account_authority_epoch,
+            mode_epoch=deployment.mode_epoch,
+            mode=deployment.mode,
         )
         assert evidence is not None
         assert evidence.observed_sessions == 1
@@ -758,6 +860,18 @@ def test_shadow_execution_records_hypothetical_orders_and_never_writes(
         assert hooks._execute(EXECUTION_SESSION) == 1
         assert hooks._execute(EXECUTION_SESSION) == 0
         assert broker.submitted_commands == ()
+
+
+def test_shadow_execution_without_canonical_identity_provider_fails_closed(tmp_path: Path) -> None:
+    with hook_case(tmp_path) as (hooks, _writer, _broker, _accounts):
+        decision = decision_snapshot(include_sell=False, include_buy=True)
+        facts = execution_snapshot()
+        plan = ExecutionPlanner().plan(decision, facts)
+        with pytest.raises(
+            ProductionServicesUnavailable,
+            match="CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE",
+        ):
+            hooks._shadow_execute(plan, decision, facts)
 
 
 def test_execute_distinguishes_missing_decision_from_valid_frozen_decision(
@@ -867,6 +981,78 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
             active=lambda: SimpleNamespace(path=hooks._settings.paths.data_directory)
         )
         hooks._data_root = hooks._settings.paths.data_directory
+        deployment = DeploymentIdentity(
+            firmquant_commit="f" * 40,
+            uquant_commit="1" * 40,
+            uquant_tree="2" * 40,
+            uquant_package_manifest_sha256="3" * 64,
+            uquant_code_fingerprint="4" * 64,
+            uquant_config_fingerprint="5" * 64,
+            semantic_config_sha256="6" * 64,
+            raw_config_sha256=hooks._identity.config_sha256,
+            xtquant_safety_manifest_sha256="8" * 64,
+            account_id_hash=snapshot.account.account_id_hash,
+            account_authority_epoch=1,
+            mode_epoch=1,
+            mode=Mode.SHADOW,
+            caps_sha256="9" * 64,
+            production_policy_sha256="a" * 64,
+        )
+        operational = OperationalEvidenceIdentity(
+            deployment_identity=deployment,
+            account_state_sha256=decision.account_after_sha256,
+            broker_snapshot_id=snapshot.snapshot_id,
+            broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            broker_event_watermark=snapshot.broker_event_watermark,
+            snapshot_started_at=NOW,
+            snapshot_completed_at=NOW,
+            snapshot_duration_ms=1,
+            calendar_sha256="b" * 64,
+            active_data_generation_sha256="c" * 64,
+            strategy_data_manifest_sha256="d" * 64,
+            strategy_session=EXECUTION_SESSION,
+            decision_id=decision.decision_id,
+            phase="EOD",
+            kind="BACKUP",
+        )
+        wrong_mode = replace(
+            operational,
+            deployment_identity=replace(deployment, mode=Mode.CANARY),
+        )
+        supplied_identities = [
+            replace(operational, phase="STARTUP", kind="SMOKE"),
+            replace(operational, broker_snapshot_id="snapshot-other"),
+            wrong_mode,
+            operational,
+        ]
+        hooks._operational_identity_provider = lambda _stage, _snapshot: supplied_identities.pop(0)
+        with hooks._database.transaction():
+            hooks._database.write(
+                """
+                INSERT INTO account_authority_epochs(
+                    epoch,account_id_hash,account_state_sha256,deployment_identity_sha256,
+                    source_binding_id,payload_json,payload_sha256,created_at
+                ) VALUES(1,?,?,NULL,NULL,'{}',?,?)
+                """,
+                (
+                    snapshot.account.account_id_hash,
+                    decision.account_after_sha256,
+                    "e" * 64,
+                    NOW.isoformat(),
+                ),
+            )
+            hooks._database.write("INSERT INTO account_authority_active(singleton_id,epoch) VALUES(1,1)")
+            hooks._database.write(
+                """
+                INSERT INTO mode_epochs(
+                    epoch,mode,deployment_identity_sha256,caps_sha256,
+                    payload_json,payload_sha256,created_at
+                ) VALUES(1,'SHADOW',NULL,NULL,'{}',?,?)
+                """,
+                ("f" * 64, NOW.isoformat()),
+            )
+            hooks._database.write("INSERT INTO mode_epoch_active(singleton_id,epoch) VALUES(1,1)")
+        hooks._snapshots.persist(snapshot, started_at=NOW, completed_at=NOW, duration_ms=1)
         monkeypatch.setattr(
             hooks,
             "_reconcile",
@@ -876,6 +1062,7 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
                 Account(),
             ),
         )
+        monkeypatch.setattr(hooks, "_capture", lambda: snapshot)
         monkeypatch.setattr(
             hooks._data_updater,
             "update",
@@ -921,8 +1108,18 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
                 events.append("backup") or SimpleNamespace(backup_id="backup-1", manifest_sha256="a" * 64)
             ),
         )
+        monkeypatch.setattr(hooks._accounts.store, "hash_file", lambda _path: "e" * 64)
 
-        assert hooks._close_session(EXECUTION_SESSION) == (1, 1)
+        with pytest.raises(ProductionServicesUnavailable, match="BACKUP_OPERATIONAL_IDENTITY"):
+            hooks._close_session(EXECUTION_SESSION)
+        assert events == ["reconcile", "data", "reload", "decision", "report"]
+        assert hooks._close.load(EXECUTION_SESSION, CloseStep.BACKUP_VERIFIED) is None
+        with pytest.raises(ProductionServicesUnavailable, match="BACKUP_OPERATIONAL_IDENTITY"):
+            hooks._close_session(EXECUTION_SESSION)
+        with pytest.raises(ProductionServicesUnavailable, match="BACKUP_OPERATIONAL_IDENTITY"):
+            hooks._close_session(EXECUTION_SESSION)
+
+        assert hooks._close_session(EXECUTION_SESSION) == (0, 1)
         assert events == ["reconcile", "data", "reload", "decision", "report", "backup"]
         assert hooks._close.completed(EXECUTION_SESSION) is not None
         assert hooks._close.load(EXECUTION_SESSION, CloseStep.REPORT_PUBLISHED) is not None
@@ -930,6 +1127,13 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
         before = list(events)
         assert hooks._close_session(EXECUTION_SESSION) == (0, 0)
         assert events == before
+
+
+def test_backup_evidence_stage_never_relabels_live_as_canary() -> None:
+    assert ps._backup_evidence_stage(Mode.SHADOW) is EvidenceStage.SHADOW
+    assert ps._backup_evidence_stage(Mode.CANARY) is EvidenceStage.CANARY
+    with pytest.raises(ProductionServicesUnavailable, match=r"BACKUP.*LIVE"):
+        ps._backup_evidence_stage(Mode.LIVE)
 
 
 def test_builder_is_fail_closed_and_composes_single_daemon_path(

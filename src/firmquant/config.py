@@ -81,6 +81,7 @@ class BrokerAdapter(StrEnum):
 
 
 PositiveInteger = Annotated[int, Field(gt=0, strict=True)]
+NonNegativeInteger = Annotated[int, Field(ge=0, strict=True)]
 PositiveNotional = Annotated[
     Decimal,
     Field(gt=Decimal("0"), max_digits=20, decimal_places=4),
@@ -164,6 +165,7 @@ class ExecutionRuntimeSettings(SafeConfigModel):
     max_equity_change_fraction: SafeFraction = Decimal("0.10")
     max_intraday_loss_fraction: SafeFraction = Decimal("0.08")
     max_capital_drawdown_fraction: SafeFraction = Decimal("0.25")
+    max_arm_ttl_seconds: PositiveInteger = 900
 
     @field_validator(
         "max_price_deviation_bps",
@@ -194,12 +196,12 @@ class ExecutionRuntimeSettings(SafeConfigModel):
 class PromotionSettings(SafeConfigModel):
     """Frozen evidence thresholds required before a real-money mode can be armed."""
 
-    min_shadow_sessions: PositiveInteger = 20
-    min_shadow_orders: PositiveInteger = 50
+    min_shadow_sessions: NonNegativeInteger = 20
+    min_shadow_orders: NonNegativeInteger = 50
     max_target_tracking_error: SafeFraction = Decimal("0.05")
-    min_canary_sessions: PositiveInteger = 3
-    min_canary_orders: PositiveInteger = 3
-    min_canary_fills: PositiveInteger = 1
+    min_canary_sessions: NonNegativeInteger = 3
+    min_canary_orders: NonNegativeInteger = 3
+    min_canary_fills: NonNegativeInteger = 1
     max_canary_target_tracking_error: SafeFraction = Decimal("0.05")
 
     @field_validator(
@@ -267,6 +269,9 @@ class Settings(SafeConfigModel):
 
     @model_validator(mode="after")
     def validate_mode_authority(self) -> Self:
+        from firmquant.risk.production_policy import ProductionSafetyPolicy
+
+        ProductionSafetyPolicy.from_settings(self)
         read_only_modes = {Mode.REPLAY, Mode.PAPER, Mode.SHADOW}
         real_modes = {Mode.CANARY, Mode.LIVE}
         if self.mode in read_only_modes and self.live_trading_enabled:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import subprocess
 import zipfile
 from collections.abc import Callable
@@ -204,6 +205,29 @@ def test_runtime_contract_fingerprints_fail_closed(monkeypatch: pytest.MonkeyPat
         _verify_runtime_contracts(identity)
 
 
+def test_public_api_contract_requires_matching_embedded_seal(tmp_path: Path) -> None:
+    raw = json.dumps(
+        {
+            "contract": {"value": 1},
+            "contract_id": "uquant-public-api-v1",
+            "contract_sha256": "0" * 64,
+            "recorded_on": "2026-08-28",
+            "schema_version": 1,
+        },
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8")
+    contract = tmp_path / "public_api_contract.json"
+    contract.write_bytes(raw)
+
+    with pytest.raises(SourceIdentityError, match="public API contract SHA-256 mismatch"):
+        build_identity._verify_public_api_contract(
+            contract,
+            expected_file_sha256=hashlib.sha256(raw).hexdigest(),
+            expected_contract_sha256=hashlib.sha256(b'{"value":1}').hexdigest(),
+        )
+
+
 def test_source_checkout_must_match_exact_reviewed_commit(tmp_path: Path) -> None:
     repository = tmp_path / "uquant"
     repository.mkdir()
@@ -213,9 +237,41 @@ def test_source_checkout_must_match_exact_reviewed_commit(tmp_path: Path) -> Non
     (repository / "file.txt").write_text("content", encoding="utf-8")
     subprocess.run(["git", "add", "file.txt"], cwd=repository, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "test"], cwd=repository, check=True)
+    subprocess.run(["git", "checkout", "--detach"], cwd=repository, check=True, capture_output=True)
 
     with pytest.raises(SourceIdentityError, match="uquant commit mismatch"):
         verify_uquant_source_checkout(load_locked_source_identity(), repository)
+
+
+def test_source_checkout_must_be_detached(tmp_path: Path) -> None:
+    configured_source = os.environ.get("FIRMQUANT_UQUANT_SOURCE_CHECKOUT")
+    if configured_source is None:
+        pytest.skip("set FIRMQUANT_UQUANT_SOURCE_CHECKOUT to test checkout posture")
+    identity = load_locked_source_identity()
+    repository = tmp_path / "uquant"
+    subprocess.run(
+        ["git", "clone", "--no-checkout", configured_source, str(repository)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "--detach", identity.uquant_commit],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "switch", "-c", "attached"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(SourceIdentityError, match="detached"):
+        verify_uquant_source_checkout(identity, repository)
 
 
 def _wheel(path: Path, members: dict[str, bytes]) -> None:

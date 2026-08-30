@@ -32,6 +32,8 @@ from firmquant.application.production_daemon import (
 )
 from firmquant.application.production_events import ProductionEventJournal
 from firmquant.application.production_identity import (
+    DeploymentIdentity,
+    OperationalEvidenceIdentity,
     configuration_sha256,
     current_clean_firmquant_commit,
     promotion_config_sha256,
@@ -65,7 +67,7 @@ from firmquant.persistence.account_authority import (
     ReviewedAccountAdjustmentRepository,
 )
 from firmquant.persistence.audit import AuditLedger
-from firmquant.persistence.backup import BackupBundleInputs, backup_state
+from firmquant.persistence.backup import BackupBundleInputs, BackupReason, backup_state
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
 from firmquant.persistence.production_recovery import ProductionRecoveryService
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
@@ -106,6 +108,41 @@ from firmquant.strategy.universe import UniversePolicy
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _POST_CLOSE = time(15, 5)
+
+
+def _backup_evidence_stage(mode: Mode) -> EvidenceStage:
+    if mode is Mode.SHADOW:
+        return EvidenceStage.SHADOW
+    if mode is Mode.CANARY:
+        return EvidenceStage.CANARY
+    if mode is Mode.LIVE:
+        raise ProductionServicesUnavailable("BACKUP_LIVE_OPERATIONAL_IDENTITY_UNVERIFIED")
+    raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_MODE_UNSUPPORTED")
+
+
+def _validate_backup_operational_identity(
+    identity: OperationalEvidenceIdentity,
+    *,
+    snapshot: BrokerSnapshot,
+    session: date,
+    decision_id: str,
+    settings_mode: Mode,
+) -> None:
+    deployment = identity.deployment_identity
+    if (
+        identity.phase != "EOD"
+        or identity.kind != "BACKUP"
+        or identity.strategy_session != session
+        or identity.decision_id != decision_id
+        or identity.broker_snapshot_id != snapshot.snapshot_id
+        or identity.broker_snapshot_sha256 != snapshot.raw_payload_sha256
+        or identity.broker_event_watermark != snapshot.broker_event_watermark
+        or deployment.account_id_hash != snapshot.account.account_id_hash
+        or deployment.mode is not settings_mode
+    ):
+        raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_FACT_MISMATCH")
+
+
 _REFERENCE_SYMBOLS = ("sh000300", "sh000682")
 _ACCOUNT_FILE = "uquant-account.json"
 _CALENDAR_FILE = "trading-calendar.json"
@@ -126,6 +163,18 @@ class _AccountPayload(Protocol):
 
 class _UquantExecutionConfig(Protocol):
     max_volume_participation: float
+
+
+class _OperationalIdentityProvider(Protocol):
+    def __call__(
+        self,
+        stage: EvidenceStage,
+        snapshot: BrokerSnapshot,
+    ) -> OperationalEvidenceIdentity: ...
+
+
+class _PromotionIdentityProvider(Protocol):
+    def __call__(self, stage: EvidenceStage) -> DeploymentIdentity: ...
 
 
 @dataclass(slots=True)
@@ -330,6 +379,8 @@ class ProductionServiceHooks:
         data_generation_store: DataGenerationStore | None = None,
         data_root: Path | None = None,
         data_reloader: Callable[[Path], None] | None = None,
+        operational_identity_provider: _OperationalIdentityProvider | None = None,
+        promotion_identity_provider: _PromotionIdentityProvider | None = None,
     ) -> None:
         self._config_path = config_path
         self._settings = settings
@@ -349,6 +400,8 @@ class ProductionServiceHooks:
         self._data_generations = data_generation_store
         self._data_root = Path(data_root) if data_root is not None else settings.paths.data_directory
         self._data_reloader = data_reloader
+        self._operational_identity_provider = operational_identity_provider
+        self._promotion_identity_provider = promotion_identity_provider
         self._close = CloseCheckpointStore(self._database)
         self._last_monotonic: float | None = None
         self._disconnect_started_monotonic: float | None = None
@@ -562,12 +615,18 @@ class ProductionServiceHooks:
             return
         thresholds = self._settings.promotion
         store = PromotionStore(self._database)
+        provider = self._promotion_identity_provider
+        if provider is None:
+            raise ProductionServicesUnavailable("CANONICAL_PROMOTION_IDENTITY_UNAVAILABLE")
+        shadow_identity = provider(EvidenceStage.SHADOW)
+        if shadow_identity.account_id_hash != account_hash:
+            raise ProductionServicesUnavailable("PROMOTION_ACCOUNT_IDENTITY_MISMATCH")
         if not store.qualifies(
             stage=EvidenceStage.SHADOW,
-            firmquant_commit=self._identity.firmquant_commit,
-            uquant_commit=self._identity.uquant_commit,
-            config_sha256=self._identity.promotion_config_sha256,
-            account_hash=account_hash,
+            deployment_identity_sha256=shadow_identity.sha256,
+            account_authority_epoch=shadow_identity.account_authority_epoch,
+            mode_epoch=shadow_identity.mode_epoch,
+            mode=shadow_identity.mode,
             min_sessions=thresholds.min_shadow_sessions,
             min_orders=thresholds.min_shadow_orders,
             max_tracking_error=thresholds.max_target_tracking_error,
@@ -575,12 +634,15 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable("SHADOW_PROMOTION_EVIDENCE_REQUIRED")
         if self._settings.mode is Mode.CANARY:
             return
+        canary_identity = provider(EvidenceStage.CANARY)
+        if canary_identity.account_id_hash != account_hash:
+            raise ProductionServicesUnavailable("PROMOTION_ACCOUNT_IDENTITY_MISMATCH")
         if not store.qualifies(
             stage=EvidenceStage.CANARY,
-            firmquant_commit=self._identity.firmquant_commit,
-            uquant_commit=self._identity.uquant_commit,
-            config_sha256=self._identity.promotion_config_sha256,
-            account_hash=account_hash,
+            deployment_identity_sha256=canary_identity.sha256,
+            account_authority_epoch=canary_identity.account_authority_epoch,
+            mode_epoch=canary_identity.mode_epoch,
+            mode=canary_identity.mode,
             min_sessions=thresholds.min_canary_sessions,
             min_orders=thresholds.min_canary_orders,
             min_fills=thresholds.min_canary_fills,
@@ -1132,6 +1194,10 @@ class ProductionServiceHooks:
         decision: DecisionSnapshot,
         facts: ExecutionBrokerSnapshot,
     ) -> None:
+        provider = self._operational_identity_provider
+        if provider is None:
+            raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
+        operational_identity = provider(EvidenceStage.SHADOW, facts.broker_snapshot)
         observation = build_shadow_observation(
             database=self._database,
             broker=self._broker,
@@ -1144,6 +1210,7 @@ class ProductionServiceHooks:
             calendar_sha256=self._calendar.sha256,
             safety_manifest=self._safety,
             created_at=self._now(),
+            operational_identity=operational_identity,
         )
         ExecutionEvidenceStore(self._database).append(observation)
         self._audit(
@@ -1315,11 +1382,15 @@ class ProductionServiceHooks:
                 eod_snapshot = self._capture()
             if eod_snapshot.session_date != session:
                 raise ProductionServicesUnavailable("CANARY_EOD_SNAPSHOT_SESSION_MISMATCH")
+            provider = self._operational_identity_provider
+            if provider is None:
+                raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
             canary = finalize_canary_observation(
                 database=self._database,
                 eod_snapshot=eod_snapshot,
                 session=session,
                 created_at=self._now(),
+                operational_identity=provider(EvidenceStage.CANARY, eod_snapshot),
             )
             if canary is not None:
                 ExecutionEvidenceStore(self._database).append(canary)
@@ -1404,6 +1475,96 @@ class ProductionServiceHooks:
             if safety_path is None:
                 raise ProductionServicesUnavailable("XTQUANT_SAFETY_MANIFEST_MISSING")
             strategy_manifest = self._data_root / ".firmquant-data-manifest.json"
+            if eod_snapshot is None:
+                eod_snapshot = self._capture()
+            if eod_snapshot.session_date != session:
+                raise ProductionServicesUnavailable("BACKUP_SNAPSHOT_SESSION_MISMATCH")
+            provider = self._operational_identity_provider
+            if provider is None:
+                raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
+            stage = _backup_evidence_stage(self._settings.mode)
+            operational_identity = provider(stage, eod_snapshot)
+            _validate_backup_operational_identity(
+                operational_identity,
+                snapshot=eod_snapshot,
+                session=session,
+                decision_id=decision_id,
+                settings_mode=self._settings.mode,
+            )
+            deployment_identity = operational_identity.deployment_identity
+            with self._database.transaction():
+                stored_deployment = self._database.query_one(
+                    """
+                    SELECT account_id_hash,account_authority_epoch,mode_epoch,mode,
+                           payload_json,payload_sha256
+                    FROM deployment_identities WHERE deployment_identity_sha256=?
+                    """,
+                    (deployment_identity.sha256,),
+                )
+                deployment_values = (
+                    deployment_identity.account_id_hash,
+                    deployment_identity.account_authority_epoch,
+                    deployment_identity.mode_epoch,
+                    deployment_identity.mode.value,
+                    deployment_identity.canonical_json,
+                    deployment_identity.sha256,
+                )
+                if stored_deployment is None:
+                    self._database.write(
+                        """
+                        INSERT INTO deployment_identities(
+                            deployment_identity_sha256,account_id_hash,account_authority_epoch,
+                            mode_epoch,mode,payload_json,payload_sha256,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?)
+                        """,
+                        (deployment_identity.sha256, *deployment_values, self._now().isoformat()),
+                    )
+                elif tuple(stored_deployment) != deployment_values:
+                    raise ProductionServicesUnavailable("BACKUP_DEPLOYMENT_IDENTITY_COLLISION")
+
+                receipt_id = "backup-evidence-" + operational_identity.sha256
+                stored_evidence = self._database.query_one(
+                    """
+                    SELECT receipt_id,deployment_identity_sha256,account_authority_epoch,
+                           mode_epoch,account_state_sha256,broker_snapshot_id,strategy_session,
+                           phase,kind,payload_json,payload_sha256
+                    FROM operational_evidence_receipts
+                    WHERE operational_evidence_identity_sha256=?
+                    """,
+                    (operational_identity.sha256,),
+                )
+                evidence_values = (
+                    receipt_id,
+                    deployment_identity.sha256,
+                    deployment_identity.account_authority_epoch,
+                    deployment_identity.mode_epoch,
+                    operational_identity.account_state_sha256,
+                    operational_identity.broker_snapshot_id,
+                    operational_identity.strategy_session.isoformat(),
+                    operational_identity.phase,
+                    operational_identity.kind,
+                    operational_identity.canonical_json,
+                    operational_identity.sha256,
+                )
+                if stored_evidence is None:
+                    self._database.write(
+                        """
+                        INSERT INTO operational_evidence_receipts(
+                            receipt_id,operational_evidence_identity_sha256,
+                            deployment_identity_sha256,account_authority_epoch,mode_epoch,
+                            account_state_sha256,broker_snapshot_id,strategy_session,phase,kind,
+                            payload_json,payload_sha256,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            receipt_id,
+                            operational_identity.sha256,
+                            *evidence_values[1:],
+                            self._now().isoformat(),
+                        ),
+                    )
+                elif tuple(stored_evidence) != evidence_values:
+                    raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_COLLISION")
             backup = backup_state(
                 self._database,
                 self._settings.paths.backup_directory,
@@ -1422,6 +1583,9 @@ class ProductionServiceHooks:
                     account_sha256=self._accounts.store.hash_file(self._accounts.path),
                     decision_id=decision_id,
                     strategy_session=session,
+                    reason=BackupReason.SESSION_CLOSE,
+                    deployment_identity=deployment_identity,
+                    operational_evidence_identity=operational_identity,
                 ),
             )
             backup_cp = self._close.append(

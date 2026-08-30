@@ -6,13 +6,13 @@
 
 ## 获取结论
 
-2026-08-25T17:07:02Z 获取并检查 `https://github.com/ychenracing/uquant.git`：
+2026-08-30 获取并检查 `https://github.com/ychenracing/uquant.git`：
 
 - 已知基线：`105695aacd3d1c7e62705f64188da88d202db4cd`
-- 获取时 `origin/main`：`105695aacd3d1c7e62705f64188da88d202db4cd`
-- 二者关系：完全相同（`identical`），不存在需要吸收的更新
-- commit tree：`e3e2832eb1321e6d45f103cab538aeb9c95852d3`
-- commit subject：`docs: repair source identity and reproducible build governance (#24)`
+- 锁定目标：`a17322f6330953a27c77f70d463a713c9a48ebc9`
+- 二者关系：目标是已知基线的后代（`descendant`）
+- commit tree：`846566bb6317ddbdcff729aa9fff7950fa5baa58`
+- commit subject：`docs: optimize AGENTS governance`
 - 检查来源：干净、detached、精确 commit 的 Git checkout
 
 ## 依赖与源码摘要
@@ -22,11 +22,13 @@
 | uquant 版本 | `1.1.0` |
 | uquant `pyproject.toml` | `36be3c7ac6c4ec5011552acf5456b3e44054ab20e036fff9007788c640c87920` |
 | uquant `uv.lock` | `4accf16535b5ac95b831c9289e0ad2ff21282dc5dfae3f05dd0fb095089d6a61` |
-| `economic_decision_v1` 源码面 | `2209a539bacbc01d90b29b9f0bb78ace4991016bee0d41f9e86f38ccf5af545e` |
-| `execution_account_v1` 源码面 | `df2675ebe560f5dc9089a51825aed23f499a35d10e2827c3a96f0a1d40189e0c` |
+| `economic_decision_v1` 源码面 | `d1ef7977ae482e46a920381e6af58791199ec8e1a02586dbe8df451e7d4696c9` |
+| `execution_account_v1` 源码面 | `2c686d470ecb156801d0dfbde555fcec6de20c81804125847fcccb5f1f304daf` |
 | 默认生产配置 | `dae4d79fdd813832c6ab152611437c13be1d38227c7280691874d3a9267d93d5` |
-| firmquant `pyproject.toml` | `c1ac05f9882ce3730c34a8b1778f008da682308abeda90759fb79a313f146ee3` |
-| firmquant `uv.lock` | `78cbd90dcfdf2bc031963e5f3273320689d43865c0cf5c9bc952eedf9df7250f` |
+| public API contract 原始文件 | `fa0b34250fd4d34547841388a4869f7fce459a6b95b98556c2678dcae38fd89a` |
+| public API contract canonical seal | `b485932a5eb10b0528c2d01008c6495f8f2e1e74ead04c737cafd9c665efa6b5` |
+| firmquant `pyproject.toml` | `60d1d40b59a155a1afe32039ca304c098452e847309a5056bab5ae76c689bcf7` |
+| firmquant `uv.lock` | `b8ce42ec34ab79029fcebc609dbcd0d0dfaa325e8434280c566d9c41fd04d37a` |
 
 firmquant 的 `pyproject.toml` 和 `uv.lock` 均把 uquant 锁到上述 40 位 commit；没有使用浮动 `main`、tag
 或版本范围。`uv.lock` 的解析结果也以同一 commit 作为 source fragment。
@@ -50,17 +52,17 @@ firmquant 的 `pyproject.toml` 和 `uv.lock` 均把 uquant 锁到上述 40 位 c
 | 产物项 | 值 |
 |---|---|
 | 文件名 | `uquant-1.1.0-py3-none-any.whl` |
-| 文件大小 | 2,081,479 bytes |
-| wheel SHA-256（两次相同） | `a5df13991b6696f22e8a1633b0dfb717d1a3647448462141318702844653137c` |
-| 全部 215 个成员的 manifest | `332a0aa1d66df53984baa569aa8b436328f3f134a485ed2c684f27da6c63b3ac` |
-| 209 个 `uquant/` 成员的 manifest | `35b3f686563647f462e6a5c0966c74e4cb4b2b5d15a9ea732cc177d65d0cc68f` |
+| 文件大小 | 2,345,276 bytes |
+| wheel SHA-256（两次相同） | `13ef26d5d34a86d8ee45641ef63bb1c8a01d381156cff323fcdc582b599189d8` |
+| 全部 226 个成员的 manifest | `455fc57f2027dd82a4e15cddc464d7be54df52ea1cbf6e8890cc21844e0a82ca` |
+| 220 个 `uquant/` 成员的 manifest | `a1b754b9875a6572c4ecbd5fa996336b93ecfb29f7c23157e5051af645e5cfa5` |
 | 非预期成员 | 无 |
 
 复现命令（只构建，不连接券商）：
 
 ```bash
-uv run python scripts/build_reproducible_wheels.py --verify-twice --output-dir dist/uquant
-uv run python scripts/verify_source_baseline.py --wheel dist/uquant/uquant-1.1.0-py3-none-any.whl
+uv run python scripts/build_reproducible_wheels.py --source-root .uquant-target --verify-twice --output-dir dist/uquant
+uv run python scripts/verify_source_baseline.py --source-root .uquant-target --wheel dist/uquant/uquant-1.1.0-py3-none-any.whl
 ```
 
 部署流水线必须保留 wheel SHA-256；仓库不提交构建后的 wheel。运行时校验完整的已安装 `uquant/` 文件
@@ -68,8 +70,8 @@ manifest、版本、配置 fingerprint、universe seal，并在 VCS direct URL �
 
 ## 已知上游打包边界
 
-锁定 wheel 不包含源码 fingerprint registry 引用的若干仓库级文件，因此直接从 site-packages 调用
+目标 wheel 不包含 public `code_fingerprint()` 必需的 `benchmarks/source_surface_registry.json`，因此直接从 site-packages 调用
 `uquant.engine.code_fingerprint()` 会失败关闭。firmquant 没有复制 ProductionEngine 或指纹算法，也没有修改
-uquant；证据、影响与安全边界记录在 [UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)。在策略适配器完成并通过 parity
-验证前，生产决策执行不可用。当前 `StrategyAdapter` 已在精确验证的干净源码 checkout 中通过严格 parity；wheel
-单独运行仍按上述缺口失败关闭，不能被当作无需源码身份验证的降级路径。
+uquant；证据、影响与安全边界记录在 [UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)。当前 `StrategyAdapter` 仅通过目标公开
+`ProductionEngine.decide()` 工作，在精确验证的干净 detached 源码 checkout 中通过严格 parity；wheel 单独运行仍按上述缺口
+失败关闭，不能被当作无需源码身份验证的降级路径，也不能用于声称 source/wheel 决策 trace 等价。

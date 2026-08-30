@@ -36,7 +36,12 @@ def _repository_root() -> Path:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify the immutable uquant source baseline.")
     parser.add_argument("--firmquant-root", type=Path)
-    parser.add_argument("--uquant-source-root", type=Path)
+    parser.add_argument(
+        "--source-root",
+        "--uquant-source-root",
+        dest="uquant_source_root",
+        type=Path,
+    )
     parser.add_argument("--wheel", type=Path)
     return parser
 
@@ -64,6 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "wheel_sha256": identity.wheel_sha256,
                 "economic_code_fingerprint": identity.economic_code_fingerprint,
                 "config_fingerprint": identity.config_fingerprint,
+                "public_api_contract_sha256": identity.public_api_contract_sha256,
                 "universe_sha256": identity.universe_sha256,
             },
             ensure_ascii=False,

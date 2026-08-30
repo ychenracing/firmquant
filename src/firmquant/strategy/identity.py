@@ -25,6 +25,7 @@ class StrategyIdentity:
     economic_code_fingerprint: str
     account_code_fingerprint: str
     config_fingerprint: str
+    public_api_contract_sha256: str
     canonical_universe_sha256: str
     universe_resource_sha256: str
     wheel_sha256: str
@@ -38,6 +39,7 @@ class StrategyIdentity:
             economic_code_fingerprint=source.economic_code_fingerprint,
             account_code_fingerprint=source.account_code_fingerprint,
             config_fingerprint=source.config_fingerprint,
+            public_api_contract_sha256=source.public_api_contract_sha256,
             canonical_universe_sha256=source.universe_sha256,
             universe_resource_sha256=source.universe_manifest_sha256,
             wheel_sha256=source.wheel_sha256,
@@ -60,6 +62,7 @@ class StrategyIdentity:
             "economic_code_fingerprint": "economic code fingerprint",
             "account_code_fingerprint": "account code fingerprint",
             "config_fingerprint": "config fingerprint",
+            "public_api_contract_sha256": "public API contract SHA-256",
             "canonical_universe_sha256": "canonical universe SHA-256",
             "universe_resource_sha256": "universe resource SHA-256",
             "wheel_sha256": "wheel SHA-256",

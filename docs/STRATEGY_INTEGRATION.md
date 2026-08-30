@@ -1,7 +1,7 @@
 # uquant 策略集成
 
-firmquant 将 uquant 视为锁定、不可改写的生产内核。依赖 commit、tree、依赖锁、生产源码面、默认配置 fingerprint、
-canonical universe seal 和确定性 wheel 摘要记录在 [SOURCE_BASELINE.md](SOURCE_BASELINE.md)，机器可读副本位于
+firmquant 将 uquant 视为锁定、不可改写的生产内核。依赖 commit、tree、依赖锁、public API contract、生产源码面、默认配置
+fingerprint、canonical universe seal 和确定性 wheel 摘要记录在 [SOURCE_BASELINE.md](SOURCE_BASELINE.md)，机器可读副本位于
 `src/firmquant/resources/source_identity.json`。
 
 ## 唯一决策路径
@@ -15,6 +15,8 @@ canonical universe seal 和确定性 wheel 摘要记录在 [SOURCE_BASELINE.md](
 5. 对相同 session 与相同输入生成稳定 decision id，拒绝覆盖输入变化后的旧快照。
 
 adapter 不实现第二套 ProductionEngine、PortfolioAllocator、Risk、Sentinel 或策略状态机，也不对经济结果做近似转换。
+adapter 不读取或写入 `_code_hash`；目标公开 `ProductionEngine.decide()` 负责把公开 `code_fingerprint()` 的结果推进到工作
+AccountState，firmquant 只验证决策后的公开账户身份结果。
 
 ## AccountState 边界
 
@@ -37,6 +39,9 @@ receipt，仍要求显式 reviewed AccountState，receipt 本身不能成为忽�
 
 Operational Ledger 只记录 broker id、订单尝试、事件、成交、对账和运行控制，不保存另一份策略目标或策略参数。
 
+目标 AccountState 当前 schema 为 8。schema 5 及其他旧 schema 在 `allow_legacy_schema=False` 的生产加载路径上保持失败关闭；
+firmquant 不调用上游自动迁移，也不猜测新增生命周期字段。旧账户必须等待后续已复核的 `rebaseline-account` 路径。
+
 ## DecisionSnapshot
 
 快照绑定 strategy session、decision id、firmquant/uquant commit、uquant code/config fingerprint、data/universe
@@ -56,9 +61,10 @@ firmquant 文档与配置不维护第二份策略数值默认值。CANARY caps �
 
 ## 运行形态与上游缺口
 
-锁定 wheel 可复现，但缺少 uquant 生产源码 fingerprint registry 与 reference registry。为避免复制策略资源，
+锁定 wheel 可复现，但缺少 public `code_fingerprint()` 必需的 `benchmarks/source_surface_registry.json`。为避免复制策略资源，
 StrategyAdapter 只允许在精确验证、干净且锁定 commit 的 uquant source checkout 中执行策略，并验证 engine 的模块来源。
-缺口、复现和希望上游提供的接口详见 [UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)。
+缺口、复现和希望上游提供的接口详见 [UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)。安装 wheel 的公开决策 trace 因此在进入经济决策前
+失败关闭；在上游 wheel 提供同一公开 fingerprint 合同前，不宣称 source/wheel trace parity。
 
 ## 等价性证据
 

@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 dependencies = [
     "pydantic>=2.11,<3",
     "tzdata>=2025.2",
-    "uquant @ git+https://github.com/ychenracing/uquant.git@105695aacd3d1c7e62705f64188da88d202db4cd",
+    "uquant @ git+https://github.com/ychenracing/uquant.git@a17322f6330953a27c77f70d463a713c9a48ebc9",
 ]
 
 [project.optional-dependencies]

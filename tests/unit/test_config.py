@@ -105,3 +105,37 @@ def test_unknown_configuration_field_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         load_settings(path)
+
+
+def test_deployment_caps_remain_explicit_and_bound_to_active_real_mode() -> None:
+    caps = DeploymentCaps(
+        max_order_notional=Decimal("10000"),
+        max_daily_submitted_notional=Decimal("30000"),
+        max_daily_filled_notional=Decimal("30000"),
+        max_symbol_notional=Decimal("20000"),
+        max_total_gross_notional=Decimal("50000"),
+    )
+
+    with pytest.raises(ValidationError, match="LIVE deployment caps"):
+        Settings(
+            mode=Mode.LIVE,
+            live_trading_enabled=True,
+            broker=BrokerSettings(adapter=BrokerAdapter.XTQUANT),
+            compliance=ComplianceSettings(
+                program_trading_report_confirmed=True,
+                broker_api_authorized=True,
+            ),
+            canary_caps=caps,
+        )
+
+    canary = Settings(
+        mode=Mode.CANARY,
+        live_trading_enabled=True,
+        broker=BrokerSettings(adapter=BrokerAdapter.XTQUANT),
+        compliance=ComplianceSettings(
+            program_trading_report_confirmed=True,
+            broker_api_authorized=True,
+        ),
+        canary_caps=caps,
+    )
+    assert canary.active_deployment_caps is caps
