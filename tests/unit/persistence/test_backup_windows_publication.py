@@ -1,11 +1,113 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import firmquant.persistence.backup as backup_module
 from firmquant.persistence.backup import BackupError
+
+
+class _FakeMoveFileExW:
+    def __init__(self, result: int) -> None:
+        self._result = result
+        self.argtypes: list[object] | None = None
+        self.restype: object | None = None
+        self.calls: list[tuple[str, str, int]] = []
+
+    def __call__(self, source: str, destination: str, flags: int) -> int:
+        self.calls.append((source, destination, flags))
+        return self._result
+
+
+def _install_fake_windows_ctypes(
+    monkeypatch: pytest.MonkeyPatch,
+    move_file_ex: _FakeMoveFileExW,
+    *,
+    get_last_error: Callable[[], int],
+) -> list[tuple[str, bool]]:
+    loader_calls: list[tuple[str, bool]] = []
+
+    def loader(name: str, *, use_last_error: bool) -> object:
+        loader_calls.append((name, use_last_error))
+        return SimpleNamespace(MoveFileExW=move_file_ex)
+
+    monkeypatch.setattr(backup_module.ctypes, "WinDLL", loader, raising=False)
+    monkeypatch.setattr(
+        backup_module.ctypes,
+        "get_last_error",
+        get_last_error,
+        raising=False,
+    )
+    return loader_calls
+
+
+@pytest.mark.parametrize("unavailable", ["WinDLL", "get_last_error"])
+def test_move_file_ex_rejects_unavailable_windows_ctypes_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unavailable: str,
+) -> None:
+    move_file_ex = _FakeMoveFileExW(1)
+    _install_fake_windows_ctypes(
+        monkeypatch,
+        move_file_ex,
+        get_last_error=lambda: 0,
+    )
+    monkeypatch.delattr(backup_module.ctypes, unavailable)
+
+    with pytest.raises(OSError, match="MoveFileExW is unavailable"):
+        backup_module._move_file_ex(tmp_path / "source", tmp_path / "destination", 0x8)
+
+    assert move_file_ex.calls == []
+
+
+def test_move_file_ex_configures_and_invokes_windows_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    move_file_ex = _FakeMoveFileExW(1)
+    loader_calls = _install_fake_windows_ctypes(
+        monkeypatch,
+        move_file_ex,
+        get_last_error=lambda: pytest.fail("last error queried after successful move"),
+    )
+
+    assert backup_module._move_file_ex(source, destination, 0x8) is True
+
+    assert loader_calls == [("kernel32", True)]
+    assert move_file_ex.argtypes == [
+        backup_module.ctypes.c_wchar_p,
+        backup_module.ctypes.c_wchar_p,
+        backup_module.ctypes.c_uint,
+    ]
+    assert move_file_ex.restype is backup_module.ctypes.c_int
+    assert move_file_ex.calls == [(str(source), str(destination), 0x8)]
+
+
+def test_move_file_ex_propagates_windows_last_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    move_file_ex = _FakeMoveFileExW(0)
+    loader_calls = _install_fake_windows_ctypes(
+        monkeypatch,
+        move_file_ex,
+        get_last_error=lambda: 1234,
+    )
+
+    with pytest.raises(OSError, match="MoveFileExW failed") as exc_info:
+        backup_module._move_file_ex(source, destination, 0x8)
+
+    assert exc_info.value.errno == 1234
+    assert loader_calls == [("kernel32", True)]
+    assert move_file_ex.calls == [(str(source), str(destination), 0x8)]
 
 
 def test_windows_publication_uses_only_movefile_write_through(
