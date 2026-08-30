@@ -139,3 +139,13 @@
 未经明确授权，禁止 `reset`、`clean`、`rebase`、force push、改写共享历史、删除分支或 worktree、丢弃 tracked/staged/unstaged/untracked 工作、覆盖无关改动或重做已完成并验证的工作。
 
 交接、合并或最终完成前，核验适用的当前分支、HEAD、远端功能分支 SHA、默认分支 SHA、merge-base、工作区、commits、push、reviews、checks 和准确测试结果。当前环境无法检查的字段标记为“待核验”或“不适用”，不得猜测。
+
+## Remote Task Bootstrap
+
+以下规则确保任务在实质修改前及重要里程碑时具备远端可恢复状态；它们补充而不替代仓库已有的业务、安全、量化、测试、CI、发布和 Git 安全规则，禁止删除或弱化这些专属规则。
+
+- 完成最小只读核验后、任何实质修改前，先建立远端任务启动 checkpoint。新任务必须从已核验的远端默认分支 SHA 创建功能分支；先搜索匹配的 PR、分支或 Issue，若已存在则原地继续，先刷新 PR、push 当前可恢复状态并核验远端 head，再开始修改。
+- 优先创建结构化空 bootstrap commit，完整记录：Objective、Acceptance criteria、Included and excluded scope、Non-negotiable constraints、Default branch and baseline SHA、Feature branch、Related PR/branch/Issue、Current verified state、Risks and unknowns、Next action。
+- 将 bootstrap commit push 到远端功能分支并核验远端 head SHA；只有核验完成后才开始实质修改。环境不支持空 commit 时，可使用仅存在于功能分支的临时文件 `.github/task-bootstrap/<task-slug>.md`，但最终合并前必须删除。
+- 每个正式 checkpoint 和重要里程碑都必须完成最小必要验证、提交一个完整原子状态、push、核验远端 SHA、更新 PR，然后继续。仅聊天、本地工作区、本地 commit 或临时容器状态不构成完整 checkpoint；不得为微小编辑制造提交。
+- 不得推送秘密、无关改动或未完成的原子修改；未经明确授权不得直接 push 默认分支或 force push。无法 push 时必须准确报告阻塞，不得声称 checkpoint 已完成。
