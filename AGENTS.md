@@ -80,72 +80,39 @@
 显式验收标准通过且不存在已知正确性、安全、数据损失或重大经济等价问题后停止。不要为了代码行数、抽象数量或所谓
 工业级继续低收益拆分和扩展。
 
-## 自然语言任务入口与上下文治理
+## 权威来源与上下文
 
-本节约束任务入口、上下文加载、连续执行和交接，不削弱明确验收标准、验证要求、安全边界、数据完整性、业务与经济约束或本仓库专属规则。
-
-- 接受用户直接用自然语言提出 GitHub 任务。能够从当前对话和 GitHub 现场解析的信息，不要求用户改写固定 Prompt、手工填写模板、提供分支名或 PR 编号，也不强制先建 Issue。
-- 普通单 PR 任务以 PR 正文维护动态状态。只有确实跨多个 PR、长期分阶段、需要独立积压，或用户明确要求时才自动创建并填写 Issue。
-- GitHub 当前现场是分支、SHA、commit、PR、review、checks 和合并状态的权威来源。旧聊天、记忆、计划、摘要和交接包只能作为线索。
-- 新建工作前先搜索匹配的开放 PR、分支和 Issue；存在匹配项时原地继续，不得重复创建或重做。
-- 先加载最小权威上下文：本文件、存在时的 `.github/CHATGPT_PROJECT_BRIEF.md`、匹配 PR 及 diff，再读取直接相关代码、测试、配置和 workflow。只有证据不足、互相矛盾或影响范围扩大时才扩读。
-- 不默认加载完整仓库、完整聊天、全部 PR/Issue/Actions 或大段日志。禁止有损压缩否定条件、AND/OR 逻辑、阈值、日期、版本、路径、分支、SHA、准确结果、风险和 UNKNOWN。
-- 当前环境没有本地 worktree 时，将本地路径和工作区字段标记为“不适用”，不得虚构。
-- 可用时调用 `context-budget-router` 和 `conversation-continuity-guard`，但无论技能是否可用都必须遵守本文件。
-
-## 连续执行
-
-复杂、多步骤、长时间、GitHub、批量、研究、调试和多工具任务默认连续执行。
-
-- 只要仍有安全、明确、可执行的下一步，就继续工作。
-- 里程碑、checkpoint、commit、push、创建 PR、部分验证、进度更新和已准备交接都不等于任务完成。
-- 不得仅因对话较长、文件/日志/工具较多、完成多个里程碑、下一阶段较大、可以准备交接或非 required CI 仍在运行而停止。
-- 进度更新是非阻断的；发送后继续执行，不等待用户回复。下一步明确时不得要求用户回复“继续”。
-- 平台未提供准确遥测时，不得声称知道剩余 token、消息数或上下文容量。
-
-## 非阻断 Checkpoint 与上下文恢复
-
-每完成一个有意义的里程碑：
-
-1. 保存完整、可恢复的 checkpoint。
-2. GitHub 任务刷新 PR 正文中的当前目标、已完成并验证事项、剩余事项、准确验证结果、风险、UNKNOWN 和下一步。
-3. 适当时提交并推送可理解状态，再核验远端 head 和 PR。
-4. 随后直接继续下一项。
-
-普通 checkpoint 不得终止任务、把交接包作为最终输出、建议切换对话或要求确认。批量任务完成或安全保存一个对象后继续下一个；单个对象阻塞不终止仍有可执行项的批次。required checks 等待期间先完成其他可执行工作，长时间 non-required checks 不构成阻塞。
-
-上下文可能过期时，重新读取权威仓库、PR、head/base SHA、commits、diff、reviews、checks 和剩余事项；通过只读核验消除冲突，丢弃过期叙事，刷新状态并继续。已经生成过交接包后，用户说“继续”“继续做完”或同义表达时，重新核验现场并恢复执行。
-
-## 必须交接的真实条件
-
-只有继续安全执行确实被以下至少一项阻断时，才停止并输出完整交接包：
-
-1. 平台或必要工具明确达到硬限制或不可用；
-2. 权限、分支保护、required approval 或外部授权阻断全部剩余工作；
-3. 存在无法从既有要求安全推断的重大用户决策；
-4. 现场存在只读核验无法解决的实质冲突；
-5. 关键上下文已经真实丢失，且无法从权威来源恢复；
-6. 继续会造成重大正确性、安全、隐私、数据完整性、经济或不可逆风险；
-7. 用户明确要求停止或交接。
-
-任务较长、里程碑/交互次数较多、文件/日志/工具较多、剩余阶段较大、已有交接包、non-required CI 等待、批次中单个仓库阻塞，或没有事实依据地担心未来达到限制，都不足以触发停止。
-
-必须交接前，先完成最小安全原子操作，保存可恢复 checkpoint，刷新权威状态，说明真实阻塞原因，并输出独立完整的交接包；仓库、分支、SHA、worktree、测试、CI、commit、push、风险和下一步必须来自核验，不得猜测。
-
-## 完成条件与 Git 安全
-
-只有在目标及验收标准满足且完成必要最终验证、用户明确要求停止、真实阻塞阻断全部剩余安全工作、安全策略要求终止，或执行环境明确无法继续必要工具时才结束。`Remaining Work` 中仍有安全可执行项时必须继续。不得承诺后台异步完成。
-
-未经明确授权，禁止 `reset`、`clean`、`rebase`、force push、改写共享历史、删除分支或 worktree、丢弃 tracked/staged/unstaged/untracked 工作、覆盖无关改动或重做已完成并验证的工作。
-
-交接、合并或最终完成前，核验适用的当前分支、HEAD、远端功能分支 SHA、默认分支 SHA、merge-base、工作区、commits、push、reviews、checks 和准确测试结果。当前环境无法检查的字段标记为“待核验”或“不适用”，不得猜测。
+- 用户当前任务、明确验收标准、本文件及更具体目录中的 `AGENTS.md` 构成执行合同；仓库专属规则优先于通用指导。
+- 接受自然语言 GitHub 任务。能够安全核验的事实不要求固定 Prompt、手工模板、分支名、PR 编号或预建 Issue。
+- GitHub 现场是分支、SHA、commit、PR、review、checks 和合并状态的权威来源；历史聊天、记忆、计划、摘要和交接包只作线索。
+- 新建工作前搜索匹配的开放 PR、分支或 Issue，并原地继续唯一匹配项。普通单 PR 任务用 PR 正文维护动态状态；只有确实跨多个 PR、长期分阶段、需要独立积压或用户要求时才自动创建并填写 Issue。
+- 先加载最小权威上下文：适用的 `AGENTS.md`、存在时的 `.github/CHATGPT_PROJECT_BRIEF.md`、匹配 PR 及 diff，再读取直接相关代码、测试、配置和 workflow；仅在证据不足、矛盾或影响扩大时扩读。
+- 不默认加载完整仓库、完整聊天、全部 PR/Issue/Actions 或大段日志。禁止有损压缩禁止项、例外、AND/OR 逻辑、阈值、日期、版本、路径、分支、SHA、准确结果、风险和 UNKNOWN。
+- 无本地 worktree 时将本地字段标记为“不适用”，不得虚构。可用时使用 `context-budget-router` 和 `conversation-continuity-guard`。
 
 ## Remote Task Bootstrap
 
-以下规则确保任务在实质修改前及重要里程碑时具备远端可恢复状态；它们补充而不替代仓库已有的业务、安全、量化、测试、CI、发布和 Git 安全规则，禁止删除或弱化这些专属规则。
+以下规则建立可恢复的远端状态，且不替代或削弱上述业务、安全、量化、测试、CI、发布、证据和 Git 安全规则。
 
-- 完成最小只读核验后、任何实质修改前，先建立远端任务启动 checkpoint。新任务必须从已核验的远端默认分支 SHA 创建功能分支；先搜索匹配的 PR、分支或 Issue，若已存在则原地继续，先刷新 PR、push 当前可恢复状态并核验远端 head，再开始修改。
-- 优先创建结构化空 bootstrap commit，完整记录：Objective、Acceptance criteria、Included and excluded scope、Non-negotiable constraints、Default branch and baseline SHA、Feature branch、Related PR/branch/Issue、Current verified state、Risks and unknowns、Next action。
-- 将 bootstrap commit push 到远端功能分支并核验远端 head SHA；只有核验完成后才开始实质修改。环境不支持空 commit 时，可使用仅存在于功能分支的临时文件 `.github/task-bootstrap/<task-slug>.md`，但最终合并前必须删除。
-- 每个正式 checkpoint 和重要里程碑都必须完成最小必要验证、提交一个完整原子状态、push、核验远端 SHA、更新 PR，然后继续。仅聊天、本地工作区、本地 commit 或临时容器状态不构成完整 checkpoint；不得为微小编辑制造提交。
-- 不得推送秘密、无关改动或未完成的原子修改；未经明确授权不得直接 push 默认分支或 force push。无法 push 时必须准确报告阻塞，不得声称 checkpoint 已完成。
+- 完成最小只读核验后、实质修改前建立远端任务启动 checkpoint。新任务从已核验的远端默认分支 SHA 创建功能分支；已有匹配 PR/分支时原地继续，先刷新 PR、push 可恢复状态并核验远端 head。
+- 优先创建结构化空 bootstrap commit，记录：Objective、Acceptance criteria、Included and excluded scope、Non-negotiable constraints、Default branch and baseline SHA、Feature branch、Related PR/branch/Issue、Current verified state、Risks and unknowns、Next action。
+- 编辑前 push bootstrap commit 并核验远端功能分支 head SHA。环境不支持空 commit 时使用临时 branch-only `.github/task-bootstrap/<task-slug>.md`，最终合并前删除。
+- 每个正式 checkpoint 和重要里程碑必须完成最小必要验证、提交一个完整原子状态、push、核验远端 SHA、更新 PR，然后继续。聊天、本地工作区、本地 commit 或临时容器本身都不是完整 checkpoint；不得为微小编辑单独制造提交。
+- 禁止推送秘密、无关改动或未完成的原子修改。未经明确授权不得 push 默认分支或 force push。push 或核验失败时准确报告阻塞，不得声称 checkpoint 完成。
+
+## 连续执行与恢复
+
+- 复杂、多步骤、长时间、GitHub、批量、研究、调试和多工具任务在仍有安全、明确、已授权的下一步时持续执行；里程碑、checkpoint、commit、push、PR、部分验证、进度更新和已准备交接都不是完成。
+- 进度更新非阻断。有意义的里程碑按上述正式 checkpoint 流程执行，刷新 PR 中的当前目标、已完成并验证事项、剩余事项、准确验证结果、风险、UNKNOWN 和下一步后继续，不要求用户回复“继续”。
+- 批量任务独立保存各对象并越过单个阻塞项。required checks 等待期间先做其他工作；长时间 non-required checks 不构成阻塞。
+- 状态可能过期时，重读权威仓库与 PR、head/base/default SHA、commits、diff、reviews、checks 和剩余事项；只读消除差异并原地恢复，不重新开始。
+- 不因对话长、文件或工具多、阶段大或可准备交接而停止；无准确平台遥测时不得声称剩余上下文容量。
+
+## 完成、交接与 Git 安全
+
+- 仅在明确验收通过且完成必要最终验证、用户停止、安全策略要求终止、必要工具不可用，或已核验阻塞阻止全部剩余安全工作时结束。仍有安全可执行项就继续；不得承诺后台完成。
+- 交接阻塞仅限：工具硬限制；权限、分支保护、required approval 或外部授权阻塞全部剩余工作；无法安全推断的重大决策；无法只读解决的现场冲突；无法从权威来源恢复的关键上下文；重大正确性、安全、隐私、数据完整性、经济或不可逆风险；或用户明确要求。
+- 任务时长、里程碑/文件/日志/工具数量、较大下一阶段、已有交接包、non-required CI 等待或批次中单个仓库阻塞都不是交接条件。
+- 必须交接前完成最小安全原子操作，尽可能保存并核验可恢复 checkpoint，刷新权威状态，准确说明阻塞，并仅报告已核验的仓库、分支、SHA、worktree、测试、CI、commit、push、风险和下一步。
+- 未经明确授权，禁止 `reset`、`clean`、`rebase`、force push、改写历史、删除分支/worktree、丢弃 tracked/staged/unstaged/untracked 工作、覆盖无关改动或重做已完成并验证的工作。
+- 合并、交接或完成前，核验当前分支、HEAD、远端功能分支 SHA、默认分支 SHA、merge base、工作区、commits、push、changed files、reviews、required checks 和准确测试结果；不可用字段标记为“待核验”或“不适用”。
