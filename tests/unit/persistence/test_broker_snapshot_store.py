@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
 from firmquant.persistence.database import Database
@@ -25,5 +29,95 @@ def test_snapshot_store_is_idempotent_and_retains_previous_account_identity(tmp_
         assert database.scalar("SELECT count(*) FROM broker_snapshots") == 1
         assert database.scalar("SELECT count(*) FROM cash_snapshots") == 1
         assert database.scalar("SELECT count(*) FROM position_snapshots") == len(snapshot.positions)
+        stored = store.latest()
+        assert stored is not None
+        assert stored.started_at is None
+        assert stored.completed_at is None
+        assert stored.duration_ms is None
+    finally:
+        database.close()
+
+
+def test_snapshot_store_persists_independent_monotonic_timing(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    store = BrokerSnapshotStore(database)
+    snapshot = execution_snapshot().broker_snapshot
+    started_at = datetime(2026, 8, 25, 1, 30, tzinfo=UTC)
+    completed_at = started_at + timedelta(seconds=3)
+    try:
+        assert store.persist(
+            snapshot,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_ms=41,
+        )
+        stored = store.latest()
+        assert stored is not None
+        assert stored.started_at == started_at
+        assert stored.completed_at == completed_at
+        assert stored.duration_ms == 41
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    ("started_at", "completed_at", "duration_ms", "message"),
+    [
+        (datetime(2026, 8, 25, 1, 30, tzinfo=UTC), None, None, "all null or all set"),
+        (
+            datetime(2026, 8, 25, 9, 30, tzinfo=timezone(timedelta(hours=8))),
+            datetime(2026, 8, 25, 9, 31, tzinfo=timezone(timedelta(hours=8))),
+            1,
+            "UTC",
+        ),
+        (
+            datetime(2026, 8, 25, 1, 31, tzinfo=UTC),
+            datetime(2026, 8, 25, 1, 30, tzinfo=UTC),
+            1,
+            "precedes",
+        ),
+        (
+            datetime(2026, 8, 25, 1, 30, tzinfo=UTC),
+            datetime(2026, 8, 25, 1, 31, tzinfo=UTC),
+            -1,
+            "nonnegative",
+        ),
+    ],
+)
+def test_snapshot_store_rejects_malformed_timing(
+    tmp_path: Path,
+    started_at: datetime | None,
+    completed_at: datetime | None,
+    duration_ms: int | None,
+    message: str,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        with pytest.raises((TypeError, ValueError), match=message):
+            BrokerSnapshotStore(database).persist(
+                execution_snapshot().broker_snapshot,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+            )
+    finally:
+        database.close()
+
+
+def test_snapshot_timing_participates_in_idempotency_identity(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    store = BrokerSnapshotStore(database)
+    snapshot = execution_snapshot().broker_snapshot
+    started_at = datetime(2026, 8, 25, 1, 30, tzinfo=UTC)
+    completed_at = started_at + timedelta(seconds=1)
+    try:
+        assert store.persist(snapshot, started_at=started_at, completed_at=completed_at, duration_ms=10)
+        with pytest.raises(RuntimeError, match="identity collision"):
+            store.persist(
+                replace(snapshot),
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=11,
+            )
     finally:
         database.close()
