@@ -108,6 +108,41 @@ from firmquant.strategy.universe import UniversePolicy
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _POST_CLOSE = time(15, 5)
+
+
+def _backup_evidence_stage(mode: Mode) -> EvidenceStage:
+    if mode is Mode.SHADOW:
+        return EvidenceStage.SHADOW
+    if mode is Mode.CANARY:
+        return EvidenceStage.CANARY
+    if mode is Mode.LIVE:
+        raise ProductionServicesUnavailable("BACKUP_LIVE_OPERATIONAL_IDENTITY_UNVERIFIED")
+    raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_MODE_UNSUPPORTED")
+
+
+def _validate_backup_operational_identity(
+    identity: OperationalEvidenceIdentity,
+    *,
+    snapshot: BrokerSnapshot,
+    session: date,
+    decision_id: str,
+    settings_mode: Mode,
+) -> None:
+    deployment = identity.deployment_identity
+    if (
+        identity.phase != "EOD"
+        or identity.kind != "BACKUP"
+        or identity.strategy_session != session
+        or identity.decision_id != decision_id
+        or identity.broker_snapshot_id != snapshot.snapshot_id
+        or identity.broker_snapshot_sha256 != snapshot.raw_payload_sha256
+        or identity.broker_event_watermark != snapshot.broker_event_watermark
+        or deployment.account_id_hash != snapshot.account.account_id_hash
+        or deployment.mode is not settings_mode
+    ):
+        raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_FACT_MISMATCH")
+
+
 _REFERENCE_SYMBOLS = ("sh000300", "sh000682")
 _ACCOUNT_FILE = "uquant-account.json"
 _CALENDAR_FILE = "trading-calendar.json"
@@ -1447,11 +1482,16 @@ class ProductionServiceHooks:
             provider = self._operational_identity_provider
             if provider is None:
                 raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
-            stage = EvidenceStage.SHADOW if self._settings.mode is Mode.SHADOW else EvidenceStage.CANARY
+            stage = _backup_evidence_stage(self._settings.mode)
             operational_identity = provider(stage, eod_snapshot)
+            _validate_backup_operational_identity(
+                operational_identity,
+                snapshot=eod_snapshot,
+                session=session,
+                decision_id=decision_id,
+                settings_mode=self._settings.mode,
+            )
             deployment_identity = operational_identity.deployment_identity
-            if operational_identity.decision_id != decision_id:
-                raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_DECISION_MISMATCH")
             with self._database.transaction():
                 stored_deployment = self._database.query_one(
                     """

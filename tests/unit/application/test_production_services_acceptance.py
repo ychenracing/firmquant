@@ -1015,7 +1015,17 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
             phase="EOD",
             kind="BACKUP",
         )
-        hooks._operational_identity_provider = lambda _stage, _snapshot: operational
+        wrong_mode = replace(
+            operational,
+            deployment_identity=replace(deployment, mode=Mode.CANARY),
+        )
+        supplied_identities = [
+            replace(operational, phase="STARTUP", kind="SMOKE"),
+            replace(operational, broker_snapshot_id="snapshot-other"),
+            wrong_mode,
+            operational,
+        ]
+        hooks._operational_identity_provider = lambda _stage, _snapshot: supplied_identities.pop(0)
         with hooks._database.transaction():
             hooks._database.write(
                 """
@@ -1052,6 +1062,7 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
                 Account(),
             ),
         )
+        monkeypatch.setattr(hooks, "_capture", lambda: snapshot)
         monkeypatch.setattr(
             hooks._data_updater,
             "update",
@@ -1099,7 +1110,16 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
         )
         monkeypatch.setattr(hooks._accounts.store, "hash_file", lambda _path: "e" * 64)
 
-        assert hooks._close_session(EXECUTION_SESSION) == (1, 1)
+        with pytest.raises(ProductionServicesUnavailable, match="BACKUP_OPERATIONAL_IDENTITY"):
+            hooks._close_session(EXECUTION_SESSION)
+        assert events == ["reconcile", "data", "reload", "decision", "report"]
+        assert hooks._close.load(EXECUTION_SESSION, CloseStep.BACKUP_VERIFIED) is None
+        with pytest.raises(ProductionServicesUnavailable, match="BACKUP_OPERATIONAL_IDENTITY"):
+            hooks._close_session(EXECUTION_SESSION)
+        with pytest.raises(ProductionServicesUnavailable, match="BACKUP_OPERATIONAL_IDENTITY"):
+            hooks._close_session(EXECUTION_SESSION)
+
+        assert hooks._close_session(EXECUTION_SESSION) == (0, 1)
         assert events == ["reconcile", "data", "reload", "decision", "report", "backup"]
         assert hooks._close.completed(EXECUTION_SESSION) is not None
         assert hooks._close.load(EXECUTION_SESSION, CloseStep.REPORT_PUBLISHED) is not None
@@ -1107,6 +1127,13 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
         before = list(events)
         assert hooks._close_session(EXECUTION_SESSION) == (0, 0)
         assert events == before
+
+
+def test_backup_evidence_stage_never_relabels_live_as_canary() -> None:
+    assert ps._backup_evidence_stage(Mode.SHADOW) is EvidenceStage.SHADOW
+    assert ps._backup_evidence_stage(Mode.CANARY) is EvidenceStage.CANARY
+    with pytest.raises(ProductionServicesUnavailable, match=r"BACKUP.*LIVE"):
+        ps._backup_evidence_stage(Mode.LIVE)
 
 
 def test_builder_is_fail_closed_and_composes_single_daemon_path(

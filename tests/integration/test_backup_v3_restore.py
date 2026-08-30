@@ -26,7 +26,7 @@ from firmquant.persistence.backup import (
     verify_backup,
 )
 from firmquant.persistence.database import Database
-from firmquant.persistence.repositories import DecisionSnapshotRepository
+from firmquant.persistence.repositories import DecisionSnapshotRepository, canonical_json
 from firmquant.risk.production_policy import ProductionSafetyPolicy
 from tests.fixtures.session_cases import STRATEGY_SESSION, decision_snapshot
 
@@ -83,10 +83,35 @@ def _v3_case(
             "sessions": ["2026-08-24", "2026-08-25"],
         },
     )
-    _write_json(active, {"schema": "firmquant.data-generation.v1", "data_sha256": "c" * 64})
+    generation_members = {"sz300308.csv": "c" * 64}
+    generation_id = "gen-" + "c" * 24
+    _write_json(
+        active,
+        {
+            "schema": "firmquant.data-generation.v1",
+            "generation_id": generation_id,
+            "source": "reviewed-test",
+            "created_at": NOW.isoformat(),
+            "members": generation_members,
+            "data_sha256": hashlib.sha256(canonical_json(generation_members).encode()).hexdigest(),
+        },
+    )
     _write_json(
         strategy,
-        {"schema": "firmquant.daily-data-manifest.v2", "target_session": "2026-08-25"},
+        {
+            "schema": "firmquant.daily-data-manifest.v2",
+            "target_session": STRATEGY_SESSION.isoformat(),
+            "source": "xtquant",
+            "uquant_manifest_sha256": "7" * 64,
+            "data_generation_id": generation_id,
+            "observations": [
+                {
+                    "symbol": "sz300308",
+                    "latest_observed_session": STRATEGY_SESSION.isoformat(),
+                    "suspension_evidence_sha256": None,
+                }
+            ],
+        },
     )
 
     account_path = tmp_path / "account.json"
@@ -112,11 +137,17 @@ def _v3_case(
         xtquant_safety_manifest_sha256=safety_sha256,
         account_id_hash=account_id_hash,
         account_authority_epoch=1,
-        mode_epoch=1,
+        mode_epoch=2,
         mode=Mode.PAPER,
         caps_sha256=deployment_caps_sha256(settings),
         production_policy_sha256=ProductionSafetyPolicy.from_settings(settings).sha256,
     )
+    reason_phase = {
+        BackupReason.SESSION_CLOSE: "EOD",
+        BackupReason.MODE_TRANSITION: "MODE_TRANSITION",
+        BackupReason.ACCOUNT_REBASELINE: "ACCOUNT_REBASELINE",
+    }[reason]
+    reason_decision_id = decision_snapshot().decision_id if reason is BackupReason.SESSION_CLOSE else None
     evidence = OperationalEvidenceIdentity(
         deployment_identity=deployment,
         account_state_sha256=account_state_sha256,
@@ -130,9 +161,31 @@ def _v3_case(
         active_data_generation_sha256=hashlib.sha256(active.read_bytes()).hexdigest(),
         strategy_data_manifest_sha256=hashlib.sha256(strategy.read_bytes()).hexdigest(),
         strategy_session=STRATEGY_SESSION,
-        decision_id=decision_snapshot().decision_id,
-        phase="EOD",
+        decision_id=reason_decision_id,
+        phase=reason_phase,
         kind="BACKUP",
+    )
+
+    account_epoch_state = epoch_account_state_sha256 or account_state_sha256
+    account_epoch_payload = canonical_json(
+        {
+            "schema": "firmquant.account-authority-epoch.v1",
+            "epoch": 1,
+            "account_id_hash": account_id_hash,
+            "account_state_sha256": account_epoch_state,
+            "deployment_identity_sha256": deployment.sha256,
+            "created_at": NOW,
+        }
+    )
+    mode_epoch_payload = canonical_json(
+        {
+            "schema": "firmquant.mode-epoch.v1",
+            "epoch": 2,
+            "mode": Mode.PAPER,
+            "deployment_identity_sha256": deployment.sha256,
+            "caps_sha256": deployment.caps_sha256,
+            "created_at": NOW,
+        }
     )
 
     database = Database.open(tmp_path / "firmquant.sqlite3")
@@ -153,21 +206,37 @@ def _v3_case(
             """,
             (
                 account_id_hash,
-                epoch_account_state_sha256 or account_state_sha256,
+                account_epoch_state,
                 deployment.sha256,
                 None,
-                '{"schema":"firmquant.account-authority-epoch.v1"}',
-                "5" * 64,
+                account_epoch_payload,
+                hashlib.sha256(account_epoch_payload.encode("utf-8")).hexdigest(),
                 NOW.isoformat(),
             ),
         )
         database.write("INSERT INTO account_authority_active(singleton_id,epoch) VALUES(1,1)")
         database.write(
             """
+            INSERT INTO mode_epochs(
+                epoch,mode,deployment_identity_sha256,caps_sha256,
+                payload_json,payload_sha256,created_at
+            ) VALUES(2,'PAPER',?,?,?,?,?)
+            """,
+            (
+                deployment.sha256,
+                deployment.caps_sha256,
+                mode_epoch_payload,
+                hashlib.sha256(mode_epoch_payload.encode("utf-8")).hexdigest(),
+                NOW.isoformat(),
+            ),
+        )
+        database.write("UPDATE mode_epoch_active SET epoch=2 WHERE singleton_id=1")
+        database.write(
+            """
             INSERT INTO deployment_identities(
                 deployment_identity_sha256,account_id_hash,account_authority_epoch,
                 mode_epoch,mode,payload_json,payload_sha256,created_at
-            ) VALUES(?,?,1,1,'PAPER',?,?,?)
+            ) VALUES(?,?,1,2,'PAPER',?,?,?)
             """,
             (
                 deployment.sha256,
@@ -207,7 +276,7 @@ def _v3_case(
                 receipt_id,operational_evidence_identity_sha256,deployment_identity_sha256,
                 account_authority_epoch,mode_epoch,account_state_sha256,broker_snapshot_id,
                 strategy_session,phase,kind,payload_json,payload_sha256,created_at
-            ) VALUES(?,?,?,1,1,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,1,2,?,?,?,?,?,?,?,?)
             """,
             (
                 "evidence-v3",
@@ -242,7 +311,7 @@ def _v3_case(
         firmquant_commit=deployment.firmquant_commit,
         uquant_commit=deployment.uquant_commit,
         account_sha256=account_state_sha256,
-        decision_id=decision_snapshot().decision_id,
+        decision_id=reason_decision_id,
         strategy_session=STRATEGY_SESSION,
         reason=reason,
         deployment_identity=deployment,

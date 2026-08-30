@@ -56,6 +56,9 @@ jobs:
           tests/unit/observability/test_doctor.py
           tests/integration/test_writer_lease.py
           tests/integration/test_backup.py
+          tests/integration/test_backup_v3_restore.py
+          tests/integration/test_backup_v3_correction.py
+          tests/unit/persistence/test_backup_windows_publication.py
           tests/contract/test_xtquant_adapter.py
           tests/integration/test_xtquant_import_smoke.py
           -q
