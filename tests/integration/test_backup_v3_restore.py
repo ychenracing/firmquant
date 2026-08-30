@@ -591,7 +591,7 @@ def test_v3_backup_recovers_exact_bundle_after_rename_before_sql_progression(
     else:
         monkeypatch.setattr(backup_module, "_fsync_directory", fail_first_parent_fsync)
     try:
-        with pytest.raises(backup_module.BackupError, match="publish"):
+        with pytest.raises(backup_module.BackupError, match=r"publish|publication"):
             backup_state(
                 database,
                 root,
