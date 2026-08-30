@@ -63,6 +63,62 @@ def test_snapshot_store_persists_independent_monotonic_timing(tmp_path: Path) ->
         database.close()
 
 
+def test_snapshot_store_normalizes_aware_captured_at_without_creating_unreadable_rows(
+    tmp_path: Path,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    store = BrokerSnapshotStore(database)
+    snapshot = replace(
+        execution_snapshot().broker_snapshot,
+        captured_at=execution_snapshot().broker_snapshot.captured_at.astimezone(timezone(timedelta(hours=8))),
+    )
+    try:
+        assert store.persist(snapshot) is True
+        assert store.persist(snapshot) is False
+        stored = store.load(snapshot.snapshot_id)
+        assert stored is not None
+        assert stored.captured_at == snapshot.captured_at.astimezone(UTC)
+        assert stored.captured_at.tzinfo is UTC
+    finally:
+        database.close()
+
+
+def test_snapshot_latest_orders_legacy_mixed_offsets_by_instant(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    store = BrokerSnapshotStore(database)
+    base = execution_snapshot().broker_snapshot
+    older = replace(
+        base,
+        snapshot_id="legacy-offset-older",
+        captured_at=datetime(2026, 8, 25, 10, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+    newer = replace(
+        base,
+        snapshot_id="utc-newer",
+        captured_at=datetime(2026, 8, 25, 3, 0, tzinfo=UTC),
+        raw_payload_sha256="7" * 64,
+    )
+    try:
+        assert store.persist(older)
+        assert store.persist(newer)
+        with database.transaction():
+            database.write("DROP TRIGGER broker_snapshots_reject_update")
+            database.write(
+                "UPDATE broker_snapshots SET captured_at=? WHERE snapshot_id=?",
+                (older.captured_at.isoformat(), older.snapshot_id),
+            )
+
+        stored_older = store.load(older.snapshot_id)
+        assert stored_older is not None
+        assert stored_older.captured_at == older.captured_at.astimezone(UTC)
+        assert store.persist(older) is False
+        latest = store.latest()
+        assert latest is not None
+        assert latest.snapshot_id == newer.snapshot_id
+    finally:
+        database.close()
+
+
 @pytest.mark.parametrize(
     ("started_at", "completed_at", "duration_ms", "message"),
     [

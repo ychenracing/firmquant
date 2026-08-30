@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from firmquant.domain.broker_facts import AccountType, BrokerSnapshot
 from firmquant.persistence.audit import AuditLedger
@@ -24,6 +24,17 @@ class StoredBrokerSnapshot:
     started_at: datetime | None
     completed_at: datetime | None
     duration_ms: int | None
+
+
+def _timestamp(value: object, *, utc: bool) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError
+    parsed = datetime.fromisoformat(value)
+    if parsed.isoformat() != value or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError
+    if utc and parsed.utcoffset() != timedelta(0):
+        raise ValueError
+    return parsed
 
 
 def _timing_values(
@@ -59,16 +70,10 @@ class BrokerSnapshotStore:
     def previous_account_identity(self, snapshot: BrokerSnapshot) -> tuple[str, AccountType]:
         if not isinstance(snapshot, BrokerSnapshot):
             raise TypeError("broker snapshot identity requires BrokerSnapshot")
-        row = self._database.query_one(
-            "SELECT account_id_hash, account_type FROM broker_snapshots "
-            "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
-        )
-        if row is None:
+        stored = self.latest()
+        if stored is None:
             return snapshot.account.account_id_hash, snapshot.account.account_type
-        try:
-            return str(row["account_id_hash"]), AccountType(str(row["account_type"]))
-        except ValueError as error:
-            raise RuntimeError("stored broker account identity is invalid") from error
+        return stored.account_id_hash, stored.account_type
 
     @staticmethod
     def _parent(
@@ -80,7 +85,7 @@ class BrokerSnapshotStore:
             snapshot.account.account_id_hash,
             snapshot.account.account_type.value,
             snapshot.session_date.isoformat(),
-            snapshot.captured_at.isoformat(),
+            snapshot.captured_at.astimezone(UTC).isoformat(),
             snapshot.broker_event_watermark,
             snapshot.raw_payload_sha256,
             1,
@@ -126,27 +131,17 @@ class BrokerSnapshotStore:
             ):
                 raise ValueError
 
-            def timestamp(value: object, *, utc: bool) -> datetime:
-                if not isinstance(value, str):
-                    raise ValueError
-                parsed = datetime.fromisoformat(value)
-                if parsed.isoformat() != value or parsed.tzinfo is None or parsed.utcoffset() is None:
-                    raise ValueError
-                if utc and parsed.utcoffset() != timedelta(0):
-                    raise ValueError
-                return parsed
-
             started_raw = row["started_at"]
             completed_raw = row["completed_at"]
             duration_raw = row["duration_ms"]
             if duration_raw is not None and type(duration_raw) is not int:
                 raise ValueError
             timing = _timing_values(
-                started_at=(None if started_raw is None else timestamp(started_raw, utc=True)),
-                completed_at=(None if completed_raw is None else timestamp(completed_raw, utc=True)),
+                started_at=(None if started_raw is None else _timestamp(started_raw, utc=True)),
+                completed_at=(None if completed_raw is None else _timestamp(completed_raw, utc=True)),
                 duration_ms=duration_raw,
             )
-            captured_at = timestamp(row["captured_at"], utc=True)
+            captured_at = _timestamp(row["captured_at"], utc=False).astimezone(UTC)
             stored = StoredBrokerSnapshot(
                 snapshot_id=snapshot_id,
                 account_id_hash=account_id_hash,
@@ -182,14 +177,19 @@ class BrokerSnapshotStore:
         return None if row is None else self._stored(row)
 
     def latest(self) -> StoredBrokerSnapshot | None:
-        row = self._database.query_one(
-            """
-            SELECT snapshot_id
-            FROM broker_snapshots ORDER BY captured_at DESC,snapshot_id DESC LIMIT 1
-            """
-        )
-        if row is None:
+        rows = self._database.query_all("SELECT snapshot_id,captured_at FROM broker_snapshots")
+        if not rows:
             return None
+        try:
+            row = max(
+                rows,
+                key=lambda item: (
+                    _timestamp(item["captured_at"], utc=False),
+                    str(item["snapshot_id"]),
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError("stored broker snapshot is invalid") from error
         stored = self.load(str(row["snapshot_id"]))
         if stored is None:
             raise RuntimeError("stored broker snapshot is invalid")
@@ -225,6 +225,11 @@ class BrokerSnapshotStore:
                 (snapshot.snapshot_id,),
             )
             if existing is not None:
+                existing_parent = list(existing)
+                try:
+                    existing_parent[3] = _timestamp(existing_parent[3], utc=False).astimezone(UTC).isoformat()
+                except (IndexError, TypeError, ValueError) as error:
+                    raise RuntimeError("stored broker snapshot is invalid") from error
                 stored_cash = self._database.query_one(
                     "SELECT available_cash, total_assets FROM cash_snapshots WHERE snapshot_id = ?",
                     (snapshot.snapshot_id,),
@@ -235,7 +240,7 @@ class BrokerSnapshotStore:
                     (snapshot.snapshot_id,),
                 )
                 if (
-                    tuple(existing) != parent
+                    tuple(existing_parent) != parent
                     or stored_cash is None
                     or tuple(stored_cash) != cash
                     or tuple(tuple(row) for row in stored_positions) != positions
@@ -280,7 +285,7 @@ class BrokerSnapshotStore:
                     "order_count": len(snapshot.orders),
                     "fill_count": len(snapshot.fills),
                 },
-                created_at=snapshot.captured_at,
+                created_at=snapshot.captured_at.astimezone(UTC),
             )
         return True
 
