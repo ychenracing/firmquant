@@ -11,6 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Final
 
+from firmquant.application.production_identity import OperationalEvidenceIdentity
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
 
@@ -104,6 +105,7 @@ class EvidenceIdentity:
     account_sha256: str
     data_sha256: str
     calendar_sha256: str
+    operational_identity: OperationalEvidenceIdentity | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.stage, EvidenceStage):
@@ -119,11 +121,33 @@ class EvidenceIdentity:
             ("calendar", self.calendar_sha256),
         ):
             _digest(value, _SHA256, label=f"{label} SHA-256")
+        if self.operational_identity is not None:
+            if not isinstance(self.operational_identity, OperationalEvidenceIdentity):
+                raise TypeError("operational evidence identity must be typed")
+            deployment = self.operational_identity.deployment_identity
+            if deployment.firmquant_commit != self.firmquant_commit:
+                raise ValueError("operational firmquant identity does not match evidence")
+            if deployment.uquant_commit != self.uquant_commit:
+                raise ValueError("operational uquant identity does not match evidence")
+            if deployment.account_id_hash != self.account_sha256:
+                raise ValueError("account id hash does not match operational evidence")
+            if self.operational_identity.strategy_session != self.execution_session:
+                raise ValueError("operational strategy session does not match evidence")
 
     @property
     def stable_payload(self) -> dict[str, object]:
-        """Return the identity fields that define one immutable session observation."""
+        """Return the stable fields used to aggregate compatible observations."""
 
+        if self.operational_identity is not None:
+            deployment = self.operational_identity.deployment_identity
+            return {
+                "schema": "firmquant.execution-observation-aggregation-identity.v2",
+                "stage": self.stage.value,
+                "deployment_identity_sha256": deployment.sha256,
+                "account_authority_epoch": deployment.account_authority_epoch,
+                "mode_epoch": deployment.mode_epoch,
+                "mode": deployment.mode.value,
+            }
         return {
             "schema": "firmquant.execution-observation-identity.v1",
             "stage": self.stage.value,
@@ -136,9 +160,26 @@ class EvidenceIdentity:
 
     @property
     def sha256(self) -> str:
+        if self.operational_identity is not None:
+            return _sha256(
+                {
+                    "schema": "firmquant.execution-observation-event-identity.v2",
+                    "aggregation_identity": self.stable_payload,
+                    "operational_identity_sha256": self.operational_identity.sha256,
+                }
+            )
         return _sha256(self.stable_payload)
 
     def payload(self) -> dict[str, object]:
+        if self.operational_identity is not None:
+            return {
+                **self.stable_payload,
+                "execution_session": self.execution_session.isoformat(),
+                "operational_identity": self.operational_identity.payload(),
+                "operational_identity_sha256": self.operational_identity.sha256,
+                "data_sha256": self.data_sha256,
+                "calendar_sha256": self.calendar_sha256,
+            }
         return {
             **self.stable_payload,
             "data_sha256": self.data_sha256,
@@ -494,6 +535,14 @@ def aggregate_observations(observations: tuple[ExecutionObservation, ...]) -> Ex
     for observation in observations[1:]:
         if observation.identity.stage is not first.identity.stage:
             raise ValueError("SHADOW and CANARY evidence must aggregate independently")
+        if (first.identity.operational_identity is None) != (
+            observation.identity.operational_identity is None
+        ):
+            raise ValueError("execution evidence deployment identity changed inside aggregate")
+        if first.identity.operational_identity is not None:
+            if observation.identity.stable_payload != first.identity.stable_payload:
+                raise ValueError("execution evidence deployment identity changed inside aggregate")
+            continue
         if (
             observation.identity.firmquant_commit != first.identity.firmquant_commit
             or observation.identity.uquant_commit != first.identity.uquant_commit

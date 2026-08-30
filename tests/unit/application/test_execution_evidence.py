@@ -20,6 +20,11 @@ from firmquant.application.execution_evidence import (
     TargetObservation,
     aggregate_observations,
 )
+from firmquant.application.production_identity import (
+    DeploymentIdentity,
+    OperationalEvidenceIdentity,
+)
+from firmquant.config import Mode
 from firmquant.persistence.database import Database
 
 D40 = "a" * 40
@@ -108,6 +113,46 @@ def _observation(*, stage: EvidenceStage = EvidenceStage.SHADOW) -> ExecutionObs
     )
 
 
+def _operational_identity(
+    *, session: date, mode_epoch: int, account_state: str
+) -> OperationalEvidenceIdentity:
+    deployment = DeploymentIdentity(
+        firmquant_commit=D40,
+        uquant_commit=U40,
+        uquant_tree="2" * 40,
+        uquant_package_manifest_sha256="2" * 64,
+        uquant_code_fingerprint="3" * 64,
+        uquant_config_fingerprint="4" * 64,
+        semantic_config_sha256=C64,
+        raw_config_sha256="5" * 64,
+        xtquant_safety_manifest_sha256="6" * 64,
+        account_id_hash=A64,
+        account_authority_epoch=1,
+        mode_epoch=mode_epoch,
+        mode=Mode.SHADOW,
+        caps_sha256="7" * 64,
+        production_policy_sha256="8" * 64,
+    )
+    started = datetime.combine(session, datetime.min.time(), tzinfo=UTC)
+    return OperationalEvidenceIdentity(
+        deployment_identity=deployment,
+        account_state_sha256=account_state,
+        broker_snapshot_id="snapshot-" + session.isoformat(),
+        broker_snapshot_sha256="9" * 64,
+        broker_event_watermark=1,
+        snapshot_started_at=started,
+        snapshot_completed_at=started,
+        snapshot_duration_ms=0,
+        calendar_sha256=CAL64,
+        active_data_generation_sha256=DATA64,
+        strategy_data_manifest_sha256=DATA64,
+        strategy_session=session,
+        decision_id=None,
+        phase="POST_CLOSE",
+        kind="EXECUTION_OBSERVATION",
+    )
+
+
 def test_same_session_identity_is_idempotent_and_conflicts_fail_closed(tmp_path) -> None:
     db = Database.open(tmp_path / "ledger.sqlite3")
     try:
@@ -124,6 +169,54 @@ def test_same_session_identity_is_idempotent_and_conflicts_fail_closed(tmp_path)
             store.append(conflicting)
     finally:
         db.close()
+
+
+def test_aggregation_allows_account_state_changes_but_rejects_mode_epoch_changes() -> None:
+    first_base = _observation()
+    first = replace(
+        first_base,
+        identity=replace(
+            first_base.identity,
+            operational_identity=_operational_identity(
+                session=first_base.identity.execution_session,
+                mode_epoch=1,
+                account_state="a" * 64,
+            ),
+        ),
+    )
+    second_session = date(2026, 8, 28)
+    second = replace(
+        first_base,
+        identity=replace(
+            first_base.identity,
+            execution_session=second_session,
+            operational_identity=_operational_identity(
+                session=second_session,
+                mode_epoch=1,
+                account_state="b" * 64,
+            ),
+        ),
+    )
+
+    assert aggregate_observations((first, second)).observed_sessions == 2
+
+    changed_epoch = replace(
+        second,
+        identity=replace(
+            second.identity,
+            operational_identity=_operational_identity(
+                session=second_session,
+                mode_epoch=2,
+                account_state="b" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="deployment identity changed"):
+        aggregate_observations((first, changed_epoch))
+
+    legacy_first = replace(first, identity=replace(first.identity, operational_identity=None))
+    with pytest.raises(ValueError, match="deployment identity changed"):
+        aggregate_observations((legacy_first, second))
 
 
 def test_shadow_tracking_error_is_derived_from_target_and_ending_positions() -> None:
