@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -51,6 +52,7 @@ def _canary_payload() -> dict[str, object]:
     return {
         "schema": "firmquant.canary-plan-evidence.v1",
         "execution_session": SESSION.isoformat(),
+        "strategy_session": SESSION.isoformat(),
         "decision_id": "decision-canary",
         "plan_id": "plan-canary",
         "firmquant_commit": "1" * 40,
@@ -506,6 +508,40 @@ def test_canary_missing_execution_becomes_unknown_observation(tmp_path: Path) ->
         assert observed.planned_orders[0].blocker is BlockerCode.UNKNOWN
         assert observed.planning_blockers[0].reason_code == "TARGET_ALREADY_SATISFIED"
         assert observed.targets[0].target_shares == 100
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        replace(_canary_operational_identity(), strategy_session=date(2020, 1, 1)),
+        replace(_canary_operational_identity(), phase="READINESS"),
+        replace(_canary_operational_identity(), kind="BACKUP"),
+    ],
+)
+def test_canary_operational_context_must_match_durable_plan(
+    tmp_path: Path,
+    identity: OperationalEvidenceIdentity,
+) -> None:
+    database = Database.open(tmp_path / "ledger.sqlite3")
+    try:
+        with database.transaction():
+            AuditLedger(database).append(
+                audit_event_id="canary-plan:plan-canary",
+                category="CANARY_PLAN_EVIDENCE",
+                actor="execution-evidence",
+                payload=_canary_payload(),
+                created_at=NOW,
+            )
+        with pytest.raises(RuntimeEvidenceError, match=r"strategy session|phase|kind"):
+            evidence_runtime.finalize_canary_observation(
+                database=database,
+                eod_snapshot=_snapshot(),
+                session=SESSION,
+                created_at=NOW,
+                operational_identity=identity,
+            )
     finally:
         database.close()
 

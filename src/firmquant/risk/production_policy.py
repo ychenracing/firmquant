@@ -12,17 +12,44 @@ if TYPE_CHECKING:
     from firmquant.config import Settings
 
 
+_MAX_PLAIN_DECIMAL_LENGTH = 128
+
+
 def canonical_decimal_text(value: Decimal) -> str:
-    """Render finite Decimal values without insignificant scale or signed zero."""
+    """Render a finite Decimal exactly without context rounding or unbounded expansion."""
 
     if not isinstance(value, Decimal) or not value.is_finite():
         raise TypeError("canonical Decimal text requires a finite Decimal")
     if value.is_zero():
         return "0"
-    rendered = format(value, "f")
-    if "." in rendered:
-        rendered = rendered.rstrip("0").rstrip(".")
-    return rendered
+    sign, raw_digits, raw_exponent = value.as_tuple()
+    if not isinstance(raw_exponent, int):
+        raise TypeError("canonical Decimal text requires a finite Decimal")
+    digits = list(raw_digits)
+    exponent = raw_exponent
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits)
+    prefix = "-" if sign else ""
+    decimal_index = len(coefficient) + exponent
+    if exponent >= 0:
+        plain_length = len(prefix) + len(coefficient) + exponent
+    elif decimal_index > 0:
+        plain_length = len(prefix) + len(coefficient) + 1
+    else:
+        plain_length = len(prefix) + 2 + (-decimal_index) + len(coefficient)
+    if plain_length <= _MAX_PLAIN_DECIMAL_LENGTH:
+        if exponent >= 0:
+            return prefix + coefficient + ("0" * exponent)
+        if decimal_index > 0:
+            return prefix + coefficient[:decimal_index] + "." + coefficient[decimal_index:]
+        return prefix + "0." + ("0" * (-decimal_index)) + coefficient
+    mantissa = coefficient[0]
+    if len(coefficient) > 1:
+        mantissa += "." + coefficient[1:]
+    adjusted_exponent = len(coefficient) + exponent - 1
+    return prefix + mantissa + "e" + str(adjusted_exponent)
 
 
 @dataclass(frozen=True, slots=True)

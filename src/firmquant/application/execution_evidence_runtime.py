@@ -327,8 +327,11 @@ def build_shadow_observation(
         operational_identity,
         snapshot=facts.broker_snapshot,
         decision_id=decision.decision_id,
+        strategy_session=decision.strategy_session,
         data_sha256=decision.data_manifest_sha256,
         calendar_sha256=calendar_sha256,
+        phase="EXECUTION",
+        kind="SHADOW_EXECUTION",
     )
     instruments, quotes = _market_facts(broker, facts, decision)
     paper = PaperBroker(
@@ -482,6 +485,7 @@ def _plan_payload(
         "data_sha256": decision.data_manifest_sha256,
         "calendar_sha256": calendar_sha256,
         "execution_session": plan.execution_session.isoformat(),
+        "strategy_session": decision.strategy_session.isoformat(),
         "decision_id": decision.decision_id,
         "plan_id": plan.plan_id,
         "portfolio_equity": format(facts.broker_snapshot.account.total_assets.value, "f"),
@@ -618,6 +622,19 @@ def _plan_orders(payload: Mapping[str, object]) -> tuple[dict[str, object], ...]
     return tuple(cast(dict[str, object], item) for item in raw)
 
 
+def _plan_strategy_session(payload: Mapping[str, object]) -> date:
+    raw = payload.get("strategy_session")
+    if not isinstance(raw, str) or not raw or raw != raw.strip():
+        raise RuntimeEvidenceError("CANARY strategy session evidence is malformed")
+    try:
+        session = date.fromisoformat(raw)
+    except ValueError as error:
+        raise RuntimeEvidenceError("CANARY strategy session evidence is malformed") from error
+    if session.isoformat() != raw:
+        raise RuntimeEvidenceError("CANARY strategy session evidence is malformed")
+    return session
+
+
 def finalize_canary_observation(
     *,
     database: Database,
@@ -643,8 +660,11 @@ def finalize_canary_observation(
         operational_identity,
         snapshot=eod_snapshot,
         decision_id=str(plan.get("decision_id")),
+        strategy_session=_plan_strategy_session(plan),
         data_sha256=str(plan.get("data_sha256")),
         calendar_sha256=str(plan.get("calendar_sha256")),
+        phase="EOD",
+        kind="CANARY_EXECUTION",
     )
     decision_id = str(plan.get("decision_id"))
     plan_id = str(plan.get("plan_id"))
@@ -783,8 +803,11 @@ def _validate_operational_identity(
     *,
     snapshot: BrokerSnapshot,
     decision_id: str,
+    strategy_session: date,
     data_sha256: str,
     calendar_sha256: str,
+    phase: str,
+    kind: str,
 ) -> None:
     if not isinstance(identity, OperationalEvidenceIdentity):
         raise TypeError("execution evidence requires OperationalEvidenceIdentity")
@@ -798,10 +821,16 @@ def _validate_operational_identity(
         raise RuntimeEvidenceError("operational broker snapshot identity contradicts evidence")
     if identity.decision_id != decision_id:
         raise RuntimeEvidenceError("operational decision identity contradicts evidence")
+    if identity.strategy_session != strategy_session:
+        raise RuntimeEvidenceError("operational strategy session contradicts evidence")
     if identity.strategy_data_manifest_sha256 != data_sha256:
         raise RuntimeEvidenceError("operational strategy data identity contradicts evidence")
     if identity.calendar_sha256 != calendar_sha256:
         raise RuntimeEvidenceError("operational calendar identity contradicts evidence")
+    if identity.phase != phase:
+        raise RuntimeEvidenceError("operational phase contradicts evidence")
+    if identity.kind != kind:
+        raise RuntimeEvidenceError("operational kind contradicts evidence")
 
 
 __all__ = (

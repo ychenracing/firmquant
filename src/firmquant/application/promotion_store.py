@@ -315,6 +315,17 @@ class PromotionStore:
     ) -> tuple[ExecutionObservation, ...]:
         if not isinstance(stage, EvidenceStage):
             raise TypeError("promotion evidence stage must be typed")
+        canonical_selectors = (
+            deployment_identity_sha256,
+            account_authority_epoch,
+            mode_epoch,
+            mode,
+        )
+        legacy_selectors = (firmquant_commit, uquant_commit, config_sha256, account_hash)
+        if any(value is not None for value in canonical_selectors) and any(
+            value is not None for value in legacy_selectors
+        ):
+            raise ValueError("promotion selector cannot mix canonical and legacy identity fields")
         if (
             deployment_identity_sha256 is None
             or account_authority_epoch is None

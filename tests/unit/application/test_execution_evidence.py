@@ -162,8 +162,8 @@ def _operational_identity(
         strategy_data_manifest_sha256=DATA64,
         strategy_session=session,
         decision_id=decision_id,
-        phase="POST_CLOSE",
-        kind="EXECUTION_OBSERVATION",
+        phase="EXECUTION" if stage is EvidenceStage.SHADOW else "EOD",
+        kind="SHADOW_EXECUTION" if stage is EvidenceStage.SHADOW else "CANARY_EXECUTION",
     )
 
 
@@ -208,6 +208,32 @@ def test_canonical_evidence_rejects_cross_identity_contradictions() -> None:
         replace(observation.identity, stage=EvidenceStage.CANARY)
     with pytest.raises(ValueError, match="decision"):
         replace(observation, decision_id="different-decision")
+
+
+@pytest.mark.parametrize(
+    ("phase", "kind"),
+    [
+        ("READINESS", "SHADOW_EXECUTION"),
+        ("EXECUTION", "BACKUP"),
+    ],
+)
+def test_execution_observation_rejects_non_execution_operational_context(
+    phase: str,
+    kind: str,
+) -> None:
+    observation = _observation(stage=EvidenceStage.SHADOW)
+    assert observation.identity.operational_identity is not None
+    contradictory = replace(
+        observation.identity.operational_identity,
+        phase=phase,
+        kind=kind,
+    )
+
+    with pytest.raises(ValueError, match=r"phase|kind"):
+        replace(
+            observation,
+            identity=replace(observation.identity, operational_identity=contradictory),
+        )
 
 
 def test_aggregation_allows_account_state_changes_but_rejects_mode_epoch_changes() -> None:

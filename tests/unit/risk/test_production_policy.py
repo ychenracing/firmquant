@@ -86,3 +86,4 @@ def test_canonical_decimal_text_preserves_precision_while_removing_only_scale() 
 
     assert canonical_decimal_text(precise) == "0.012345678901234567890123456789"
     assert canonical_decimal_text(Decimal("-0.000")) == "0"
+    assert canonical_decimal_text(Decimal("1e-1000")) == "1e-1000"

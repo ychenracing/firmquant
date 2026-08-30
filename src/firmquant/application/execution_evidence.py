@@ -386,6 +386,15 @@ class ExecutionObservation:
             and self.identity.operational_identity.decision_id != self.decision_id
         ):
             raise ValueError("decision identity contradicts operational evidence")
+        if self.identity.operational_identity is not None:
+            expected_phase, expected_kind = {
+                EvidenceStage.SHADOW: ("EXECUTION", "SHADOW_EXECUTION"),
+                EvidenceStage.CANARY: ("EOD", "CANARY_EXECUTION"),
+            }[self.identity.stage]
+            if self.identity.operational_identity.phase != expected_phase:
+                raise ValueError("evidence phase contradicts execution stage")
+            if self.identity.operational_identity.kind != expected_kind:
+                raise ValueError("evidence kind contradicts execution stage")
         _text(self.plan_id, label="plan id")
         _decimal(self.portfolio_equity, label="portfolio equity", positive=True)
         for label, values, expected in (

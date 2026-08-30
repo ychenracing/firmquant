@@ -63,8 +63,8 @@ def observation(*, stage: EvidenceStage, session: date, canonical: bool = True) 
         strategy_data_manifest_sha256="d" * 64,
         strategy_session=session,
         decision_id=decision_id,
-        phase="EXECUTION",
-        kind="PROMOTION_EVIDENCE",
+        phase="EXECUTION" if stage is EvidenceStage.SHADOW else "EOD",
+        kind="SHADOW_EXECUTION" if stage is EvidenceStage.SHADOW else "CANARY_EXECUTION",
     )
     identity = EvidenceIdentity(
         stage=stage,
@@ -204,6 +204,20 @@ def test_canonical_promotion_selector_rejects_non_digest_deployment_identity(tmp
                     **_selection(EvidenceStage.SHADOW),
                     "deployment_identity_sha256": "g" * 64,
                 }
+            )
+    finally:
+        database.close()
+
+
+def test_canonical_promotion_selector_rejects_mixed_legacy_fields(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        store = PromotionStore(database)
+
+        with pytest.raises(ValueError, match="mix canonical and legacy"):
+            store.aggregate(
+                **_selection(EvidenceStage.SHADOW),
+                firmquant_commit="0" * 40,
             )
     finally:
         database.close()
