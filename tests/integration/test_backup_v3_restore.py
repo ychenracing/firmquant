@@ -63,6 +63,7 @@ def _v3_case(
     *,
     reason: BackupReason = BackupReason.SESSION_CLOSE,
     epoch_account_state_sha256: str | None = None,
+    snapshot_session: str | None = None,
 ):
     config = tmp_path / "production.toml"
     config.write_text("# reviewed production configuration\n", encoding="utf-8")
@@ -257,7 +258,7 @@ def _v3_case(
             (
                 evidence.broker_snapshot_id,
                 account_id_hash,
-                STRATEGY_SESSION.isoformat(),
+                snapshot_session or STRATEGY_SESSION.isoformat(),
                 evidence.snapshot_completed_at.isoformat(),
                 evidence.broker_event_watermark,
                 evidence.broker_snapshot_sha256,

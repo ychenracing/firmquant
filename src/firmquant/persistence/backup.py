@@ -255,6 +255,16 @@ def _stable_file_identity(path: Path) -> tuple[int, int, int, int]:
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
 
 
+def _private_regular_file_identity(path: Path, *, label: str) -> tuple[int, int, int, int]:
+    try:
+        value = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise BackupVerificationError(f"{label} identity is unavailable") from exc
+    if path.is_symlink() or _is_reparse(path) or not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+        raise BackupVerificationError(f"{label} is not private regular evidence")
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+
 def _copy_verified_member(
     source: Path,
     destination: Path,
@@ -266,15 +276,25 @@ def _copy_verified_member(
     if _sha256_file(source) != expected_sha256:
         raise BackupVerificationError(f"{label} source SHA-256 changed")
     if destination.exists() or destination.is_symlink():
-        if destination.is_symlink() or not destination.is_file():
-            raise BackupVerificationError(f"{label} staging member is not a regular file")
+        destination_before = _private_regular_file_identity(
+            destination,
+            label=f"{label} staging member",
+        )
+        if destination_before[:2] == before[:2]:
+            raise BackupVerificationError(f"{label} staging member is hard-linked to its source")
         if _sha256_file(destination) != expected_sha256:
             raise BackupVerificationError(f"{label} staging member conflicts with source")
+        if _private_regular_file_identity(destination, label=f"{label} staging member") != destination_before:
+            raise BackupVerificationError(f"{label} staging member changed during verification")
     else:
         temporary = destination.parent / f".{destination.name}.copying"
         if temporary.exists() or temporary.is_symlink():
-            if temporary.is_symlink() or not temporary.is_file():
-                raise BackupVerificationError(f"{label} partial copy is not regular evidence")
+            temporary_before = _private_regular_file_identity(
+                temporary,
+                label=f"{label} partial copy",
+            )
+            if temporary_before[:2] == before[:2]:
+                raise BackupVerificationError(f"{label} partial copy is hard-linked to its source")
             source_bytes = source.read_bytes()
             partial = temporary.read_bytes()
             if len(partial) > len(source_bytes) or source_bytes[: len(partial)] != partial:
@@ -294,6 +314,12 @@ def _copy_verified_member(
             os.replace(temporary, destination)
         except OSError as exc:
             raise BackupError(f"cannot commit {label} private copy") from exc
+    destination_after = _private_regular_file_identity(
+        destination,
+        label=f"{label} staging member",
+    )
+    if destination_after[:2] == before[:2]:
+        raise BackupVerificationError(f"{label} staging member is hard-linked to its source")
     after = _stable_file_identity(source)
     if after != before or _sha256_file(source) != expected_sha256:
         raise BackupVerificationError(f"{label} source changed during copy")
@@ -402,6 +428,35 @@ def _fsync_directory(path: Path) -> None:
 _MOVEFILE_WRITE_THROUGH = 0x8
 
 
+@dataclass(frozen=True, slots=True)
+class _DirectoryObjectIdentity:
+    device: int
+    inode: int
+
+
+def _directory_object_identity(path: Path, *, label: str) -> _DirectoryObjectIdentity:
+    try:
+        _canonical_no_link_path(path, label=label, must_exist=True)
+        value = path.stat(follow_symlinks=False)
+    except BackupVerificationError:
+        raise
+    except OSError as exc:
+        raise BackupVerificationError(f"{label} identity is unavailable") from exc
+    if path.is_symlink() or _is_reparse(path) or not stat.S_ISDIR(value.st_mode):
+        raise BackupVerificationError(f"{label} is not a regular directory")
+    return _DirectoryObjectIdentity(value.st_dev, value.st_ino)
+
+
+def _assert_directory_object_identity(
+    path: Path,
+    expected: _DirectoryObjectIdentity,
+    *,
+    label: str,
+) -> None:
+    if _directory_object_identity(path, label=label) != expected:
+        raise BackupVerificationError(f"{label} identity changed")
+
+
 def _move_file_ex(source: Path, destination: Path, flags: int) -> bool:
     loader = getattr(ctypes, "WinDLL", None)
     last_error = getattr(ctypes, "get_last_error", None)
@@ -423,8 +478,9 @@ def _publish_directory(
     destination: Path,
     *,
     platform_name: str | None = None,
-) -> None:
+) -> _DirectoryObjectIdentity:
     platform = os.name if platform_name is None else platform_name
+    source_identity = _directory_object_identity(source, label="publication source")
     try:
         source_parent = source.parent.resolve(strict=True)
         destination_parent = destination.parent.resolve(strict=True)
@@ -440,12 +496,21 @@ def _publish_directory(
                 raise OSError("MoveFileExW returned false")
         except OSError as exc:
             raise BackupError("Windows write-through directory publication failed") from exc
-        return
+    else:
+        try:
+            os.replace(source, destination)
+            _fsync_directory(destination_parent)
+        except OSError as exc:
+            raise BackupError("atomic directory publish failed") from exc
     try:
-        os.replace(source, destination)
-        _fsync_directory(destination_parent)
-    except OSError as exc:
-        raise BackupError("atomic directory publish failed") from exc
+        _assert_directory_object_identity(
+            destination,
+            source_identity,
+            label="published directory",
+        )
+    except BackupVerificationError as exc:
+        raise BackupError("published directory identity is not the verified staging object") from exc
+    return source_identity
 
 
 def _database_schema_version(database: Database) -> int:
@@ -735,7 +800,7 @@ def _canonical_object(path: Path, *, label: str) -> dict[str, object]:
     return payload
 
 
-def _validate_data_manifests(active_path: Path, strategy_path: Path) -> None:
+def _validate_data_manifests(active_path: Path, strategy_path: Path) -> date:
     active = _canonical_object(active_path, label="active data source manifest")
     if (
         set(active)
@@ -829,6 +894,7 @@ def _validate_data_manifests(active_path: Path, strategy_path: Path) -> None:
         observed_symbols.append(symbol)
     if observed_symbols != sorted(set(observed_symbols)):
         raise BackupVerificationError("strategy data observations are not canonical")
+    return target
 
 
 def _verify_v3_database_bindings(
@@ -938,8 +1004,8 @@ def _verify_v3_database_bindings(
             raise BackupVerificationError("backup operational evidence differs from database")
         snapshot = database.query_one(
             """
-            SELECT account_id_hash,account_type,broker_event_watermark,raw_payload_sha256,
-                   complete,started_at,completed_at,duration_ms
+            SELECT account_id_hash,account_type,session_date,broker_event_watermark,
+                   raw_payload_sha256,complete,started_at,completed_at,duration_ms
             FROM broker_snapshots WHERE snapshot_id=?
             """,
             (evidence.broker_snapshot_id,),
@@ -954,6 +1020,7 @@ def _verify_v3_database_bindings(
             or (
                 str(snapshot["account_id_hash"]),
                 str(snapshot["account_type"]),
+                str(snapshot["session_date"]),
                 int(snapshot["broker_event_watermark"]),
                 str(snapshot["raw_payload_sha256"]),
                 int(snapshot["complete"]),
@@ -964,6 +1031,7 @@ def _verify_v3_database_bindings(
             != (
                 deployment.account_id_hash,
                 "CASH",
+                evidence.strategy_session.isoformat(),
                 evidence.broker_event_watermark,
                 evidence.broker_snapshot_sha256,
                 1,
@@ -1092,12 +1160,14 @@ def _verify_v3_bundle(
         settings = load_settings(bundle / "production_config.toml")
         XtQuantSafetyManifest.load(bundle / "xtquant_safety_manifest.json")
         load_trading_calendar_manifest(bundle / "trading_calendar.json")
-        _validate_data_manifests(
+        strategy_manifest_session = _validate_data_manifests(
             bundle / "active_data_source.json",
             bundle / "strategy_data_manifest.json",
         )
     except Exception as exc:
         raise BackupVerificationError("schema-v3 validated configuration evidence is invalid") from exc
+    if strategy_manifest_session != evidence.strategy_session:
+        raise BackupVerificationError("schema-v3 strategy data session differs from operational evidence")
     if deployment.raw_config_sha256 != member_hashes["production_config.toml"]:
         raise BackupVerificationError("schema-v3 raw config identity is inconsistent")
     if deployment.semantic_config_sha256 != semantic_config_sha256(settings):
@@ -1348,12 +1418,14 @@ def _v3_members(
     if observed_account != inputs.account_sha256:
         raise BackupError("schema-v3 AccountState differs from operational identity")
     try:
-        _validate_data_manifests(
+        strategy_manifest_session = _validate_data_manifests(
             inputs.active_data_manifest_path,
             inputs.strategy_data_manifest_path,
         )
     except BackupVerificationError as exc:
         raise BackupError("schema-v3 data manifest evidence is invalid") from exc
+    if strategy_manifest_session != inputs.strategy_session:
+        raise BackupError("schema-v3 strategy data session differs from operational evidence")
     account_epoch = _epoch_member(
         database,
         kind="account",
@@ -2140,6 +2212,8 @@ def _copy_source_bundle_to_staging(
             expected_sha256=expected[name],
             label=f"backup member {name}",
         )
+    _verify_restored_static_members(staging, verification=verification)
+    _assert_staging_database_is_private_copy(staging, bundle=bundle)
     staged = _verify_private_v3_staging(
         staging,
         expected_manifest_sha256=verification.manifest_sha256,
@@ -2278,18 +2352,97 @@ def _restore_receipt_from_row(row: sqlite3.Row, destination: Path) -> RestoreRec
     )
 
 
+def _restore_receipt_payload(
+    *,
+    verification: BackupVerification,
+    restore_id: str,
+    sanitized_state_sha256: str,
+    restored_audit_count: int,
+    restored_audit_head: str,
+    restored_at: str,
+) -> tuple[str, str]:
+    payload = canonical_json(
+        {
+            "schema": "firmquant.restore-receipt.v1",
+            "restore_id": restore_id,
+            "source_backup_id": verification.backup_id,
+            "source_manifest_sha256": verification.manifest_sha256,
+            "source_reason": cast(BackupReason, verification.reason).value,
+            "deployment_identity_sha256": verification.deployment_identity_sha256,
+            "operational_evidence_identity_sha256": (verification.operational_evidence_identity_sha256),
+            "account_authority_epoch": verification.account_authority_epoch,
+            "mode_epoch": verification.mode_epoch,
+            "source_database_sha256": verification.database_sha256,
+            "sanitized_state_sha256": sanitized_state_sha256,
+            "original_audit_count": verification.audit_count,
+            "original_audit_head": verification.audit_head_hash,
+            "restored_audit_count": restored_audit_count,
+            "restored_audit_head": restored_audit_head,
+            "restored_at": restored_at,
+            "requires_fresh_snapshot": True,
+            "requires_reconciliation": True,
+        }
+    )
+    return payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _verify_restored_static_members(
+    destination: Path,
+    *,
+    verification: BackupVerification,
+) -> None:
+    expected_names = _V3_MEMBERS | {"manifest.json"}
+    try:
+        observed = {member.name: member for member in destination.iterdir()}
+    except OSError as exc:
+        raise BackupVerificationError("restore directory cannot be inspected immutably") from exc
+    if set(observed) != expected_names:
+        raise BackupVerificationError("restore directory entries are not exact")
+    for name in sorted(expected_names):
+        _private_regular_file_identity(
+            observed[name],
+            label=f"restore member {name}",
+        )
+    manifest_path = destination / "manifest.json"
+    if _sha256_file(manifest_path) != verification.manifest_sha256:
+        raise BackupVerificationError("restore destination manifest identity changed")
+    manifest = _manifest(manifest_path)
+    members = _mapping(manifest.get("members"), label="members")
+    if set(members) != _V3_MEMBERS:
+        raise BackupVerificationError("restore destination member contract changed")
+    for name in sorted(_V3_MEMBERS - {"firmquant.sqlite3"}):
+        expected = _lower_digest(members[name], label=f"restore destination member {name}")
+        if _sha256_file(destination / name) != expected:
+            raise BackupVerificationError(f"restore destination member identity changed: {name}")
+
+
+def _assert_staging_database_is_private_copy(staging: Path, *, bundle: Path) -> None:
+    source_identity = _stable_file_identity(bundle / "firmquant.sqlite3")
+    staged_identity = _private_regular_file_identity(
+        staging / "firmquant.sqlite3",
+        label="restore staging database",
+    )
+    if staged_identity[:2] == source_identity[:2]:
+        raise BackupVerificationError("restore staging database is hard-linked to source evidence")
+
+
 def _probe_existing_restore(
     destination: Path,
     *,
     verification: BackupVerification,
     restore_id: str,
     destination_sha256: str,
-) -> tuple[str, str, RestoreReceipt | None]:
+) -> tuple[str, str, RestoreReceipt | None, _DirectoryObjectIdentity]:
+    directory_identity = _directory_object_identity(
+        destination,
+        label="restore destination directory",
+    )
     try:
         if {path.name for path in destination.iterdir()} != _V3_MEMBERS | {"manifest.json"}:
             raise BackupVerificationError("restore destination directory entries are not exact")
     except OSError as exc:
         raise BackupVerificationError("restore destination cannot be inspected immutably") from exc
+    _verify_restored_static_members(destination, verification=verification)
     database_path = destination / "firmquant.sqlite3"
     if database_path.is_symlink() or not database_path.is_file():
         raise BackupVerificationError("restore destination is not exact recoverable evidence")
@@ -2342,7 +2495,7 @@ def _probe_existing_restore(
             ):
                 raise BackupVerificationError("restore destination publication name conflicts")
             sanitized_state_sha256 = str(operation["sanitized_state_sha256"])
-            _verify_sanitized_restore(
+            restored_count, restored_head = _verify_sanitized_restore(
                 database,
                 restore_id=restore_id,
                 expected_sha256=sanitized_state_sha256,
@@ -2352,19 +2505,75 @@ def _probe_existing_restore(
             )
             receipt = None
             if receipt_row is not None:
-                receipt = _restore_receipt_from_row(receipt_row, destination)
-                if (
-                    receipt.source_backup_id != verification.backup_id
-                    or receipt.source_manifest_sha256 != verification.manifest_sha256
-                    or receipt.sanitized_state_sha256 != sanitized_state_sha256
-                    or stage != "RECEIPT_COMMITTED"
-                ):
+                restored_at = _canonical_utc_text(
+                    receipt_row["restored_at"],
+                    label="restore receipt time",
+                )
+                payload, payload_sha256 = _restore_receipt_payload(
+                    verification=verification,
+                    restore_id=restore_id,
+                    sanitized_state_sha256=sanitized_state_sha256,
+                    restored_audit_count=restored_count,
+                    restored_audit_head=restored_head,
+                    restored_at=restored_at,
+                )
+                observed_receipt = (
+                    str(receipt_row["restore_id"]),
+                    str(receipt_row["source_backup_id"]),
+                    str(receipt_row["source_manifest_sha256"]),
+                    str(receipt_row["source_reason"]),
+                    str(receipt_row["deployment_identity_sha256"]),
+                    str(receipt_row["operational_evidence_identity_sha256"]),
+                    int(receipt_row["account_authority_epoch"]),
+                    int(receipt_row["mode_epoch"]),
+                    str(receipt_row["source_database_sha256"]),
+                    str(receipt_row["sanitized_state_sha256"]),
+                    int(receipt_row["original_audit_count"]),
+                    str(receipt_row["original_audit_head"]),
+                    int(receipt_row["restored_audit_count"]),
+                    str(receipt_row["restored_audit_head"]),
+                    restored_at,
+                    int(receipt_row["requires_fresh_snapshot"]),
+                    int(receipt_row["requires_reconciliation"]),
+                    str(receipt_row["payload_json"]),
+                    str(receipt_row["payload_sha256"]),
+                )
+                expected_receipt = (
+                    restore_id,
+                    verification.backup_id,
+                    verification.manifest_sha256,
+                    cast(BackupReason, verification.reason).value,
+                    verification.deployment_identity_sha256,
+                    verification.operational_evidence_identity_sha256,
+                    verification.account_authority_epoch,
+                    verification.mode_epoch,
+                    verification.database_sha256,
+                    sanitized_state_sha256,
+                    verification.audit_count,
+                    verification.audit_head_hash,
+                    restored_count,
+                    restored_head,
+                    restored_at,
+                    1,
+                    1,
+                    payload,
+                    payload_sha256,
+                )
+                if observed_receipt != expected_receipt or stage != "RECEIPT_COMMITTED":
                     raise BackupVerificationError("restore destination receipt proof conflicts")
+                receipt = _restore_receipt_from_row(receipt_row, destination)
             elif stage == "RECEIPT_COMMITTED":
                 raise BackupVerificationError("restore terminal operation lacks its receipt")
-            return stage, sanitized_state_sha256, receipt
+            _assert_directory_object_identity(
+                destination,
+                directory_identity,
+                label="restore destination directory",
+            )
+            return stage, sanitized_state_sha256, receipt, directory_identity
         finally:
             database.close()
+    except BackupVerificationError:
+        raise
     except PersistenceError as exc:
         raise BackupVerificationError("restore destination immutable probe failed") from exc
 
@@ -2406,7 +2615,14 @@ def _finalize_restore(
     restore_id: str,
     sanitized_state_sha256: str,
     restored_at: datetime,
+    expected_directory_identity: _DirectoryObjectIdentity,
 ) -> RestoreReceipt:
+    _assert_directory_object_identity(
+        destination,
+        expected_directory_identity,
+        label="restore destination directory",
+    )
+    _verify_restored_static_members(destination, verification=verification)
     database = Database.open(destination / "firmquant.sqlite3")
     try:
         existing = database.query_one("SELECT * FROM restore_receipts WHERE restore_id=?", (restore_id,))
@@ -2427,29 +2643,14 @@ def _finalize_restore(
             restore_id=restore_id,
             expected_sha256=sanitized_state_sha256,
         )
-        payload = canonical_json(
-            {
-                "schema": "firmquant.restore-receipt.v1",
-                "restore_id": restore_id,
-                "source_backup_id": verification.backup_id,
-                "source_manifest_sha256": verification.manifest_sha256,
-                "source_reason": cast(BackupReason, verification.reason).value,
-                "deployment_identity_sha256": verification.deployment_identity_sha256,
-                "operational_evidence_identity_sha256": (verification.operational_evidence_identity_sha256),
-                "account_authority_epoch": verification.account_authority_epoch,
-                "mode_epoch": verification.mode_epoch,
-                "source_database_sha256": verification.database_sha256,
-                "sanitized_state_sha256": sanitized_state_sha256,
-                "original_audit_count": verification.audit_count,
-                "original_audit_head": verification.audit_head_hash,
-                "restored_audit_count": restored_count,
-                "restored_audit_head": restored_head,
-                "restored_at": restored_at.isoformat(),
-                "requires_fresh_snapshot": True,
-                "requires_reconciliation": True,
-            }
+        payload, payload_sha256 = _restore_receipt_payload(
+            verification=verification,
+            restore_id=restore_id,
+            sanitized_state_sha256=sanitized_state_sha256,
+            restored_audit_count=restored_count,
+            restored_audit_head=restored_head,
+            restored_at=restored_at.isoformat(),
         )
-        payload_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         if str(operation["stage"]) == "STAGED":
             with database.transaction():
                 database.write(
@@ -2510,8 +2711,10 @@ def _inspect_staging_operation(
     database_path = staging / "firmquant.sqlite3"
     if not database_path.exists() and not database_path.is_symlink():
         return None
-    if database_path.is_symlink() or not database_path.is_file():
-        raise BackupVerificationError("restore staging database is not regular evidence")
+    try:
+        _verify_restored_static_members(staging, verification=verification)
+    except BackupVerificationError as exc:
+        raise BackupVerificationError("restore staging collision requires manual preservation") from exc
     try:
         database = Database.open_read_only(database_path, immutable=True)
         try:
@@ -2721,6 +2924,9 @@ def _resume_staged_restore(
 ) -> RestoreReceipt:
     if not staging.is_dir() or staging.is_symlink():
         raise BackupVerificationError("restore staging collision requires manual preservation")
+    database_path = staging / "firmquant.sqlite3"
+    if database_path.exists() or database_path.is_symlink():
+        _assert_staging_database_is_private_copy(staging, bundle=bundle)
     operation = _inspect_staging_operation(
         staging,
         verification=verification,
@@ -2749,16 +2955,21 @@ def _resume_staged_restore(
     else:
         sanitized_state_sha256 = cast(str, operation[1])
     try:
-        for member in staging.iterdir():
-            if member.is_file():
-                with member.open("r+b") as stream:
-                    os.fsync(stream.fileno())
+        _verify_restored_static_members(staging, verification=verification)
+        _assert_staging_database_is_private_copy(staging, bundle=bundle)
+        for name in sorted(_V3_MEMBERS | {"manifest.json"}):
+            member = staging / name
+            _private_regular_file_identity(member, label=f"restore staging member {name}")
+            with member.open("r+b") as stream:
+                os.fsync(stream.fileno())
         _fsync_directory(staging)
+        _verify_restored_static_members(staging, verification=verification)
+        _assert_staging_database_is_private_copy(staging, bundle=bundle)
         _revalidate_parent(destination, destination_parent_identity)
         if destination.exists():
             destination.rmdir()
         _revalidate_parent(destination, destination_parent_identity)
-        _publish_directory(staging, destination)
+        published_identity = _publish_directory(staging, destination)
     except OSError as exc:
         raise BackupError("cannot publish staged restored backup") from exc
     return _finalize_restore(
@@ -2767,6 +2978,7 @@ def _resume_staged_restore(
         restore_id=restore_id,
         sanitized_state_sha256=sanitized_state_sha256,
         restored_at=restored_at,
+        expected_directory_identity=published_identity,
     )
 
 
@@ -2791,7 +3003,7 @@ def restore_backup(
     timestamp = timestamp.astimezone(UTC)
     restore_id, destination_sha256 = _restore_identity(verification, destination)
     if destination.exists() and destination.is_dir() and any(destination.iterdir()):
-        _stage, sanitized_state_sha256, receipt = _probe_existing_restore(
+        _stage, sanitized_state_sha256, receipt, directory_identity = _probe_existing_restore(
             destination,
             verification=verification,
             restore_id=restore_id,
@@ -2805,6 +3017,7 @@ def restore_backup(
             restore_id=restore_id,
             sanitized_state_sha256=sanitized_state_sha256,
             restored_at=timestamp,
+            expected_directory_identity=directory_identity,
         )
     staging = destination.parent / f".{destination.name}.{restore_id}.staging"
     if staging.exists() or staging.is_symlink():

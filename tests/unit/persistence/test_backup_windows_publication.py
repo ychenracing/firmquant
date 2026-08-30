@@ -19,6 +19,7 @@ def test_windows_publication_uses_only_movefile_write_through(
 
     def move_file_ex(source_path: Path, destination_path: Path, flags: int) -> bool:
         observed.append((source_path, destination_path, flags))
+        source_path.rename(destination_path)
         return True
 
     monkeypatch.setattr(backup_module, "_move_file_ex", move_file_ex, raising=False)
@@ -31,6 +32,34 @@ def test_windows_publication_uses_only_movefile_write_through(
     backup_module._publish_directory(source, destination, platform_name="nt")
 
     assert observed == [(source, destination, 0x8)]
+    assert destination.is_dir()
+
+
+def test_publication_rejects_a_different_directory_object_after_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "member").write_bytes(b"expected")
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "member").write_bytes(b"unrelated")
+    preserved = tmp_path / "preserved-staging"
+    destination = tmp_path / "published"
+    real_replace = backup_module.os.replace
+
+    def substitute_directory(source_path: Path, destination_path: Path) -> None:
+        real_replace(source_path, preserved)
+        real_replace(replacement, destination_path)
+
+    monkeypatch.setattr(backup_module.os, "replace", substitute_directory)
+
+    with pytest.raises(BackupError, match=r"publication|directory|identity"):
+        backup_module._publish_directory(source, destination, platform_name="posix")
+
+    assert (preserved / "member").read_bytes() == b"expected"
+    assert (destination / "member").read_bytes() == b"unrelated"
 
 
 @pytest.mark.parametrize("failure", [False, OSError("MoveFileExW unavailable")])

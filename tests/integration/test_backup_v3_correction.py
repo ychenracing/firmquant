@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
@@ -15,6 +16,7 @@ from firmquant.persistence.backup import (
     BackupVerificationError,
     backup_state,
     restore_backup,
+    verify_backup,
 )
 from firmquant.persistence.database import Database
 from firmquant.persistence.repositories import canonical_json
@@ -45,6 +47,20 @@ def _source_backup(tmp_path: Path):
     finally:
         database.close()
     return source, inputs
+
+
+def _strategy_session_mismatch(database: Database, inputs: BackupBundleInputs) -> BackupBundleInputs:
+    strategy_path = inputs.strategy_data_manifest_path
+    strategy = json.loads(strategy_path.read_text(encoding="utf-8"))
+    strategy["target_session"] = "2026-08-23"
+    strategy["observations"][0]["latest_observed_session"] = "2026-08-23"
+    strategy_path.write_text(canonical_json(strategy), encoding="utf-8")
+    evidence = replace(
+        inputs.operational_evidence_identity,
+        strategy_data_manifest_sha256=backup_module._sha256_file(strategy_path),
+    )
+    _register_evidence(database, evidence)
+    return replace(inputs, operational_evidence_identity=evidence)
 
 
 def _legacy_database(path: Path) -> None:
@@ -158,6 +174,76 @@ def test_arbitrary_staging_probe_is_immutable_and_creates_no_sidecars(tmp_path: 
     assert not (staging / "firmquant.sqlite3-shm").exists()
 
 
+def test_restore_rejects_a_hard_linked_staging_database_before_source_mutation(
+    tmp_path: Path,
+) -> None:
+    source, _inputs = _source_backup(tmp_path)
+    destination = tmp_path / "restore-target"
+    verification = verify_backup(source.bundle_path)
+    restore_id, _destination_sha256 = backup_module._restore_identity(verification, destination)
+    staging = destination.parent / f".{destination.name}.{restore_id}.staging"
+    staging.mkdir()
+    try:
+        (staging / "firmquant.sqlite3").hardlink_to(source.bundle_path / "firmquant.sqlite3")
+    except OSError:
+        pytest.skip("hard links are unavailable on this runner")
+    source_before = _tree_bytes(source.bundle_path)
+
+    with pytest.raises(BackupVerificationError, match=r"hard|link|private|staging"):
+        restore_backup(source.bundle_path, destination, restored_at=NOW)
+
+    assert _tree_bytes(source.bundle_path) == source_before
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("entry_kind", ["file", "directory", "file-symlink"])
+def test_staged_restore_retry_rejects_unexpected_entries_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_kind: str,
+) -> None:
+    source, _inputs = _source_backup(tmp_path)
+    destination = tmp_path / "restore-target"
+    real_fsync_directory = backup_module._fsync_directory
+    failed = False
+
+    def fail_staging_fsync(path: Path) -> None:
+        nonlocal failed
+        if path.name.endswith(".staging") and not failed:
+            failed = True
+            raise OSError("injected staging fsync failure")
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(backup_module, "_fsync_directory", fail_staging_fsync)
+    with pytest.raises(BackupError, match="publish"):
+        restore_backup(source.bundle_path, destination, restored_at=NOW)
+    staging = next(tmp_path.glob(".restore-target.*.staging"))
+    unexpected = staging / "unexpected-incident-evidence"
+    external = tmp_path / "external-incident-evidence"
+    if entry_kind == "file":
+        unexpected.write_bytes(b"preserve unexpected evidence")
+    elif entry_kind == "directory":
+        unexpected.mkdir()
+        (unexpected / "nested.bin").write_bytes(b"preserve nested evidence")
+    else:
+        external.write_bytes(b"preserve external evidence")
+        try:
+            unexpected.symlink_to(external)
+        except OSError:
+            pytest.skip("file symlinks are unavailable on this runner")
+    staging_before = _tree_bytes(staging)
+    external_before = external.read_bytes() if external.exists() else None
+
+    monkeypatch.setattr(backup_module, "_fsync_directory", real_fsync_directory)
+    with pytest.raises(BackupVerificationError, match=r"staging|entries|member|private"):
+        restore_backup(source.bundle_path, destination, restored_at=NOW)
+
+    assert _tree_bytes(staging) == staging_before
+    assert not destination.exists()
+    if external_before is not None:
+        assert external.read_bytes() == external_before
+
+
 def test_restore_reverifies_copied_source_before_staged_database_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -187,6 +273,96 @@ def test_restore_reverifies_copied_source_before_staged_database_mutation(
             assert staged_database.scalar("SELECT state FROM runtime_state WHERE singleton_id=1") == "READY"
         finally:
             staged_database.close()
+
+
+def test_backup_creation_rejects_strategy_manifest_session_different_from_evidence(
+    tmp_path: Path,
+) -> None:
+    database, account, inputs, root = _v3_case(tmp_path)
+    mismatched = _strategy_session_mismatch(database, inputs)
+    try:
+        with pytest.raises(BackupError, match=r"data manifest|strategy.*session"):
+            backup_state(
+                database,
+                root,
+                account_state_path=account,
+                complete_inputs=mismatched,
+                created_at=NOW,
+            )
+    finally:
+        database.close()
+
+
+def test_backup_verification_rejects_strategy_manifest_session_different_from_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, account, inputs, root = _v3_case(tmp_path)
+    mismatched = _strategy_session_mismatch(database, inputs)
+    real_validate = backup_module._validate_data_manifests
+    monkeypatch.setattr(
+        backup_module,
+        "_validate_data_manifests",
+        lambda _active, _strategy: mismatched.strategy_session,
+    )
+    try:
+        source = backup_state(
+            database,
+            root,
+            account_state_path=account,
+            complete_inputs=mismatched,
+            created_at=NOW,
+        )
+    finally:
+        database.close()
+    monkeypatch.setattr(backup_module, "_validate_data_manifests", real_validate)
+
+    with pytest.raises(BackupVerificationError, match=r"data manifest|strategy.*session"):
+        verify_backup(source.bundle_path)
+
+
+def test_backup_creation_rejects_broker_snapshot_session_different_from_evidence(
+    tmp_path: Path,
+) -> None:
+    database, account, inputs, root = _v3_case(tmp_path, snapshot_session="2026-08-23")
+    evidence = inputs.operational_evidence_identity
+    assert evidence is not None
+    try:
+        with pytest.raises(BackupError, match=r"broker snapshot|identity"):
+            backup_state(
+                database,
+                root,
+                account_state_path=account,
+                complete_inputs=inputs,
+                created_at=NOW,
+            )
+    finally:
+        database.close()
+
+
+def test_backup_verification_rejects_broker_snapshot_session_different_from_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database, account, inputs, root = _v3_case(tmp_path, snapshot_session="2026-08-23")
+    evidence = inputs.operational_evidence_identity
+    assert evidence is not None
+    real_verify_bindings = backup_module._verify_v3_database_bindings
+    monkeypatch.setattr(backup_module, "_verify_v3_database_bindings", lambda *args, **kwargs: None)
+    try:
+        source = backup_state(
+            database,
+            root,
+            account_state_path=account,
+            complete_inputs=inputs,
+            created_at=NOW,
+        )
+    finally:
+        database.close()
+    monkeypatch.setattr(backup_module, "_verify_v3_database_bindings", real_verify_bindings)
+
+    with pytest.raises(BackupVerificationError, match=r"broker snapshot|identity"):
+        verify_backup(source.bundle_path)
 
 
 def test_restore_retry_completes_exact_partial_member_copy(
@@ -769,3 +945,83 @@ def test_published_restore_with_wrong_final_name_is_rejected_immutably(
         restore_backup(source, destination, restored_at=NOW)
 
     assert _tree_bytes(destination) == before
+
+
+@pytest.mark.parametrize("member_name", ["production_config.toml", "manifest.json"])
+def test_published_restore_with_changed_non_database_member_is_rejected_immutably(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member_name: str,
+) -> None:
+    source, destination, _restore_id = _published_restore_without_receipt(tmp_path, monkeypatch)
+    member = destination / member_name
+    member.write_bytes(member.read_bytes() + b"\nchanged after publication\n")
+    before = _tree_bytes(destination)
+
+    with pytest.raises(BackupVerificationError, match=r"destination|member|manifest|identity"):
+        restore_backup(source, destination, restored_at=NOW)
+
+    assert _tree_bytes(destination) == before
+
+
+def test_completed_restore_retry_validates_all_receipt_facts(
+    tmp_path: Path,
+) -> None:
+    source, _inputs = _source_backup(tmp_path)
+    destination = tmp_path / "restore-target"
+    receipt = restore_backup(source.bundle_path, destination, restored_at=NOW)
+    database = Database.open(destination / "firmquant.sqlite3")
+    try:
+        with database.transaction():
+            database.write("DROP TRIGGER restore_receipts_reject_update")
+            database.write(
+                "UPDATE restore_receipts SET original_audit_head=? WHERE restore_id=?",
+                ("f" * 64, receipt.restore_id),
+            )
+    finally:
+        database.close()
+    before = _tree_bytes(destination)
+
+    with pytest.raises(BackupVerificationError, match=r"receipt|identity|proof"):
+        restore_backup(source.bundle_path, destination, restored_at=NOW)
+
+    assert _tree_bytes(destination) == before
+
+
+def test_restore_publication_never_opens_a_substituted_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, _inputs = _source_backup(tmp_path)
+    destination = tmp_path / "restore-target"
+    incident = tmp_path / "incident"
+    incident.mkdir()
+    incident_database = incident / "firmquant.sqlite3"
+    _legacy_database(incident_database)
+    before = _tree_bytes(incident)
+    real_replace = backup_module.os.replace
+    substituted = False
+
+    def substitute_at_publication(source_path: Path, destination_path: Path) -> None:
+        nonlocal substituted
+        if not substituted and source_path.name.endswith(".staging") and destination_path == destination:
+            substituted = True
+            preserved = source_path.with_name(source_path.name + ".preserved")
+            real_replace(source_path, preserved)
+            try:
+                source_path.symlink_to(incident, target_is_directory=True)
+            except OSError:
+                pytest.skip("directory symlinks are unavailable on this runner")
+            real_replace(source_path, destination_path)
+            return
+        real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(backup_module.os, "replace", substitute_at_publication)
+
+    with pytest.raises(BackupError, match=r"publication|directory|identity"):
+        restore_backup(source.bundle_path, destination, restored_at=NOW)
+
+    assert substituted is True
+    assert _tree_bytes(incident) == before
+    assert not (incident / "firmquant.sqlite3-wal").exists()
+    assert not (incident / "firmquant.sqlite3-shm").exists()
