@@ -333,7 +333,7 @@ def test_init_creates_only_safe_paper_state_and_status_contract(tmp_path: Path) 
     assert status.payload["mode"] == "PAPER"
     assert status.payload["runtime_state"] == "DISARMED"
     assert status.payload["armed"] is False
-    assert status.payload["uquant_commit"] == "105695aacd3d1c7e62705f64188da88d202db4cd"
+    assert status.payload["uquant_commit"] == "a17322f6330953a27c77f70d463a713c9a48ebc9"
     assert "account" not in json.dumps(dict(status.payload)).casefold()
 
 

@@ -59,7 +59,6 @@ class _DecisionContract(Protocol):
 class ProductionEngineContract(Protocol):
     cfg: object
     data: object
-    _code_hash: str | None
 
     def decide(
         self,
@@ -330,10 +329,6 @@ class StrategyAdapter:
             or input_fingerprint != snapshot.input_fingerprint
         ):
             raise DecisionRecoveryRequired("decision recovery input identity differs from durable snapshot")
-        current_code_hash = self._engine._code_hash
-        if current_code_hash not in {None, identity.economic_code_fingerprint}:
-            raise StrategyAdapterError("ProductionEngine instance has an unexpected code hash")
-        self._engine._code_hash = identity.economic_code_fingerprint
         working = copy.deepcopy(request.account)
         try:
             decision = self._engine.decide(
@@ -406,10 +401,6 @@ class StrategyAdapter:
         if existing is not None:
             return existing
 
-        current_code_hash = self._engine._code_hash
-        if current_code_hash not in {None, identity.economic_code_fingerprint}:
-            raise StrategyAdapterError("ProductionEngine instance has an unexpected code hash")
-        self._engine._code_hash = identity.economic_code_fingerprint
         working = copy.deepcopy(request.account)
         try:
             decision = self._engine.decide(

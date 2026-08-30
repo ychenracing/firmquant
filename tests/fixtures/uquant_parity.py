@@ -40,6 +40,32 @@ def write_synthetic_market_data(source_checkout: Path, data_directory: Path) -> 
         )
 
 
+def _run_public_trace(args: argparse.Namespace) -> dict[str, object]:
+    from uquant.account import economic_state_sha256
+    from uquant.config import config_fingerprint
+    from uquant.engine import ProductionEngine, code_fingerprint
+    from uquant.types import AccountState
+
+    symbols = ("sz300308", "sz300502", "sh603986")
+    session = date(2026, 6, 30)
+    account = AccountState.empty(2_000_000.0)
+    engine = ProductionEngine(Path(args.data_directory))
+    decision = engine.decide(
+        symbols=symbols,
+        as_of=session.isoformat(),
+        account=account,
+    )
+    payload = decision.canonical_payload(effective_config_sha256=config_fingerprint(engine.cfg))
+    return {
+        "account_after": account.to_dict(),
+        "account_after_sha256": economic_state_sha256(account),
+        "code_fingerprint": code_fingerprint(),
+        "config_fingerprint": config_fingerprint(engine.cfg),
+        "decision_digest": decision.decision_digest,
+        "decision_payload": payload,
+    }
+
+
 def _run(args: argparse.Namespace) -> dict[str, object]:
     from uquant.account import economic_state_sha256
     from uquant.config import config_fingerprint
@@ -69,12 +95,29 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     direct_payload = direct.canonical_payload(effective_config_sha256=config_fingerprint(direct_engine.cfg))
     direct_account_sha256 = economic_state_sha256(direct_account)
 
+    class PublicEngineFacade:
+        __module__ = "uquant.engine"
+
+        def __init__(self, engine: ProductionEngine) -> None:
+            self.cfg = engine.cfg
+            self.data = engine.data
+            self._engine = engine
+
+        def __getattribute__(self, name: str) -> object:
+            if name == "_code_hash":
+                raise AssertionError("private engine state was accessed")
+            return object.__getattribute__(self, name)
+
+        def decide(self, *, symbols: tuple[str, ...], as_of: str, account: object) -> object:
+            engine = object.__getattribute__(self, "_engine")
+            return engine.decide(symbols=symbols, as_of=as_of, account=account)
+
     database = Database.open(Path(args.database))
     try:
         adapted_account = AccountState.empty(2_000_000.0)
         policy = UniversePolicy.from_uquant(symbols, as_of=session)
         adapter = StrategyAdapter(
-            engine=ProductionEngine(data_directory),
+            engine=PublicEngineFacade(ProductionEngine(data_directory)),
             database=database,
             source_checkout=source_checkout,
             universe_policy=policy,
@@ -128,6 +171,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         return {
             "uquant_payload_equal": snapshot.uquant_payload == direct_payload,
+            "adapter_public_engine_surface": True,
             "account_equal": adapted_account_sha256 == direct_account_sha256,
             "decision_digest": direct.decision_digest,
             "opportunity": direct.opportunity.value,
@@ -154,8 +198,10 @@ def main() -> int:
     parser.add_argument("--data-directory", required=True)
     parser.add_argument("--database", required=True)
     parser.add_argument("--firmquant-commit", required=True)
+    parser.add_argument("--public-trace-only", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(_run(args), sort_keys=True))
+    result = _run_public_trace(args) if args.public_trace_only else _run(args)
+    print(json.dumps(result, sort_keys=True))
     return 0
 
 

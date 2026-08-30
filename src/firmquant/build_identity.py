@@ -125,6 +125,8 @@ class SourceIdentity:
     economic_code_fingerprint: str
     account_code_fingerprint: str
     config_fingerprint: str
+    public_api_contract_file_sha256: str
+    public_api_contract_sha256: str
     universe_manifest_sha256: str
     universe_sha256: str
     firmquant_pyproject_sha256: str
@@ -148,6 +150,8 @@ class SourceIdentity:
             ("economic code fingerprint", self.economic_code_fingerprint),
             ("account code fingerprint", self.account_code_fingerprint),
             ("config fingerprint", self.config_fingerprint),
+            ("public API contract file SHA-256", self.public_api_contract_file_sha256),
+            ("public API contract SHA-256", self.public_api_contract_sha256),
             ("universe manifest SHA-256", self.universe_manifest_sha256),
             ("universe SHA-256", self.universe_sha256),
             ("firmquant pyproject SHA-256", self.firmquant_pyproject_sha256),
@@ -194,6 +198,8 @@ class SourceIdentity:
             economic_code_fingerprint=_string(mapping, "economic_code_fingerprint"),
             account_code_fingerprint=_string(mapping, "account_code_fingerprint"),
             config_fingerprint=_string(mapping, "config_fingerprint"),
+            public_api_contract_file_sha256=_string(mapping, "public_api_contract_file_sha256"),
+            public_api_contract_sha256=_string(mapping, "public_api_contract_sha256"),
             universe_manifest_sha256=_string(mapping, "universe_manifest_sha256"),
             universe_sha256=_string(mapping, "universe_sha256"),
             firmquant_pyproject_sha256=_string(mapping, "firmquant_pyproject_sha256"),
@@ -247,7 +253,58 @@ def _require_file_sha256(path: Path, expected: str, *, label: str) -> None:
         raise SourceIdentityError(f"{label} mismatch: expected {expected}, observed {observed}")
 
 
-def _git(repository_root: Path, *arguments: str) -> str:
+def _verify_public_api_contract(
+    path: Path,
+    *,
+    expected_file_sha256: str,
+    expected_contract_sha256: str,
+) -> None:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise SourceIdentityError("cannot read identity-bearing file: public_api_contract.json") from exc
+    observed_file_sha256 = _sha256_bytes(raw)
+    if observed_file_sha256 != expected_file_sha256:
+        raise SourceIdentityError(
+            "uquant public API contract file SHA-256 mismatch: "
+            f"expected {expected_file_sha256}, observed {observed_file_sha256}"
+        )
+    payload = _parse_json_object(raw)
+    if set(payload) != {
+        "contract",
+        "contract_id",
+        "contract_sha256",
+        "recorded_on",
+        "schema_version",
+    }:
+        raise SourceIdentityError("uquant public API contract schema fields do not match")
+    if payload["schema_version"] != 1 or payload["contract_id"] != "uquant-public-api-v1":
+        raise SourceIdentityError("uquant public API contract schema is unsupported")
+    contract = payload["contract"]
+    if not isinstance(contract, dict):
+        raise SourceIdentityError("uquant public API contract payload must be an object")
+    observed = _sha256_bytes(
+        json.dumps(
+            contract,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    claimed = payload["contract_sha256"]
+    if claimed != expected_contract_sha256 or observed != expected_contract_sha256:
+        raise SourceIdentityError(
+            "uquant public API contract SHA-256 mismatch: "
+            f"expected {expected_contract_sha256}, claimed {claimed}, observed {observed}"
+        )
+
+
+def _git(
+    repository_root: Path,
+    *arguments: str,
+    accepted_returncodes: tuple[int, ...] = (0,),
+) -> str:
     executable = shutil.which("git")
     if executable is None:
         raise SourceIdentityError("git executable is unavailable")
@@ -255,12 +312,14 @@ def _git(repository_root: Path, *arguments: str) -> str:
         completed = subprocess.run(  # nosec B603
             [executable, *arguments],
             cwd=repository_root,
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except OSError as exc:
         raise SourceIdentityError(f"cannot inspect uquant Git source: {' '.join(arguments)}") from exc
+    if completed.returncode not in accepted_returncodes:
+        raise SourceIdentityError(f"cannot inspect uquant Git source: {' '.join(arguments)}")
     return completed.stdout.strip()
 
 
@@ -268,6 +327,15 @@ def verify_uquant_source_checkout(identity: SourceIdentity, repository_root: Pat
     """Verify that a clean checkout is the exact reviewed uquant source tree."""
 
     root = repository_root.resolve()
+    symbolic_head = _git(
+        root,
+        "symbolic-ref",
+        "-q",
+        "HEAD",
+        accepted_returncodes=(0, 1),
+    )
+    if symbolic_head:
+        raise SourceIdentityError("uquant source checkout must use detached HEAD")
     observed_commit = _git(root, "rev-parse", "HEAD^{commit}")
     if observed_commit != identity.uquant_commit:
         raise SourceIdentityError(
@@ -289,6 +357,11 @@ def verify_uquant_source_checkout(identity: SourceIdentity, repository_root: Pat
         root / "uv.lock",
         identity.uquant_uv_lock_sha256,
         label="uquant uv.lock SHA-256",
+    )
+    _verify_public_api_contract(
+        root / "benchmarks/public_api_contract.json",
+        expected_file_sha256=identity.public_api_contract_file_sha256,
+        expected_contract_sha256=identity.public_api_contract_sha256,
     )
     manifest = root / "uquant/contracts/resources/ai_universe_manifest.json"
     _require_file_sha256(

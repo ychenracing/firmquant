@@ -120,6 +120,7 @@ def build_reviewed_wheel(
     return {
         "source_commit": identity.uquant_commit,
         "source_tree": identity.uquant_tree,
+        "public_api_contract_sha256": identity.public_api_contract_sha256,
         "wheel": str(destination),
         "wheel_sha256": identity.wheel_sha256,
         "build_hashes": hashes,

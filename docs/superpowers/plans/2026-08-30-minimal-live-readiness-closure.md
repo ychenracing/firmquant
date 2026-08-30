@@ -58,16 +58,33 @@ def test_source_checkout_must_be_detached(target_checkout: Path, identity: Sourc
     with pytest.raises(SourceIdentityError, match="detached"):
         verify_uquant_source_checkout(identity, target_checkout)
 
-def test_adapter_does_not_write_private_code_hash() -> None:
-    source = Path("src/firmquant/strategy/adapter.py").read_text(encoding="utf-8")
-    assert "._code_hash" not in source
+
+def test_adapter_operates_through_public_engine_surface(adapter_factory, real_engine, request) -> None:
+    class PublicEngineFacade:
+        __module__ = "uquant.engine"
+
+        def __init__(self, engine) -> None:
+            self.cfg = engine.cfg
+            self.data = engine.data
+            self._engine = engine
+
+        def __getattribute__(self, name: str):
+            if name == "_code_hash":
+                raise AssertionError("private engine state was accessed")
+            return object.__getattribute__(self, name)
+
+        def decide(self, *, symbols, as_of, account):
+            return self._engine.decide(symbols=symbols, as_of=as_of, account=account)
+
+    result = adapter_factory(PublicEngineFacade(real_engine)).decide_once(request)
+    assert result.uquant_decision_digest
 ```
 
 - [ ] **Step 2: Run the focused tests and observe the expected failures**
 
 Run: `uv run pytest tests/unit/test_build_identity.py tests/unit/test_build_identity_fail_closed.py tests/integration/test_uquant_parity.py -q`
 
-Expected: the attached checkout is accepted and the adapter source contains `_code_hash`.
+Expected: the attached checkout is accepted and the public facade raises because the adapter touches `_code_hash`.
 
 - [ ] **Step 3: Enforce detached source and adapt only through target public APIs**
 
@@ -164,6 +181,7 @@ def test_deployment_identity_is_stable_across_account_state_changes(base_identit
     assert first.deployment_identity_sha256 == second.deployment_identity_sha256
     assert first.sha256 != second.sha256
 
+
 def test_identity_rejects_noncanonical_json() -> None:
     with pytest.raises(IdentityError):
         parse_identity('{"schema":"x","schema":"y"}')
@@ -193,6 +211,7 @@ class DeploymentIdentity:
     mode: Mode
     caps_sha256: str
     production_policy_sha256: str
+
 
 @dataclass(frozen=True, slots=True)
 class OperationalEvidenceIdentity:
@@ -252,6 +271,7 @@ def test_migration_seeds_legacy_binding_and_mode_as_epoch_one(v4_database: Datab
     assert row(v4_database, "SELECT epoch FROM mode_epoch_active") == (1,)
     assert scalar(v4_database, "SELECT COUNT(*) FROM account_authority_epochs") == 1
     assert scalar(v4_database, "SELECT COUNT(*) FROM mode_epochs") == 1
+
 
 def test_legacy_snapshot_timing_is_not_current(v4_database: Database) -> None:
     apply_migrations(v4_database)
@@ -343,6 +363,7 @@ def test_v3_bundle_cross_binds_reason_epochs_and_identities(reason, complete_inp
     assert verified.reason is reason
     assert verified.deployment_identity_sha256 == complete_inputs.deployment_identity.sha256
 
+
 def test_schema_v2_bundle_remains_verifiable_after_current_migration(v2_bundle: Path) -> None:
     assert verify_backup(v2_bundle).schema_version == 2
 ```
@@ -375,6 +396,7 @@ class BackupReason(StrEnum):
     SESSION_CLOSE = "SESSION_CLOSE"
     MODE_TRANSITION = "MODE_TRANSITION"
     ACCOUNT_REBASELINE = "ACCOUNT_REBASELINE"
+
 
 def restore_backup(bundle: Path, destination: Path) -> RestoreReceipt:
     """Verify, stage, sanitize, fsync, and atomically publish a DISARMED restore."""
@@ -430,6 +452,7 @@ def test_rebaseline_requires_verified_backup_before_prepare(service, reviewed_st
     with pytest.raises(RebaselineDenied, match="ACCOUNT_REBASELINE_BACKUP_MISSING"):
         service.rebaseline(reviewed_state, reason=RebaselineReason.MANUAL_BROKER_ACTIVITY)
 
+
 @pytest.mark.parametrize("fault", ["after_prepare", "after_file", "before_receipt"])
 def test_rebaseline_recovers_idempotently(fault, harness) -> None:
     operation_id = harness.fail_once(fault)
@@ -443,8 +466,12 @@ def test_rebaseline_recovers_idempotently(fault, harness) -> None:
 ```python
 @pytest.mark.parametrize(
     ("source", "target", "allowed"),
-    [(Mode.PAPER, Mode.SHADOW, True), (Mode.SHADOW, Mode.LIVE, False),
-     (Mode.SHADOW, Mode.CANARY, True), (Mode.CANARY, Mode.LIVE, True)],
+    [
+        (Mode.PAPER, Mode.SHADOW, True),
+        (Mode.SHADOW, Mode.LIVE, False),
+        (Mode.SHADOW, Mode.CANARY, True),
+        (Mode.CANARY, Mode.LIVE, True),
+    ],
 )
 def test_mode_edges(source, target, allowed, transition_service) -> None:
     assert transition_service.edge_allowed(source, target) is allowed
@@ -523,6 +550,7 @@ def test_slow_first_query_is_stale_even_when_completion_is_recent(collector, clo
     snapshot = collector.collect(total_deadline_seconds=30)
     with pytest.raises(SnapshotCollectionError, match="SNAPSHOT_DEADLINE_EXCEEDED"):
         snapshot
+
 
 def test_snapshot_persists_started_completed_duration_and_watermark(store, snapshot) -> None:
     store.append(snapshot)
@@ -606,9 +634,11 @@ high/low crosses it, and capacity uses previous volume.
 def test_qfq_without_authoritative_limit_fact_blocks_fill() -> None:
     assert execute_open(order, facts(limit_fact=None)).blocker is BlockerCode.LIMIT_FACT_UNAVAILABLE
 
+
 def test_sell_odd_lot_only_when_liquidating_entire_remainder() -> None:
     assert execute_open(sell(50), account(position=150, sellable=150)).filled_shares == 0
     assert execute_open(sell(150), account(position=150, sellable=150)).filled_shares == 150
+
 
 def test_directional_adverse_slippage() -> None:
     assert adverse_slippage(ReplaySide.BUY, Decimal("10.02"), Decimal("10"), 100) == Decimal("2")
@@ -707,6 +737,7 @@ def test_normal_and_restart_must_match_every_economic_identity(harness) -> None:
     result = evaluate_production_replay(harness)
     assert result.normal.economic_sha256 == result.restart_each_session.economic_sha256
 
+
 def test_same_identity_different_result_conflicts(store, passed_receipt) -> None:
     store.append(passed_receipt)
     with pytest.raises(ReplayAcceptanceConflict):
@@ -792,6 +823,7 @@ def test_readiness_rejects_stale_identity_component(runtime, mutation) -> None:
     assert facts.passed is False
     assert any("MISMATCH" in blocker or "STALE" in blocker for blocker in facts.blockers)
 
+
 def test_backup_compares_account_state_not_account_id(runtime) -> None:
     assert runtime.with_matching_account_state_backup().collect().verified_backup is True
 ```
@@ -805,6 +837,7 @@ def test_backup_compares_account_state_not_account_id(runtime) -> None:
 )
 def test_reconciliation_is_phase_aware(phase, required, runtime) -> None:
     assert runtime.required_reconciliation_kinds(phase) == required
+
 
 def test_distinct_fill_ids_with_same_economics_are_not_duplicates(runtime) -> None:
     runtime.add_fill("fill-a", economics)
@@ -871,6 +904,7 @@ def test_online_arm_cli_returns_queued_not_armed(operator, online_daemon) -> Non
     assert result.code == "QUEUED"
     assert online_daemon.arm_store.active() is None
 
+
 @pytest.mark.parametrize("mutation", ["mac", "nonce", "host", "mode", "identity", "expiry"])
 def test_daemon_rejects_mutated_arm_request(mutation, daemon, arm_request) -> None:
     receipt = daemon.process_control(mutate(arm_request, mutation))
@@ -883,6 +917,7 @@ def test_daemon_rejects_mutated_arm_request(mutation, daemon, arm_request) -> No
 def test_only_daemon_writer_creates_arm(offline_operator) -> None:
     with pytest.raises(OperatorCommandDenied, match="ARM_DAEMON_NOT_READY"):
         offline_operator.arm_live()
+
 
 def test_effective_ttl_is_minimum_of_all_boundaries(daemon, request) -> None:
     lease = daemon.execute_arm(request, session_remaining=120, revalidate_in=60)
@@ -966,6 +1001,7 @@ def test_watchdog_allows_only_status_and_run() -> None:
     assert "status --json" in script
     for forbidden in ("arm-live", "resume", "transition-mode", "rebaseline-account", "submit"):
         assert forbidden not in script
+
 
 def test_task_does_not_use_highest_privilege_or_store_secrets() -> None:
     script = Path("scripts/windows/install_firmquant_task.ps1").read_text(encoding="utf-8")
