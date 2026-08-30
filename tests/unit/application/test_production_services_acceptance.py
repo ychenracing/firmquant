@@ -981,6 +981,68 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
             active=lambda: SimpleNamespace(path=hooks._settings.paths.data_directory)
         )
         hooks._data_root = hooks._settings.paths.data_directory
+        deployment = DeploymentIdentity(
+            firmquant_commit="f" * 40,
+            uquant_commit="1" * 40,
+            uquant_tree="2" * 40,
+            uquant_package_manifest_sha256="3" * 64,
+            uquant_code_fingerprint="4" * 64,
+            uquant_config_fingerprint="5" * 64,
+            semantic_config_sha256="6" * 64,
+            raw_config_sha256=hooks._identity.config_sha256,
+            xtquant_safety_manifest_sha256="8" * 64,
+            account_id_hash=snapshot.account.account_id_hash,
+            account_authority_epoch=1,
+            mode_epoch=1,
+            mode=Mode.SHADOW,
+            caps_sha256="9" * 64,
+            production_policy_sha256="a" * 64,
+        )
+        operational = OperationalEvidenceIdentity(
+            deployment_identity=deployment,
+            account_state_sha256=decision.account_after_sha256,
+            broker_snapshot_id=snapshot.snapshot_id,
+            broker_snapshot_sha256=snapshot.raw_payload_sha256,
+            broker_event_watermark=snapshot.broker_event_watermark,
+            snapshot_started_at=NOW,
+            snapshot_completed_at=NOW,
+            snapshot_duration_ms=1,
+            calendar_sha256="b" * 64,
+            active_data_generation_sha256="c" * 64,
+            strategy_data_manifest_sha256="d" * 64,
+            strategy_session=EXECUTION_SESSION,
+            decision_id=decision.decision_id,
+            phase="EOD",
+            kind="BACKUP",
+        )
+        hooks._operational_identity_provider = lambda _stage, _snapshot: operational
+        with hooks._database.transaction():
+            hooks._database.write(
+                """
+                INSERT INTO account_authority_epochs(
+                    epoch,account_id_hash,account_state_sha256,deployment_identity_sha256,
+                    source_binding_id,payload_json,payload_sha256,created_at
+                ) VALUES(1,?,?,NULL,NULL,'{}',?,?)
+                """,
+                (
+                    snapshot.account.account_id_hash,
+                    decision.account_after_sha256,
+                    "e" * 64,
+                    NOW.isoformat(),
+                ),
+            )
+            hooks._database.write("INSERT INTO account_authority_active(singleton_id,epoch) VALUES(1,1)")
+            hooks._database.write(
+                """
+                INSERT INTO mode_epochs(
+                    epoch,mode,deployment_identity_sha256,caps_sha256,
+                    payload_json,payload_sha256,created_at
+                ) VALUES(1,'SHADOW',NULL,NULL,'{}',?,?)
+                """,
+                ("f" * 64, NOW.isoformat()),
+            )
+            hooks._database.write("INSERT INTO mode_epoch_active(singleton_id,epoch) VALUES(1,1)")
+        hooks._snapshots.persist(snapshot, started_at=NOW, completed_at=NOW, duration_ms=1)
         monkeypatch.setattr(
             hooks,
             "_reconcile",
@@ -1035,6 +1097,7 @@ def test_close_session_orders_decision_before_report_and_backup_and_is_idempoten
                 events.append("backup") or SimpleNamespace(backup_id="backup-1", manifest_sha256="a" * 64)
             ),
         )
+        monkeypatch.setattr(hooks._accounts.store, "hash_file", lambda _path: "e" * 64)
 
         assert hooks._close_session(EXECUTION_SESSION) == (1, 1)
         assert events == ["reconcile", "data", "reload", "decision", "report", "backup"]

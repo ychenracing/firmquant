@@ -94,6 +94,42 @@ def test_migrations_are_repeatable_without_rewriting_receipts(db: Database) -> N
     )
 
 
+def test_v6_only_rebinds_current_account_evidence_and_preserves_v5_checksum(
+    tmp_path: Path,
+) -> None:
+    assert MIGRATIONS[4].checksum == ("e3ad107f78ec6079592bf16608240ee637df4583988c15f5a0f4c95a06f82503")
+    assert CURRENT_SCHEMA_VERSION == 6
+    migration = MIGRATIONS[5]
+    assert migration.name == "current_account_evidence_bindings"
+    assert len(migration.statements) == 6
+    assert sum(statement.lstrip().startswith("DROP TRIGGER") for statement in migration.statements) == 3
+    assert {
+        "account_rebaseline_receipts_operation_guard",
+        "mode_transition_receipts_operation_guard",
+        "backup_receipts_v3_operation_guard",
+    } == {
+        statement.split("CREATE TRIGGER ", 1)[1].split(maxsplit=1)[0]
+        for statement in migration.statements
+        if "CREATE TRIGGER " in statement
+    }
+    connection = sqlite3.connect(tmp_path / "v5-to-v6.sqlite3", isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    database = Database(tmp_path / "v5-to-v6.sqlite3", connection)
+    try:
+        apply_migrations(database, migrations=MIGRATIONS[:5])
+        assert database.scalar("SELECT checksum FROM schema_migrations WHERE version=5") == (
+            "e3ad107f78ec6079592bf16608240ee637df4583988c15f5a0f4c95a06f82503"
+        )
+        apply_migrations(database)
+        assert database.scalar("SELECT max(version) FROM schema_migrations") == 6
+        assert database.scalar("SELECT checksum FROM schema_migrations WHERE version=5") == (
+            "e3ad107f78ec6079592bf16608240ee637df4583988c15f5a0f4c95a06f82503"
+        )
+    finally:
+        database.close()
+
+
 def _v4_database(path: Path) -> Database:
     connection = sqlite3.connect(path, isolation_level=None)
     connection.row_factory = sqlite3.Row
@@ -351,11 +387,11 @@ def test_future_migration_receipt_fails_closed(db: Database) -> None:
         db.write(
             """
             INSERT INTO schema_migrations(version,name,checksum,applied_at)
-            VALUES(6,'unknown_future',?,'2026-08-30T08:00:00+00:00')
+            VALUES(7,'unknown_future',?,'2026-08-30T08:00:00+00:00')
             """,
             ("0" * 64,),
         )
-    with pytest.raises(MigrationError, match="version 6 is newer"):
+    with pytest.raises(MigrationError, match="version 7 is newer"):
         apply_migrations(db)
 
 

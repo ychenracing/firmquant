@@ -32,7 +32,7 @@ from firmquant.domain.states import RuntimeState, RuntimeStatus
 from firmquant.execution.replay_runner import run_execution_replay
 from firmquant.observability.health import Doctor, ReadOnlyDoctorBroker
 from firmquant.persistence.audit import AuditLedger
-from firmquant.persistence.backup import backup_state, verify_backup
+from firmquant.persistence.backup import backup_state, restore_backup, verify_backup
 from firmquant.persistence.database import Database
 from firmquant.persistence.repositories import canonical_json
 from firmquant.persistence.writer_lease import WriterLease
@@ -116,6 +116,7 @@ class OperatorCommand(StrEnum):
     LIVE_READINESS = "live-readiness"
     BACKUP = "backup"
     VERIFY_BACKUP = "verify-backup"
+    RESTORE_BACKUP = "restore-backup"
     CANCEL_SYSTEM_ORDERS = "cancel-system-orders"
     SMOKE_READONLY = "smoke-readonly"
 
@@ -179,6 +180,7 @@ class OperatorRequest:
     end_session: date | None = None
     events_path: Path | None = None
     bundle_path: Path | None = None
+    destination_path: Path | None = None
     account_state_path: Path | None = None
     ttl_seconds: int = 300
     limit: int = 100
@@ -201,7 +203,12 @@ class OperatorRequest:
                 raise ValueError("execution replay requires start and end sessions")
             if self.start_session >= self.end_session:
                 raise ValueError("execution replay start must precede end")
-        for path_value in (self.events_path, self.bundle_path, self.account_state_path):
+        for path_value in (
+            self.events_path,
+            self.bundle_path,
+            self.destination_path,
+            self.account_state_path,
+        ):
             if path_value is not None and not isinstance(path_value, Path):
                 raise TypeError("operator path values must be pathlib.Path")
         if (
@@ -457,6 +464,7 @@ class LocalOperatorService:
             OperatorCommand.LIVE_READINESS: lambda: self._live_readiness(),
             OperatorCommand.BACKUP: lambda: self._backup(request),
             OperatorCommand.VERIFY_BACKUP: lambda: self._verify_backup(request),
+            OperatorCommand.RESTORE_BACKUP: lambda: self._restore_backup(request),
             OperatorCommand.CANCEL_SYSTEM_ORDERS: lambda: self._cancel_system_orders(),
             OperatorCommand.SMOKE_READONLY: lambda: self._smoke_readonly(),
         }
@@ -1840,6 +1848,8 @@ class LocalOperatorService:
                 "audit_count": receipt.audit_count,
                 "audit_head_hash": receipt.audit_head_hash,
                 "created_at": receipt.created_at,
+                "bundle_schema_version": receipt.schema_version,
+                "production_authority": receipt.production_authority,
             },
         )
 
@@ -1857,7 +1867,44 @@ class LocalOperatorService:
                 "audit_count": verification.audit_count,
                 "audit_head_hash": verification.audit_head_hash,
                 "schema_version": verification.schema_version,
+                "bundle_schema_version": verification.schema_version,
+                "operational_schema_version": verification.operational_schema_version,
+                "complete_bundle": verification.complete_bundle,
+                "production_authority": verification.production_authority,
+                "reason": None if verification.reason is None else verification.reason.value,
                 "verified": True,
+            },
+        )
+
+    def _restore_backup(self, request: OperatorRequest) -> OperatorResult:
+        if request.bundle_path is None:
+            raise OperatorCommandDenied("BACKUP_BUNDLE_REQUIRED")
+        if request.destination_path is None:
+            raise OperatorCommandDenied("RESTORE_DESTINATION_REQUIRED")
+        receipt = restore_backup(
+            request.bundle_path,
+            request.destination_path,
+            restored_at=self._now(),
+        )
+        return OperatorResult(
+            message="schema-v3 备份已恢复到空目录; 恢复结果保持 DISARMED。",
+            payload={
+                "restore_id": receipt.restore_id,
+                "source_backup_id": receipt.source_backup_id,
+                "destination": receipt.destination.name,
+                "source_manifest_sha256": receipt.source_manifest_sha256,
+                "sanitized_state_sha256": receipt.sanitized_state_sha256,
+                "restored_audit_count": receipt.restored_audit_count,
+                "restored_audit_head": receipt.restored_audit_head,
+                "restored_at": receipt.restored_at,
+                "requires_fresh_snapshot": receipt.requires_fresh_snapshot,
+                "requires_reconciliation": receipt.requires_reconciliation,
+                "next_steps": [
+                    "start daemon DISARMED",
+                    "collect a fresh broker snapshot",
+                    "run full reconciliation",
+                    "review readiness before any authority request",
+                ],
             },
         )
 

@@ -84,7 +84,7 @@ def test_verify_backup_rejects_external_digest_and_unknown_schema(tmp_path: Path
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     manifest = bundle / "manifest.json"
-    manifest.write_text('{"schema_version":3}', encoding="utf-8")
+    manifest.write_text('{"schema_version":4}', encoding="utf-8")
     observed = hashlib.sha256(manifest.read_bytes()).hexdigest()
 
     with pytest.raises(backup.BackupVerificationError, match="external receipt"):

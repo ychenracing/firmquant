@@ -67,7 +67,7 @@ from firmquant.persistence.account_authority import (
     ReviewedAccountAdjustmentRepository,
 )
 from firmquant.persistence.audit import AuditLedger
-from firmquant.persistence.backup import BackupBundleInputs, backup_state
+from firmquant.persistence.backup import BackupBundleInputs, BackupReason, backup_state
 from firmquant.persistence.broker_snapshot_store import BrokerSnapshotStore
 from firmquant.persistence.production_recovery import ProductionRecoveryService
 from firmquant.persistence.production_repository import MonotonicExecutionLedgerRepository
@@ -1440,6 +1440,91 @@ class ProductionServiceHooks:
             if safety_path is None:
                 raise ProductionServicesUnavailable("XTQUANT_SAFETY_MANIFEST_MISSING")
             strategy_manifest = self._data_root / ".firmquant-data-manifest.json"
+            if eod_snapshot is None:
+                eod_snapshot = self._capture()
+            if eod_snapshot.session_date != session:
+                raise ProductionServicesUnavailable("BACKUP_SNAPSHOT_SESSION_MISMATCH")
+            provider = self._operational_identity_provider
+            if provider is None:
+                raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
+            stage = EvidenceStage.SHADOW if self._settings.mode is Mode.SHADOW else EvidenceStage.CANARY
+            operational_identity = provider(stage, eod_snapshot)
+            deployment_identity = operational_identity.deployment_identity
+            if operational_identity.decision_id != decision_id:
+                raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_DECISION_MISMATCH")
+            with self._database.transaction():
+                stored_deployment = self._database.query_one(
+                    """
+                    SELECT account_id_hash,account_authority_epoch,mode_epoch,mode,
+                           payload_json,payload_sha256
+                    FROM deployment_identities WHERE deployment_identity_sha256=?
+                    """,
+                    (deployment_identity.sha256,),
+                )
+                deployment_values = (
+                    deployment_identity.account_id_hash,
+                    deployment_identity.account_authority_epoch,
+                    deployment_identity.mode_epoch,
+                    deployment_identity.mode.value,
+                    deployment_identity.canonical_json,
+                    deployment_identity.sha256,
+                )
+                if stored_deployment is None:
+                    self._database.write(
+                        """
+                        INSERT INTO deployment_identities(
+                            deployment_identity_sha256,account_id_hash,account_authority_epoch,
+                            mode_epoch,mode,payload_json,payload_sha256,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?)
+                        """,
+                        (deployment_identity.sha256, *deployment_values, self._now().isoformat()),
+                    )
+                elif tuple(stored_deployment) != deployment_values:
+                    raise ProductionServicesUnavailable("BACKUP_DEPLOYMENT_IDENTITY_COLLISION")
+
+                receipt_id = "backup-evidence-" + operational_identity.sha256
+                stored_evidence = self._database.query_one(
+                    """
+                    SELECT receipt_id,deployment_identity_sha256,account_authority_epoch,
+                           mode_epoch,account_state_sha256,broker_snapshot_id,strategy_session,
+                           phase,kind,payload_json,payload_sha256
+                    FROM operational_evidence_receipts
+                    WHERE operational_evidence_identity_sha256=?
+                    """,
+                    (operational_identity.sha256,),
+                )
+                evidence_values = (
+                    receipt_id,
+                    deployment_identity.sha256,
+                    deployment_identity.account_authority_epoch,
+                    deployment_identity.mode_epoch,
+                    operational_identity.account_state_sha256,
+                    operational_identity.broker_snapshot_id,
+                    operational_identity.strategy_session.isoformat(),
+                    operational_identity.phase,
+                    operational_identity.kind,
+                    operational_identity.canonical_json,
+                    operational_identity.sha256,
+                )
+                if stored_evidence is None:
+                    self._database.write(
+                        """
+                        INSERT INTO operational_evidence_receipts(
+                            receipt_id,operational_evidence_identity_sha256,
+                            deployment_identity_sha256,account_authority_epoch,mode_epoch,
+                            account_state_sha256,broker_snapshot_id,strategy_session,phase,kind,
+                            payload_json,payload_sha256,created_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            receipt_id,
+                            operational_identity.sha256,
+                            *evidence_values[1:],
+                            self._now().isoformat(),
+                        ),
+                    )
+                elif tuple(stored_evidence) != evidence_values:
+                    raise ProductionServicesUnavailable("BACKUP_OPERATIONAL_IDENTITY_COLLISION")
             backup = backup_state(
                 self._database,
                 self._settings.paths.backup_directory,
@@ -1458,6 +1543,9 @@ class ProductionServiceHooks:
                     account_sha256=self._accounts.store.hash_file(self._accounts.path),
                     decision_id=decision_id,
                     strategy_session=session,
+                    reason=BackupReason.SESSION_CLOSE,
+                    deployment_identity=deployment_identity,
+                    operational_evidence_identity=operational_identity,
                 ),
             )
             backup_cp = self._close.append(

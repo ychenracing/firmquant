@@ -48,6 +48,7 @@ from firmquant.persistence.repositories import (
     DecisionSnapshotRepository,
     ExecutionLedgerRepository,
 )
+from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
 from firmquant.security.secrets import SecretBytes
 from firmquant.strategy.identity import StrategyIdentity
 from tests.fixtures.broker_contract import order_event, write_recording
@@ -1033,6 +1034,12 @@ def test_backup_and_verify_backup_commands_form_a_complete_round_trip(tmp_path: 
 
     assert receipt.payload["backup_id"] == verification.payload["backup_id"]
     assert receipt.payload["manifest_sha256"] == verification.payload["manifest_sha256"]
+    assert receipt.payload["bundle_schema_version"] == 1
+    assert receipt.payload["production_authority"] is False
+    assert verification.payload["bundle_schema_version"] == 1
+    assert verification.payload["operational_schema_version"] == CURRENT_SCHEMA_VERSION
+    assert verification.payload["complete_bundle"] is False
+    assert verification.payload["production_authority"] is False
     assert verification.payload["verified"] is True
 
 

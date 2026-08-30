@@ -8,29 +8,56 @@ from firmquant.persistence.database import Database
 from firmquant.persistence.schema import CURRENT_SCHEMA_VERSION
 
 
-def _seed_operational_epochs(database: Database) -> None:
+def _seed_operational_epochs(
+    database: Database,
+    *,
+    baseline_account_state_sha256: str = "1" * 64,
+    deployment_identity_sha256: str = "d" * 64,
+    mode: str = "PAPER",
+) -> None:
     with database.transaction():
         database.write(
             """
             INSERT INTO account_authority_epochs(
                 epoch,account_id_hash,account_state_sha256,deployment_identity_sha256,
                 source_binding_id,payload_json,payload_sha256,created_at
-            ) VALUES(1,?,?,NULL,NULL,'{}',?,'2026-01-06T08:00:00+00:00')
+            ) VALUES(1,?,?,?,NULL,'{}',?,'2026-01-06T08:00:00+00:00')
             """,
-            ("0" * 64, "1" * 64, "2" * 64),
+            (
+                "0" * 64,
+                baseline_account_state_sha256,
+                deployment_identity_sha256,
+                "2" * 64,
+            ),
         )
         database.write(
             """
             INSERT INTO mode_epochs(
                 epoch,mode,deployment_identity_sha256,payload_json,payload_sha256,created_at
-            ) VALUES(1,'PAPER',NULL,'{}',?,'2026-01-06T08:00:00+00:00')
+            ) VALUES(1,?,?,'{}',?,'2026-01-06T08:00:00+00:00')
             """,
-            ("3" * 64,),
+            (mode, deployment_identity_sha256, "3" * 64),
         )
 
 
-def _seed_current_operational_authority(database: Database) -> None:
-    _seed_operational_epochs(database)
+def _seed_current_operational_authority(
+    database: Database,
+    *,
+    baseline_account_state_sha256: str = "1" * 64,
+    current_account_state_sha256: str = "1" * 64,
+    deployment_identity_sha256: str = "d" * 64,
+    operational_evidence_identity_sha256: str = "e" * 64,
+    epoch_deployment_identity_sha256: str | None = None,
+) -> None:
+    _seed_operational_epochs(
+        database,
+        baseline_account_state_sha256=baseline_account_state_sha256,
+        deployment_identity_sha256=(
+            deployment_identity_sha256
+            if epoch_deployment_identity_sha256 is None
+            else epoch_deployment_identity_sha256
+        ),
+    )
     with database.transaction():
         database.write("INSERT INTO account_authority_active(singleton_id,epoch) VALUES(1,1)")
         database.write("INSERT INTO mode_epoch_active(singleton_id,epoch) VALUES(1,1)")
@@ -59,7 +86,7 @@ def _seed_current_operational_authority(database: Database) -> None:
                 mode_epoch,mode,payload_json,payload_sha256,created_at
             ) VALUES(?,?,1,1,'PAPER','{}',?,'2026-01-06T08:00:00+00:00')
             """,
-            ("d" * 64, "0" * 64, "4" * 64),
+            (deployment_identity_sha256, "0" * 64, "4" * 64),
         )
         database.write(
             """
@@ -71,14 +98,19 @@ def _seed_current_operational_authority(database: Database) -> None:
             ) VALUES('source-evidence',?,?,1,1,?,'snapshot-v3','2026-01-06',
                      'READINESS','BACKUP','{}',?,'2026-01-06T08:00:00+00:00')
             """,
-            ("e" * 64, "d" * 64, "1" * 64, "5" * 64),
+            (
+                operational_evidence_identity_sha256,
+                deployment_identity_sha256,
+                current_account_state_sha256,
+                "5" * 64,
+            ),
         )
 
 
 def test_account_authority_is_owned_by_central_schema_migration(tmp_path: Path) -> None:
     database = Database.open(tmp_path / "firmquant.sqlite3")
     try:
-        assert CURRENT_SCHEMA_VERSION == 5
+        assert CURRENT_SCHEMA_VERSION == 6
         assert database.scalar("SELECT max(version) FROM schema_migrations") == CURRENT_SCHEMA_VERSION
         tables = {
             str(row["name"])
@@ -593,6 +625,9 @@ def _insert_published_backup_operation(
     *,
     backup_id: str = "backup-v3",
     reason: str = "SESSION_CLOSE",
+    account_state_sha256: str = "1" * 64,
+    deployment_identity_sha256: str = "d" * 64,
+    operational_evidence_identity_sha256: str = "e" * 64,
 ) -> None:
     with database.transaction():
         database.write(
@@ -611,9 +646,9 @@ def _insert_published_backup_operation(
                 reason,
                 "a" * 64,
                 "b" * 64,
-                "1" * 64,
-                "d" * 64,
-                "e" * 64,
+                account_state_sha256,
+                deployment_identity_sha256,
+                operational_evidence_identity_sha256,
                 "f" * 64,
             ),
         )
@@ -634,9 +669,12 @@ def _insert_v3_backup_receipt(
     manifest_sha256: str = "a" * 64,
     verification_status: str = "VERIFIED",
     verified_at: str | None = "2026-01-06T08:01:00+00:00",
-    operational_schema_version: int = 5,
+    operational_schema_version: int = CURRENT_SCHEMA_VERSION,
     broker_snapshot_id: str = "snapshot-v3",
     reason: str = "SESSION_CLOSE",
+    account_state_sha256: str = "1" * 64,
+    deployment_identity_sha256: str = "d" * 64,
+    operational_evidence_identity_sha256: str = "e" * 64,
 ) -> None:
     database.write(
         """
@@ -651,15 +689,15 @@ def _insert_v3_backup_receipt(
         (
             backup_id,
             "b" * 64,
-            "1" * 64,
+            account_state_sha256,
             manifest_sha256,
             "2026-01-06T08:01:00+00:00",
             verified_at,
             verification_status,
             operational_schema_version,
             reason,
-            "d" * 64,
-            "e" * 64,
+            deployment_identity_sha256,
+            operational_evidence_identity_sha256,
             broker_snapshot_id,
             "9" * 64,
         ),
@@ -671,10 +709,27 @@ def _publish_verified_v3_backup(
     *,
     backup_id: str = "backup-v3",
     reason: str = "SESSION_CLOSE",
+    account_state_sha256: str = "1" * 64,
+    deployment_identity_sha256: str = "d" * 64,
+    operational_evidence_identity_sha256: str = "e" * 64,
 ) -> None:
-    _insert_published_backup_operation(database, backup_id=backup_id, reason=reason)
+    _insert_published_backup_operation(
+        database,
+        backup_id=backup_id,
+        reason=reason,
+        account_state_sha256=account_state_sha256,
+        deployment_identity_sha256=deployment_identity_sha256,
+        operational_evidence_identity_sha256=operational_evidence_identity_sha256,
+    )
     with database.transaction():
-        _insert_v3_backup_receipt(database, backup_id=backup_id, reason=reason)
+        _insert_v3_backup_receipt(
+            database,
+            backup_id=backup_id,
+            reason=reason,
+            account_state_sha256=account_state_sha256,
+            deployment_identity_sha256=deployment_identity_sha256,
+            operational_evidence_identity_sha256=operational_evidence_identity_sha256,
+        )
         database.write(
             "UPDATE backup_publication_operations SET stage='RECEIPT_COMMITTED',"
             "updated_at='2026-01-06T08:02:00+00:00' WHERE backup_id=?",
@@ -685,9 +740,14 @@ def _publish_verified_v3_backup(
 @pytest.mark.parametrize(
     ("verification_status", "verified_at", "operational_schema_version", "snapshot_id"),
     [
-        ("PENDING", None, 5, "snapshot-v3"),
+        ("PENDING", None, CURRENT_SCHEMA_VERSION, "snapshot-v3"),
         ("VERIFIED", "2026-01-06T08:01:00+00:00", 999, "snapshot-v3"),
-        ("VERIFIED", "2026-01-06T08:01:00+00:00", 5, "does-not-exist"),
+        (
+            "VERIFIED",
+            "2026-01-06T08:01:00+00:00",
+            CURRENT_SCHEMA_VERSION,
+            "does-not-exist",
+        ),
     ],
 )
 def test_v3_backup_receipt_requires_verified_current_real_snapshot(
@@ -762,6 +822,259 @@ def test_v3_backup_receipt_and_final_stage_are_mutually_bound(tmp_path: Path) ->
             )
             == 1
         )
+    finally:
+        database.close()
+
+
+def test_v6_v3_receipt_still_rejects_state_different_from_operation_and_evidence(
+    tmp_path: Path,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        _seed_current_operational_authority(
+            database,
+            baseline_account_state_sha256="a" * 64,
+            current_account_state_sha256="b" * 64,
+        )
+        _insert_published_backup_operation(database, account_state_sha256="b" * 64)
+        with pytest.raises(Exception, match="publication operation"), database.transaction():
+            _insert_v3_backup_receipt(database, account_state_sha256="c" * 64)
+        with pytest.raises(Exception, match="publication operation"), database.transaction():
+            _insert_v3_backup_receipt(
+                database,
+                account_state_sha256="b" * 64,
+                operational_evidence_identity_sha256="f" * 64,
+            )
+    finally:
+        database.close()
+
+
+def _prepare_current_state_rebaseline(
+    database: Database,
+    *,
+    account_before_sha256: str = "b" * 64,
+    candidate_sha256: str = "c" * 64,
+    actual_sha256: str = "c" * 64,
+) -> None:
+    _seed_current_operational_authority(
+        database,
+        baseline_account_state_sha256="a" * 64,
+        current_account_state_sha256="b" * 64,
+    )
+    _publish_verified_v3_backup(
+        database,
+        backup_id="backup-current-rebaseline",
+        reason="ACCOUNT_REBASELINE",
+        account_state_sha256="b" * 64,
+    )
+    with database.transaction():
+        database.write(
+            """
+            INSERT INTO account_authority_epochs(
+                epoch,account_id_hash,account_state_sha256,deployment_identity_sha256,
+                source_binding_id,payload_json,payload_sha256,created_at
+            ) VALUES(2,?,?,?,NULL,'{}',?,'2026-01-06T08:02:00+00:00')
+            """,
+            ("0" * 64, "c" * 64, "6" * 64, "7" * 64),
+        )
+        database.write(
+            """
+            INSERT INTO deployment_identities(
+                deployment_identity_sha256,account_id_hash,account_authority_epoch,
+                mode_epoch,mode,payload_json,payload_sha256,created_at
+            ) VALUES(?,?,2,1,'PAPER','{}',?,'2026-01-06T08:02:00+00:00')
+            """,
+            ("6" * 64, "0" * 64, "8" * 64),
+        )
+        database.write(
+            """
+            INSERT INTO account_rebaseline_operations(
+                operation_id,stage,source_epoch,target_epoch,account_id_hash,
+                account_before_sha256,candidate_account_state_sha256,
+                deployment_identity_sha256,broker_snapshot_id,broker_snapshot_sha256,
+                backup_id,reviewed_evidence_sha256,account_path_sha256,
+                actual_account_after_sha256,reason,payload_json,payload_sha256,created_at,updated_at
+            ) VALUES('rebaseline-current','PREPARED',1,2,?,?,?,?,'snapshot-v3',?,
+                     'backup-current-rebaseline',?,?,NULL,'reviewed','{}',?,
+                     '2026-01-06T08:01:00+00:00','2026-01-06T08:01:00+00:00')
+            """,
+            (
+                "0" * 64,
+                account_before_sha256,
+                candidate_sha256,
+                "6" * 64,
+                "9" * 64,
+                "f" * 64,
+                "1" * 64,
+                "2" * 64,
+            ),
+        )
+        database.write("UPDATE account_authority_active SET epoch=2 WHERE singleton_id=1")
+        database.write(
+            "UPDATE account_rebaseline_operations SET stage='FILE_COMMITTED',"
+            "actual_account_after_sha256=?,updated_at='2026-01-06T08:03:00+00:00' "
+            "WHERE operation_id='rebaseline-current'",
+            (actual_sha256,),
+        )
+
+
+def _insert_current_state_rebaseline_receipt(database: Database) -> None:
+    database.write(
+        """
+        INSERT INTO account_rebaseline_receipts(
+            receipt_id,operation_id,account_authority_epoch,deployment_identity_sha256,
+            backup_id,payload_json,payload_sha256,created_at
+        ) VALUES('receipt-current','rebaseline-current',2,?,'backup-current-rebaseline',
+                 '{}',?,'2026-01-06T08:04:00+00:00')
+        """,
+        ("6" * 64, "5" * 64),
+    )
+
+
+def test_v6_rebaseline_accepts_baseline_a_current_b_and_target_c(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        _prepare_current_state_rebaseline(database)
+        with database.transaction():
+            _insert_current_state_rebaseline_receipt(database)
+        assert database.scalar("SELECT count(*) FROM account_rebaseline_receipts") == 1
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    ("account_before_sha256", "candidate_sha256", "actual_sha256"),
+    [
+        ("7" * 64, "c" * 64, "c" * 64),
+        ("b" * 64, "7" * 64, "c" * 64),
+        ("b" * 64, "c" * 64, "7" * 64),
+    ],
+)
+def test_v6_rebaseline_rejects_current_or_target_state_mismatch(
+    tmp_path: Path,
+    account_before_sha256: str,
+    candidate_sha256: str,
+    actual_sha256: str,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        _prepare_current_state_rebaseline(
+            database,
+            account_before_sha256=account_before_sha256,
+            candidate_sha256=candidate_sha256,
+            actual_sha256=actual_sha256,
+        )
+        with pytest.raises(Exception, match="rebaseline receipt"), database.transaction():
+            _insert_current_state_rebaseline_receipt(database)
+    finally:
+        database.close()
+
+
+def _prepare_current_state_mode_transition(
+    database: Database,
+    *,
+    epoch_deployment_identity_sha256: str = "d" * 64,
+    source_mode: str = "PAPER",
+    evidence_sha256: str = "e" * 64,
+) -> None:
+    _seed_current_operational_authority(
+        database,
+        baseline_account_state_sha256="a" * 64,
+        current_account_state_sha256="b" * 64,
+        epoch_deployment_identity_sha256=epoch_deployment_identity_sha256,
+    )
+    _publish_verified_v3_backup(
+        database,
+        backup_id="backup-current-transition",
+        reason="MODE_TRANSITION",
+        account_state_sha256="b" * 64,
+    )
+    with database.transaction():
+        database.write(
+            """
+            INSERT INTO mode_epochs(
+                epoch,mode,deployment_identity_sha256,payload_json,payload_sha256,created_at
+            ) VALUES(2,'SHADOW',?,'{}',?,'2026-01-06T08:02:00+00:00')
+            """,
+            ("6" * 64, "7" * 64),
+        )
+        database.write(
+            """
+            INSERT INTO deployment_identities(
+                deployment_identity_sha256,account_id_hash,account_authority_epoch,
+                mode_epoch,mode,payload_json,payload_sha256,created_at
+            ) VALUES(?,?,1,2,'SHADOW','{}',?,'2026-01-06T08:02:00+00:00')
+            """,
+            ("6" * 64, "0" * 64, "8" * 64),
+        )
+        database.write(
+            """
+            INSERT INTO mode_transition_operations(
+                operation_id,stage,source_epoch,target_epoch,source_mode,target_mode,
+                deployment_identity_sha256,backup_id,evidence_sha256,payload_json,
+                payload_sha256,created_at,updated_at
+            ) VALUES('transition-current','PREPARED',1,2,?,'SHADOW',?,
+                     'backup-current-transition',?,'{}',?,'2026-01-06T08:01:00+00:00',
+                     '2026-01-06T08:01:00+00:00')
+            """,
+            (source_mode, "6" * 64, evidence_sha256, "f" * 64),
+        )
+        database.write("UPDATE mode_epoch_active SET epoch=2 WHERE singleton_id=1")
+        database.write(
+            "UPDATE mode_transition_operations SET stage='EPOCH_COMMITTED',"
+            "updated_at='2026-01-06T08:03:00+00:00' "
+            "WHERE operation_id='transition-current'"
+        )
+
+
+def _insert_current_state_mode_transition_receipt(database: Database) -> None:
+    database.write(
+        """
+        INSERT INTO mode_transition_receipts(
+            receipt_id,operation_id,mode_epoch,deployment_identity_sha256,
+            backup_id,payload_json,payload_sha256,created_at
+        ) VALUES('receipt-current','transition-current',2,?,'backup-current-transition',
+                 '{}',?,'2026-01-06T08:04:00+00:00')
+        """,
+        ("6" * 64, "5" * 64),
+    )
+
+
+def test_v6_mode_transition_accepts_baseline_a_and_current_b(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        _prepare_current_state_mode_transition(database)
+        with database.transaction():
+            _insert_current_state_mode_transition_receipt(database)
+        assert database.scalar("SELECT count(*) FROM mode_transition_receipts") == 1
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    ("epoch_deployment_identity_sha256", "source_mode", "evidence_sha256"),
+    [
+        ("7" * 64, "PAPER", "e" * 64),
+        ("d" * 64, "SHADOW", "e" * 64),
+        ("d" * 64, "PAPER", "7" * 64),
+    ],
+)
+def test_v6_mode_transition_rejects_source_provenance_mismatch(
+    tmp_path: Path,
+    epoch_deployment_identity_sha256: str,
+    source_mode: str,
+    evidence_sha256: str,
+) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    try:
+        _prepare_current_state_mode_transition(
+            database,
+            epoch_deployment_identity_sha256=epoch_deployment_identity_sha256,
+            source_mode=source_mode,
+            evidence_sha256=evidence_sha256,
+        )
+        with pytest.raises(Exception, match="mode transition receipt"), database.transaction():
+            _insert_current_state_mode_transition_receipt(database)
     finally:
         database.close()
 

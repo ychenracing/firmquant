@@ -90,6 +90,7 @@ receipt。人工交易、异常现金、外部订单、未解释持仓变化或�
 | `firmquant execution-replay` | 通过 `--start YYYY-MM-DD --end YYYY-MM-DD` 使用锁定 uquant source 与 frozen data 运行跨日 execution-aware Replay，并输出稳定 JSON 摘要 |
 | `firmquant backup` | 创建原子、一致性状态备份 |
 | `firmquant verify-backup` | 在隔离目录验证可恢复性、schema 与审计链 |
+| `firmquant restore-backup` | 验证 schema-v3 备份并恢复到保持 DISARMED 的空目录 |
 | `firmquant cancel-system-orders` | 请求取消 firmquant 拥有的未完成订单；仍需完整写门禁 |
 
 ## 文档

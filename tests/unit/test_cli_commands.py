@@ -71,6 +71,10 @@ class RecordingOperator:
         (["replay", "--events", "recording.jsonl"], OperatorCommand.REPLAY),
         (["backup"], OperatorCommand.BACKUP),
         (["verify-backup", "--bundle", "backup-1"], OperatorCommand.VERIFY_BACKUP),
+        (
+            ["restore-backup", "--bundle", "backup-1", "--destination", "restored"],
+            OperatorCommand.RESTORE_BACKUP,
+        ),
     ],
 )
 def test_every_application_command_delegates_to_the_application_service(
@@ -141,6 +145,24 @@ def test_cli_parses_typed_command_arguments_without_business_logic(tmp_path: Pat
     request, _ = operator.calls[-1]
     assert request.bundle_path == bundle
 
+    destination = tmp_path / "restored"
+    assert (
+        main(
+            [
+                "restore-backup",
+                "--bundle",
+                str(bundle),
+                "--destination",
+                str(destination),
+            ],
+            service_factory=lambda _path: operator,
+        )
+        == 0
+    )
+    request, _ = operator.calls[-1]
+    assert request.bundle_path == bundle
+    assert request.destination_path == destination
+
 
 @pytest.mark.parametrize(
     "arguments",
@@ -152,6 +174,8 @@ def test_cli_parses_typed_command_arguments_without_business_logic(tmp_path: Pat
         ["report", "--session", "2026-02-30"],
         ["replay"],
         ["verify-backup"],
+        ["restore-backup", "--bundle", "backup-1"],
+        ["restore-backup", "--destination", "restored"],
     ],
 )
 def test_invalid_cli_arguments_are_rejected_before_service_dispatch(

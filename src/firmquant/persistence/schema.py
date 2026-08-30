@@ -1816,6 +1816,216 @@ _V5_STAGED_DELETE_TRIGGERS: Final = tuple(
     )
 )
 
+_V6_CURRENT_ACCOUNT_EVIDENCE_BINDINGS: Final = (
+    "DROP TRIGGER account_rebaseline_receipts_operation_guard",
+    """
+    CREATE TRIGGER account_rebaseline_receipts_operation_guard
+    BEFORE INSERT ON account_rebaseline_receipts
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM account_rebaseline_operations AS operation
+            JOIN account_authority_epochs AS source
+              ON source.epoch = operation.source_epoch
+            JOIN account_authority_epochs AS target
+              ON target.epoch = operation.target_epoch
+            JOIN account_authority_active AS account_active
+              ON account_active.singleton_id = 1
+             AND account_active.epoch = operation.target_epoch
+            JOIN backup_receipts AS backup ON backup.backup_id = operation.backup_id
+            JOIN backup_publication_operations AS backup_operation
+              ON backup_operation.backup_id = backup.backup_id
+             AND backup_operation.stage = 'RECEIPT_COMMITTED'
+            JOIN deployment_identities AS source_deployment
+              ON source_deployment.deployment_identity_sha256 =
+                 backup.deployment_identity_sha256
+             AND source_deployment.account_authority_epoch = operation.source_epoch
+             AND source_deployment.mode_epoch = backup.mode_epoch
+             AND source_deployment.account_id_hash = source.account_id_hash
+            JOIN operational_evidence_receipts AS backup_evidence
+              ON backup_evidence.operational_evidence_identity_sha256 =
+                 backup.operational_evidence_identity_sha256
+             AND backup_evidence.deployment_identity_sha256 =
+                 backup.deployment_identity_sha256
+             AND backup_evidence.account_authority_epoch = operation.source_epoch
+             AND backup_evidence.mode_epoch = backup.mode_epoch
+             AND backup_evidence.account_state_sha256 = operation.account_before_sha256
+             AND backup_evidence.broker_snapshot_id = operation.broker_snapshot_id
+            JOIN mode_epoch_active AS mode_active
+              ON mode_active.singleton_id = 1
+             AND mode_active.epoch = backup.mode_epoch
+            JOIN mode_epochs AS active_mode ON active_mode.epoch = mode_active.epoch
+            JOIN deployment_identities AS deployment
+              ON deployment.deployment_identity_sha256 =
+                 operation.deployment_identity_sha256
+             AND deployment.account_authority_epoch = operation.target_epoch
+             AND deployment.mode_epoch = mode_active.epoch
+             AND deployment.account_id_hash = operation.account_id_hash
+             AND deployment.mode = active_mode.mode
+            WHERE operation.operation_id = NEW.operation_id
+              AND operation.stage = 'FILE_COMMITTED'
+              AND operation.target_epoch = NEW.account_authority_epoch
+              AND operation.account_id_hash = source.account_id_hash
+              AND source.deployment_identity_sha256 = backup.deployment_identity_sha256
+              AND operation.account_id_hash = target.account_id_hash
+              AND operation.actual_account_after_sha256 = target.account_state_sha256
+              AND operation.candidate_account_state_sha256 = target.account_state_sha256
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND target.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.backup_id = NEW.backup_id
+              AND backup.bundle_schema_version = 3
+              AND backup.operational_schema_version = (
+                  SELECT max(version) FROM schema_migrations
+              )
+              AND backup.verification_status = 'VERIFIED'
+              AND backup.verified_at IS NOT NULL
+              AND backup.reason = 'ACCOUNT_REBASELINE'
+              AND backup.account_authority_epoch = operation.source_epoch
+              AND backup.mode_epoch = deployment.mode_epoch
+              AND backup.account_state_sha256 = operation.account_before_sha256
+              AND backup.broker_snapshot_id = operation.broker_snapshot_id
+              AND backup.broker_snapshot_sha256 = operation.broker_snapshot_sha256
+        ) THEN RAISE(ABORT, 'rebaseline receipt requires matching current authority, deployment identity, and verified v3 backup') END;
+    END
+    """,
+    "DROP TRIGGER mode_transition_receipts_operation_guard",
+    """
+    CREATE TRIGGER mode_transition_receipts_operation_guard
+    BEFORE INSERT ON mode_transition_receipts
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM mode_transition_operations AS operation
+            JOIN mode_epochs AS source ON source.epoch = operation.source_epoch
+            JOIN mode_epochs AS target ON target.epoch = operation.target_epoch
+            JOIN mode_epoch_active AS mode_active
+              ON mode_active.singleton_id = 1
+             AND mode_active.epoch = operation.target_epoch
+            JOIN backup_receipts AS backup ON backup.backup_id = operation.backup_id
+            JOIN backup_publication_operations AS backup_operation
+              ON backup_operation.backup_id = backup.backup_id
+             AND backup_operation.stage = 'RECEIPT_COMMITTED'
+            JOIN account_authority_active AS account_active
+              ON account_active.singleton_id = 1
+             AND account_active.epoch = backup.account_authority_epoch
+            JOIN account_authority_epochs AS active_account
+              ON active_account.epoch = account_active.epoch
+            JOIN deployment_identities AS source_deployment
+              ON source_deployment.deployment_identity_sha256 =
+                 backup.deployment_identity_sha256
+             AND source_deployment.account_authority_epoch = account_active.epoch
+             AND source_deployment.mode_epoch = operation.source_epoch
+             AND source_deployment.account_id_hash = active_account.account_id_hash
+             AND source_deployment.mode = operation.source_mode
+            JOIN operational_evidence_receipts AS backup_evidence
+              ON backup_evidence.operational_evidence_identity_sha256 =
+                 backup.operational_evidence_identity_sha256
+             AND backup_evidence.deployment_identity_sha256 =
+                 backup.deployment_identity_sha256
+             AND backup_evidence.account_authority_epoch = account_active.epoch
+             AND backup_evidence.mode_epoch = operation.source_epoch
+             AND backup_evidence.account_state_sha256 = backup.account_state_sha256
+             AND backup_evidence.broker_snapshot_id = backup.broker_snapshot_id
+            JOIN deployment_identities AS deployment
+              ON deployment.deployment_identity_sha256 =
+                 operation.deployment_identity_sha256
+             AND deployment.account_authority_epoch = account_active.epoch
+             AND deployment.mode_epoch = operation.target_epoch
+             AND deployment.account_id_hash = active_account.account_id_hash
+             AND deployment.mode = operation.target_mode
+            WHERE operation.operation_id = NEW.operation_id
+              AND operation.stage = 'EPOCH_COMMITTED'
+              AND operation.source_mode = source.mode
+              AND source.deployment_identity_sha256 = backup.deployment_identity_sha256
+              AND operation.target_mode = target.mode
+              AND operation.target_epoch = NEW.mode_epoch
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND target.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.backup_id = NEW.backup_id
+              AND operation.evidence_sha256 =
+                  backup.operational_evidence_identity_sha256
+              AND backup.bundle_schema_version = 3
+              AND backup.operational_schema_version = (
+                  SELECT max(version) FROM schema_migrations
+              )
+              AND backup.verification_status = 'VERIFIED'
+              AND backup.verified_at IS NOT NULL
+              AND backup.reason = 'MODE_TRANSITION'
+              AND backup.account_authority_epoch = deployment.account_authority_epoch
+              AND backup.mode_epoch = operation.source_epoch
+        ) THEN RAISE(ABORT, 'mode transition receipt requires matching current authority, deployment identity, and verified v3 backup') END;
+    END
+    """,
+    "DROP TRIGGER backup_receipts_v3_operation_guard",
+    """
+    CREATE TRIGGER backup_receipts_v3_operation_guard
+    BEFORE INSERT ON backup_receipts
+    WHEN NEW.bundle_schema_version = 3
+         AND NEW.operational_schema_version IS NOT NULL
+         AND NEW.reason IS NOT NULL
+         AND NEW.deployment_identity_sha256 IS NOT NULL
+         AND NEW.operational_evidence_identity_sha256 IS NOT NULL
+         AND NEW.account_authority_epoch IS NOT NULL
+         AND NEW.mode_epoch IS NOT NULL
+         AND NEW.broker_snapshot_id IS NOT NULL
+         AND NEW.broker_snapshot_sha256 IS NOT NULL
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM backup_publication_operations AS operation
+            JOIN account_authority_epochs AS account_epoch
+              ON account_epoch.epoch = NEW.account_authority_epoch
+            JOIN account_authority_active AS account_active
+              ON account_active.singleton_id = 1
+             AND account_active.epoch = NEW.account_authority_epoch
+            JOIN mode_epochs AS mode_epoch ON mode_epoch.epoch = NEW.mode_epoch
+            JOIN mode_epoch_active AS mode_active
+              ON mode_active.singleton_id = 1
+             AND mode_active.epoch = NEW.mode_epoch
+            JOIN deployment_identities AS deployment
+              ON deployment.deployment_identity_sha256 = NEW.deployment_identity_sha256
+             AND deployment.account_authority_epoch = NEW.account_authority_epoch
+             AND deployment.mode_epoch = NEW.mode_epoch
+             AND deployment.account_id_hash = account_epoch.account_id_hash
+             AND deployment.mode = mode_epoch.mode
+            JOIN operational_evidence_receipts AS evidence
+              ON evidence.operational_evidence_identity_sha256 =
+                 NEW.operational_evidence_identity_sha256
+             AND evidence.deployment_identity_sha256 = NEW.deployment_identity_sha256
+             AND evidence.account_authority_epoch = NEW.account_authority_epoch
+             AND evidence.mode_epoch = NEW.mode_epoch
+             AND evidence.account_state_sha256 = NEW.account_state_sha256
+             AND evidence.broker_snapshot_id = NEW.broker_snapshot_id
+            JOIN broker_snapshots AS snapshot
+              ON snapshot.snapshot_id = NEW.broker_snapshot_id
+             AND snapshot.account_id_hash = account_epoch.account_id_hash
+             AND snapshot.raw_payload_sha256 = NEW.broker_snapshot_sha256
+             AND snapshot.complete = 1
+             AND snapshot.started_at IS NOT NULL
+             AND snapshot.completed_at IS NOT NULL
+             AND snapshot.duration_ms IS NOT NULL
+            JOIN cash_snapshots AS cash ON cash.snapshot_id = snapshot.snapshot_id
+            WHERE operation.backup_id = NEW.backup_id
+              AND operation.stage = 'PUBLISHED'
+              AND NEW.verification_status = 'VERIFIED'
+              AND NEW.verified_at IS NOT NULL
+              AND NEW.operational_schema_version = (
+                  SELECT max(version) FROM schema_migrations
+              )
+              AND operation.reason = NEW.reason
+              AND operation.manifest_sha256 = NEW.manifest_sha256
+              AND operation.database_sha256 = NEW.database_sha256
+              AND operation.account_state_sha256 = NEW.account_state_sha256
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.operational_evidence_identity_sha256 =
+                  NEW.operational_evidence_identity_sha256
+              AND operation.account_authority_epoch = NEW.account_authority_epoch
+              AND operation.mode_epoch = NEW.mode_epoch
+        ) THEN RAISE(ABORT, 'v3 backup receipt requires matching published publication operation') END;
+    END
+    """,
+)
+
 MIGRATIONS: Final = (
     Migration.create(
         version=1,
@@ -1893,6 +2103,11 @@ MIGRATIONS: Final = (
             *_V5_STAGED_OPERATION_TRIGGERS,
             *_V5_STAGED_DELETE_TRIGGERS,
         ),
+    ),
+    Migration.create(
+        version=6,
+        name="current_account_evidence_bindings",
+        statements=_V6_CURRENT_ACCOUNT_EVIDENCE_BINDINGS,
     ),
 )
 CURRENT_SCHEMA_VERSION: Final = MIGRATIONS[-1].version
