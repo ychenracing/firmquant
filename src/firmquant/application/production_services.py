@@ -32,6 +32,8 @@ from firmquant.application.production_daemon import (
 )
 from firmquant.application.production_events import ProductionEventJournal
 from firmquant.application.production_identity import (
+    DeploymentIdentity,
+    OperationalEvidenceIdentity,
     configuration_sha256,
     current_clean_firmquant_commit,
     promotion_config_sha256,
@@ -126,6 +128,18 @@ class _AccountPayload(Protocol):
 
 class _UquantExecutionConfig(Protocol):
     max_volume_participation: float
+
+
+class _OperationalIdentityProvider(Protocol):
+    def __call__(
+        self,
+        stage: EvidenceStage,
+        snapshot: BrokerSnapshot,
+    ) -> OperationalEvidenceIdentity: ...
+
+
+class _PromotionIdentityProvider(Protocol):
+    def __call__(self, stage: EvidenceStage) -> DeploymentIdentity: ...
 
 
 @dataclass(slots=True)
@@ -330,6 +344,8 @@ class ProductionServiceHooks:
         data_generation_store: DataGenerationStore | None = None,
         data_root: Path | None = None,
         data_reloader: Callable[[Path], None] | None = None,
+        operational_identity_provider: _OperationalIdentityProvider | None = None,
+        promotion_identity_provider: _PromotionIdentityProvider | None = None,
     ) -> None:
         self._config_path = config_path
         self._settings = settings
@@ -349,6 +365,8 @@ class ProductionServiceHooks:
         self._data_generations = data_generation_store
         self._data_root = Path(data_root) if data_root is not None else settings.paths.data_directory
         self._data_reloader = data_reloader
+        self._operational_identity_provider = operational_identity_provider
+        self._promotion_identity_provider = promotion_identity_provider
         self._close = CloseCheckpointStore(self._database)
         self._last_monotonic: float | None = None
         self._disconnect_started_monotonic: float | None = None
@@ -562,12 +580,18 @@ class ProductionServiceHooks:
             return
         thresholds = self._settings.promotion
         store = PromotionStore(self._database)
+        provider = self._promotion_identity_provider
+        if provider is None:
+            raise ProductionServicesUnavailable("CANONICAL_PROMOTION_IDENTITY_UNAVAILABLE")
+        shadow_identity = provider(EvidenceStage.SHADOW)
+        if shadow_identity.account_id_hash != account_hash:
+            raise ProductionServicesUnavailable("PROMOTION_ACCOUNT_IDENTITY_MISMATCH")
         if not store.qualifies(
             stage=EvidenceStage.SHADOW,
-            firmquant_commit=self._identity.firmquant_commit,
-            uquant_commit=self._identity.uquant_commit,
-            config_sha256=self._identity.promotion_config_sha256,
-            account_hash=account_hash,
+            deployment_identity_sha256=shadow_identity.sha256,
+            account_authority_epoch=shadow_identity.account_authority_epoch,
+            mode_epoch=shadow_identity.mode_epoch,
+            mode=shadow_identity.mode,
             min_sessions=thresholds.min_shadow_sessions,
             min_orders=thresholds.min_shadow_orders,
             max_tracking_error=thresholds.max_target_tracking_error,
@@ -575,12 +599,15 @@ class ProductionServiceHooks:
             raise ProductionServicesUnavailable("SHADOW_PROMOTION_EVIDENCE_REQUIRED")
         if self._settings.mode is Mode.CANARY:
             return
+        canary_identity = provider(EvidenceStage.CANARY)
+        if canary_identity.account_id_hash != account_hash:
+            raise ProductionServicesUnavailable("PROMOTION_ACCOUNT_IDENTITY_MISMATCH")
         if not store.qualifies(
             stage=EvidenceStage.CANARY,
-            firmquant_commit=self._identity.firmquant_commit,
-            uquant_commit=self._identity.uquant_commit,
-            config_sha256=self._identity.promotion_config_sha256,
-            account_hash=account_hash,
+            deployment_identity_sha256=canary_identity.sha256,
+            account_authority_epoch=canary_identity.account_authority_epoch,
+            mode_epoch=canary_identity.mode_epoch,
+            mode=canary_identity.mode,
             min_sessions=thresholds.min_canary_sessions,
             min_orders=thresholds.min_canary_orders,
             min_fills=thresholds.min_canary_fills,
@@ -1132,6 +1159,10 @@ class ProductionServiceHooks:
         decision: DecisionSnapshot,
         facts: ExecutionBrokerSnapshot,
     ) -> None:
+        provider = self._operational_identity_provider
+        if provider is None:
+            raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
+        operational_identity = provider(EvidenceStage.SHADOW, facts.broker_snapshot)
         observation = build_shadow_observation(
             database=self._database,
             broker=self._broker,
@@ -1144,6 +1175,7 @@ class ProductionServiceHooks:
             calendar_sha256=self._calendar.sha256,
             safety_manifest=self._safety,
             created_at=self._now(),
+            operational_identity=operational_identity,
         )
         ExecutionEvidenceStore(self._database).append(observation)
         self._audit(
@@ -1315,11 +1347,15 @@ class ProductionServiceHooks:
                 eod_snapshot = self._capture()
             if eod_snapshot.session_date != session:
                 raise ProductionServicesUnavailable("CANARY_EOD_SNAPSHOT_SESSION_MISMATCH")
+            provider = self._operational_identity_provider
+            if provider is None:
+                raise ProductionServicesUnavailable("CANONICAL_OPERATIONAL_IDENTITY_UNAVAILABLE")
             canary = finalize_canary_observation(
                 database=self._database,
                 eod_snapshot=eod_snapshot,
                 session=session,
                 created_at=self._now(),
+                operational_identity=provider(EvidenceStage.CANARY, eod_snapshot),
             )
             if canary is not None:
                 ExecutionEvidenceStore(self._database).append(canary)

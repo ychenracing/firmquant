@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Final
 
 from firmquant.application.production_identity import OperationalEvidenceIdentity
+from firmquant.config import Mode
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
 
@@ -131,8 +132,16 @@ class EvidenceIdentity:
                 raise ValueError("operational uquant identity does not match evidence")
             if deployment.account_id_hash != self.account_sha256:
                 raise ValueError("account id hash does not match operational evidence")
-            if self.operational_identity.strategy_session != self.execution_session:
-                raise ValueError("operational strategy session does not match evidence")
+            expected_mode = {
+                EvidenceStage.SHADOW: Mode.SHADOW,
+                EvidenceStage.CANARY: Mode.CANARY,
+            }[self.stage]
+            if deployment.mode is not expected_mode:
+                raise ValueError("evidence stage does not match deployment mode")
+            if self.calendar_sha256 != self.operational_identity.calendar_sha256:
+                raise ValueError("calendar identity contradicts operational evidence")
+            if self.data_sha256 != self.operational_identity.strategy_data_manifest_sha256:
+                raise ValueError("data identity contradicts operational evidence")
 
     @property
     def stable_payload(self) -> dict[str, object]:
@@ -372,6 +381,11 @@ class ExecutionObservation:
         if not isinstance(self.identity, EvidenceIdentity):
             raise TypeError("observation identity must be typed")
         _text(self.decision_id, label="decision id")
+        if (
+            self.identity.operational_identity is not None
+            and self.identity.operational_identity.decision_id != self.decision_id
+        ):
+            raise ValueError("decision identity contradicts operational evidence")
         _text(self.plan_id, label="plan id")
         _decimal(self.portfolio_equity, label="portfolio equity", positive=True)
         for label, values, expected in (
@@ -630,6 +644,8 @@ class ExecutionEvidenceStore:
     def append(self, observation: ExecutionObservation) -> bool:
         if not isinstance(observation, ExecutionObservation):
             raise TypeError("execution evidence store requires ExecutionObservation")
+        if observation.identity.operational_identity is None:
+            raise ValueError("new execution evidence requires canonical operational identity")
         event_id = self._event_id(observation)
         existing = self._database.query_one(
             "SELECT payload_json FROM audit_events WHERE audit_event_id = ?",

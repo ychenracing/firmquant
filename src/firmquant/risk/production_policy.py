@@ -12,8 +12,17 @@ if TYPE_CHECKING:
     from firmquant.config import Settings
 
 
-def _decimal_text(value: Decimal) -> str:
-    return format(value, "f")
+def canonical_decimal_text(value: Decimal) -> str:
+    """Render finite Decimal values without insignificant scale or signed zero."""
+
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise TypeError("canonical Decimal text requires a finite Decimal")
+    if value.is_zero():
+        return "0"
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,17 +118,17 @@ class ProductionSafetyPolicy:
             "max_quote_age_seconds": self.max_quote_age_seconds,
             "max_clock_drift_seconds": self.max_clock_drift_seconds,
             "max_disconnect_seconds": self.max_disconnect_seconds,
-            "max_price_deviation_bps": _decimal_text(self.max_price_deviation_bps),
-            "max_equity_change_fraction": _decimal_text(self.max_equity_change_fraction),
-            "max_intraday_loss_fraction": _decimal_text(self.max_intraday_loss_fraction),
-            "max_capital_drawdown_fraction": _decimal_text(self.max_capital_drawdown_fraction),
+            "max_price_deviation_bps": canonical_decimal_text(self.max_price_deviation_bps),
+            "max_equity_change_fraction": canonical_decimal_text(self.max_equity_change_fraction),
+            "max_intraday_loss_fraction": canonical_decimal_text(self.max_intraday_loss_fraction),
+            "max_capital_drawdown_fraction": canonical_decimal_text(self.max_capital_drawdown_fraction),
             "min_shadow_sessions": self.min_shadow_sessions,
             "min_shadow_orders": self.min_shadow_orders,
-            "max_target_tracking_error": _decimal_text(self.max_target_tracking_error),
+            "max_target_tracking_error": canonical_decimal_text(self.max_target_tracking_error),
             "min_canary_sessions": self.min_canary_sessions,
             "min_canary_orders": self.min_canary_orders,
             "min_canary_fills": self.min_canary_fills,
-            "max_canary_target_tracking_error": _decimal_text(self.max_canary_target_tracking_error),
+            "max_canary_target_tracking_error": canonical_decimal_text(self.max_canary_target_tracking_error),
             "max_arm_ttl_seconds": self.max_arm_ttl_seconds,
         }
 
@@ -135,4 +144,4 @@ class ProductionSafetyPolicy:
         return hashlib.sha256(encoded).hexdigest()
 
 
-__all__ = ("ProductionSafetyPolicy",)
+__all__ = ("ProductionSafetyPolicy", "canonical_decimal_text")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -18,6 +18,7 @@ from firmquant.config import (
     Mode,
     Settings,
 )
+from firmquant.risk.production_policy import ProductionSafetyPolicy
 
 
 def caps(scale: str) -> DeploymentCaps:
@@ -161,14 +162,68 @@ def test_identity_rejects_ambiguous_or_unknown_json(raw: str) -> None:
         identity.parse_identity(raw)
 
 
-def test_identity_rejects_noncanonical_text_and_invalid_temporal_facts() -> None:
+def test_identity_rejects_noncanonical_text_and_requires_positive_epochs() -> None:
     deployment = _deployment_identity()
     with pytest.raises(identity.IdentityError, match="canonical text"):
         replace(deployment, account_id_hash=" 7" + "7" * 62)
+    with pytest.raises(identity.IdentityError, match="positive"):
+        replace(deployment, account_authority_epoch=0)
+    with pytest.raises(identity.IdentityError, match="positive"):
+        replace(deployment, mode_epoch=0)
 
+
+def test_operational_timestamps_are_utc_and_monotonic_duration_is_independent() -> None:
+    deployment = _deployment_identity()
     operational = _operational_identity(deployment)
-    with pytest.raises(identity.IdentityError, match="duration"):
-        replace(operational, snapshot_duration_ms=1999)
+    independently_measured = replace(operational, snapshot_duration_ms=1999)
+    assert independently_measured.snapshot_duration_ms == 1999
+
+    non_utc = operational.snapshot_started_at.astimezone(timezone(timedelta(hours=8)))
+    with pytest.raises(identity.IdentityError, match="UTC"):
+        replace(operational, snapshot_started_at=non_utc)
+
+
+@pytest.mark.parametrize("unsafe", ["\ud800", "\u0085", "\u202e"])
+def test_identity_rejects_unsafe_unicode_text(unsafe: str) -> None:
+    with pytest.raises(identity.IdentityError, match="canonical text"):
+        replace(_operational_identity(_deployment_identity()), phase="PHASE" + unsafe)
+
+
+def test_semantic_policy_and_caps_hashes_normalize_decimal_scale() -> None:
+    first = Settings.model_validate(
+        {
+            "execution": {
+                "max_equity_change_fraction": "0.10",
+                "max_intraday_loss_fraction": "-0",
+            }
+        }
+    )
+    second = Settings.model_validate(
+        {
+            "execution": {
+                "max_equity_change_fraction": "0.10000000",
+                "max_intraday_loss_fraction": "0.00000000",
+            }
+        }
+    )
+    assert (
+        ProductionSafetyPolicy.from_settings(first).sha256
+        == ProductionSafetyPolicy.from_settings(second).sha256
+    )
+    assert identity.semantic_config_sha256(first) == identity.semantic_config_sha256(second)
+
+    canary_first = Settings(
+        mode=Mode.CANARY,
+        live_trading_enabled=True,
+        broker=BrokerSettings(adapter=BrokerAdapter.XTQUANT),
+        compliance=ComplianceSettings(
+            program_trading_report_confirmed=True,
+            broker_api_authorized=True,
+        ),
+        canary_caps=caps("10000.0"),
+    )
+    canary_second = canary_first.model_copy(update={"canary_caps": caps("10000.0000")})
+    assert identity.deployment_caps_sha256(canary_first) == identity.deployment_caps_sha256(canary_second)
 
 
 def test_execution_evidence_aggregates_by_stable_deployment_not_account_state() -> None:
@@ -181,7 +236,7 @@ def test_execution_evidence_aggregates_by_stable_deployment_not_account_state() 
         uquant_commit="b" * 40,
         promotion_config_sha256="4" * 64,
         account_sha256="7" * 64,
-        data_sha256="0" * 64,
+        data_sha256="1" * 64,
         calendar_sha256="f" * 64,
         operational_identity=first_operational,
     )

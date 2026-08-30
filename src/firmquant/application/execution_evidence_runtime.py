@@ -21,6 +21,7 @@ from firmquant.application.execution_evidence import (
     PositionObservation,
     TargetObservation,
 )
+from firmquant.application.production_identity import OperationalEvidenceIdentity
 from firmquant.broker.gateway import BrokerGateway, BrokerOrderCommand
 from firmquant.broker.paper import PaperBroker
 from firmquant.broker.xtquant_safety import XtQuantSafetyManifest
@@ -316,11 +317,19 @@ def build_shadow_observation(
     calendar_sha256: str,
     safety_manifest: XtQuantSafetyManifest,
     created_at: datetime,
+    operational_identity: OperationalEvidenceIdentity,
 ) -> ExecutionObservation:
     """Run the production policy against an isolated PaperBroker; never call the real broker write surface."""
 
     if facts.broker_snapshot.session_date != plan.execution_session:
         raise RuntimeEvidenceError("SHADOW plan and broker snapshot sessions differ")
+    _validate_operational_identity(
+        operational_identity,
+        snapshot=facts.broker_snapshot,
+        decision_id=decision.decision_id,
+        data_sha256=decision.data_manifest_sha256,
+        calendar_sha256=calendar_sha256,
+    )
     instruments, quotes = _market_facts(broker, facts, decision)
     paper = PaperBroker(
         account=facts.broker_snapshot.account,
@@ -429,6 +438,7 @@ def build_shadow_observation(
             account_sha256=facts.broker_snapshot.account.account_id_hash,
             data_sha256=decision.data_manifest_sha256,
             calendar_sha256=calendar_sha256,
+            operational_identity=operational_identity,
         ),
         decision_id=decision.decision_id,
         plan_id=plan.plan_id,
@@ -614,12 +624,28 @@ def finalize_canary_observation(
     eod_snapshot: BrokerSnapshot,
     session: date,
     created_at: datetime,
+    operational_identity: OperationalEvidenceIdentity,
 ) -> ExecutionObservation | None:
     """Build a CANARY observation only from durable real orders/fills and the EOD broker snapshot."""
 
     plan = _load_canary_plan(database, session=session)
     if plan is None:
         return None
+    if str(plan.get("account_sha256")) != eod_snapshot.account.account_id_hash:
+        raise RuntimeEvidenceError("CANARY EOD account identity changed")
+    deployment = operational_identity.deployment_identity
+    if (
+        str(plan.get("firmquant_commit")) != deployment.firmquant_commit
+        or str(plan.get("uquant_commit")) != deployment.uquant_commit
+    ):
+        raise RuntimeEvidenceError("CANARY deployment source identity changed")
+    _validate_operational_identity(
+        operational_identity,
+        snapshot=eod_snapshot,
+        decision_id=str(plan.get("decision_id")),
+        data_sha256=str(plan.get("data_sha256")),
+        calendar_sha256=str(plan.get("calendar_sha256")),
+    )
     decision_id = str(plan.get("decision_id"))
     plan_id = str(plan.get("plan_id"))
     planned_rows = _plan_orders(plan)
@@ -726,6 +752,7 @@ def finalize_canary_observation(
             account_sha256=str(plan.get("account_sha256")),
             data_sha256=str(plan.get("data_sha256")),
             calendar_sha256=str(plan.get("calendar_sha256")),
+            operational_identity=operational_identity,
         ),
         decision_id=decision_id,
         plan_id=plan_id,
@@ -749,6 +776,32 @@ def finalize_canary_observation(
     if eod_snapshot.account.account_id_hash != observed.identity.account_sha256:
         raise RuntimeEvidenceError("CANARY EOD account identity changed")
     return observed
+
+
+def _validate_operational_identity(
+    identity: OperationalEvidenceIdentity,
+    *,
+    snapshot: BrokerSnapshot,
+    decision_id: str,
+    data_sha256: str,
+    calendar_sha256: str,
+) -> None:
+    if not isinstance(identity, OperationalEvidenceIdentity):
+        raise TypeError("execution evidence requires OperationalEvidenceIdentity")
+    deployment = identity.deployment_identity
+    if (
+        identity.broker_snapshot_id != snapshot.snapshot_id
+        or identity.broker_snapshot_sha256 != snapshot.raw_payload_sha256
+        or identity.broker_event_watermark != snapshot.broker_event_watermark
+        or deployment.account_id_hash != snapshot.account.account_id_hash
+    ):
+        raise RuntimeEvidenceError("operational broker snapshot identity contradicts evidence")
+    if identity.decision_id != decision_id:
+        raise RuntimeEvidenceError("operational decision identity contradicts evidence")
+    if identity.strategy_data_manifest_sha256 != data_sha256:
+        raise RuntimeEvidenceError("operational strategy data identity contradicts evidence")
+    if identity.calendar_sha256 != calendar_sha256:
+        raise RuntimeEvidenceError("operational calendar identity contradicts evidence")
 
 
 __all__ = (

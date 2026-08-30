@@ -37,19 +37,28 @@ CAL64 = "1" * 64
 
 
 def _observation(*, stage: EvidenceStage = EvidenceStage.SHADOW) -> ExecutionObservation:
+    session = date(2026, 8, 27)
+    decision_id = "decision-1"
     identity = EvidenceIdentity(
         stage=stage,
-        execution_session=date(2026, 8, 27),
+        execution_session=session,
         firmquant_commit=D40,
         uquant_commit=U40,
         promotion_config_sha256=C64,
         account_sha256=A64,
         data_sha256=DATA64,
         calendar_sha256=CAL64,
+        operational_identity=_operational_identity(
+            session=session,
+            mode_epoch=1,
+            account_state="a" * 64,
+            stage=stage,
+            decision_id=decision_id,
+        ),
     )
     return ExecutionObservation(
         identity=identity,
-        decision_id="decision-1",
+        decision_id=decision_id,
         plan_id="plan-1",
         portfolio_equity=Decimal("10000"),
         planning_blockers=(
@@ -114,7 +123,12 @@ def _observation(*, stage: EvidenceStage = EvidenceStage.SHADOW) -> ExecutionObs
 
 
 def _operational_identity(
-    *, session: date, mode_epoch: int, account_state: str
+    *,
+    session: date,
+    mode_epoch: int,
+    account_state: str,
+    stage: EvidenceStage = EvidenceStage.SHADOW,
+    decision_id: str = "decision-1",
 ) -> OperationalEvidenceIdentity:
     deployment = DeploymentIdentity(
         firmquant_commit=D40,
@@ -129,7 +143,7 @@ def _operational_identity(
         account_id_hash=A64,
         account_authority_epoch=1,
         mode_epoch=mode_epoch,
-        mode=Mode.SHADOW,
+        mode=Mode.SHADOW if stage is EvidenceStage.SHADOW else Mode.CANARY,
         caps_sha256="7" * 64,
         production_policy_sha256="8" * 64,
     )
@@ -147,7 +161,7 @@ def _operational_identity(
         active_data_generation_sha256=DATA64,
         strategy_data_manifest_sha256=DATA64,
         strategy_session=session,
-        decision_id=None,
+        decision_id=decision_id,
         phase="POST_CLOSE",
         kind="EXECUTION_OBSERVATION",
     )
@@ -169,6 +183,31 @@ def test_same_session_identity_is_idempotent_and_conflicts_fail_closed(tmp_path)
             store.append(conflicting)
     finally:
         db.close()
+
+
+def test_new_evidence_store_rejects_legacy_identity(tmp_path) -> None:
+    db = Database.open(tmp_path / "ledger.sqlite3")
+    try:
+        legacy = replace(
+            _observation(),
+            identity=replace(_observation().identity, operational_identity=None),
+        )
+        with pytest.raises(ValueError, match="canonical operational identity"):
+            ExecutionEvidenceStore(db).append(legacy)
+    finally:
+        db.close()
+
+
+def test_canonical_evidence_rejects_cross_identity_contradictions() -> None:
+    observation = _observation()
+    with pytest.raises(ValueError, match="calendar"):
+        replace(observation.identity, calendar_sha256="2" * 64)
+    with pytest.raises(ValueError, match="data"):
+        replace(observation.identity, data_sha256="2" * 64)
+    with pytest.raises(ValueError, match="stage"):
+        replace(observation.identity, stage=EvidenceStage.CANARY)
+    with pytest.raises(ValueError, match="decision"):
+        replace(observation, decision_id="different-decision")
 
 
 def test_aggregation_allows_account_state_changes_but_rejects_mode_epoch_changes() -> None:

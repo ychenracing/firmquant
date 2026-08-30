@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
@@ -21,7 +22,14 @@ from firmquant.application.execution_evidence import (
     TargetObservation,
     aggregate_observations,
 )
+from firmquant.application.production_identity import (
+    OperationalEvidenceIdentity,
+    parse_identity,
+)
+from firmquant.config import Mode
 from firmquant.persistence.database import Database
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class PromotionStoreError(RuntimeError):
@@ -84,8 +92,74 @@ def _blocker(value: object) -> BlockerCode | None:
 
 def _decode_identity(payload: object) -> EvidenceIdentity:
     value = _mapping(payload, label="execution observation identity")
-    if value.get("schema") != "firmquant.execution-observation-identity.v1":
+    schema = value.get("schema")
+    if schema == "firmquant.execution-observation-identity.v1":
+        return _decode_legacy_identity(value)
+    if schema != "firmquant.execution-observation-aggregation-identity.v2":
         raise PromotionStoreError("execution observation identity schema is invalid")
+    expected_fields = {
+        "schema",
+        "stage",
+        "deployment_identity_sha256",
+        "account_authority_epoch",
+        "mode_epoch",
+        "mode",
+        "execution_session",
+        "operational_identity",
+        "operational_identity_sha256",
+        "data_sha256",
+        "calendar_sha256",
+    }
+    if set(value) != expected_fields:
+        raise PromotionStoreError("canonical execution identity fields are invalid")
+    nested = value.get("operational_identity")
+    try:
+        encoded = json.dumps(
+            nested,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        parsed = parse_identity(
+            encoded,
+            expected_sha256=cast(
+                str,
+                _text(value.get("operational_identity_sha256"), label="operational identity hash"),
+            ),
+        )
+    except (TypeError, ValueError, RuntimeError) as error:
+        raise PromotionStoreError("canonical operational identity is invalid") from error
+    if not isinstance(parsed, OperationalEvidenceIdentity):
+        raise PromotionStoreError("canonical operational identity has the wrong schema")
+    deployment = parsed.deployment_identity
+    if (
+        value.get("deployment_identity_sha256") != deployment.sha256
+        or value.get("account_authority_epoch") != deployment.account_authority_epoch
+        or value.get("mode_epoch") != deployment.mode_epoch
+        or value.get("mode") != deployment.mode.value
+    ):
+        raise PromotionStoreError("canonical deployment aggregation identity is contradictory")
+    try:
+        execution_session = date.fromisoformat(
+            cast(str, _text(value.get("execution_session"), label="session"))
+        )
+    except ValueError as error:
+        raise PromotionStoreError("execution observation session is invalid") from error
+    return EvidenceIdentity(
+        stage=_stage(value.get("stage")),
+        execution_session=execution_session,
+        firmquant_commit=deployment.firmquant_commit,
+        uquant_commit=deployment.uquant_commit,
+        promotion_config_sha256=deployment.semantic_config_sha256,
+        account_sha256=deployment.account_id_hash,
+        data_sha256=cast(str, _text(value.get("data_sha256"), label="data hash")),
+        calendar_sha256=cast(str, _text(value.get("calendar_sha256"), label="calendar hash")),
+        operational_identity=parsed,
+    )
+
+
+def _decode_legacy_identity(value: dict[str, object]) -> EvidenceIdentity:
     try:
         execution_session = date.fromisoformat(
             cast(str, _text(value.get("execution_session"), label="session"))
@@ -230,13 +304,41 @@ class PromotionStore:
         self,
         *,
         stage: EvidenceStage,
-        firmquant_commit: str,
-        uquant_commit: str,
-        config_sha256: str,
-        account_hash: str,
+        deployment_identity_sha256: str | None = None,
+        account_authority_epoch: int | None = None,
+        mode_epoch: int | None = None,
+        mode: Mode | None = None,
+        firmquant_commit: str | None = None,
+        uquant_commit: str | None = None,
+        config_sha256: str | None = None,
+        account_hash: str | None = None,
     ) -> tuple[ExecutionObservation, ...]:
         if not isinstance(stage, EvidenceStage):
             raise TypeError("promotion evidence stage must be typed")
+        if (
+            deployment_identity_sha256 is None
+            or account_authority_epoch is None
+            or mode_epoch is None
+            or mode is None
+        ):
+            return ()
+        if not isinstance(mode, Mode):
+            raise TypeError("promotion evidence mode must be typed")
+        if (stage is EvidenceStage.SHADOW and mode is not Mode.SHADOW) or (
+            stage is EvidenceStage.CANARY and mode is not Mode.CANARY
+        ):
+            raise ValueError("promotion evidence stage and mode contradict")
+        if (
+            not isinstance(deployment_identity_sha256, str)
+            or _SHA256.fullmatch(deployment_identity_sha256) is None
+        ):
+            raise ValueError("deployment identity SHA-256 is invalid")
+        for label, epoch in (
+            ("account authority epoch", account_authority_epoch),
+            ("mode epoch", mode_epoch),
+        ):
+            if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch <= 0:
+                raise ValueError(f"{label} must be positive")
         rows = self._database.query_all(
             "SELECT payload_json FROM audit_events WHERE category = 'EXECUTION_OBSERVATION' ORDER BY sequence"
         )
@@ -248,12 +350,14 @@ class PromotionStore:
                 raise PromotionStoreError("stored execution observation is invalid JSON") from error
             observation = _decode_observation(raw)
             identity = observation.identity
+            operational = identity.operational_identity
             if (
-                identity.stage is stage
-                and identity.firmquant_commit == firmquant_commit
-                and identity.uquant_commit == uquant_commit
-                and identity.promotion_config_sha256 == config_sha256
-                and identity.account_sha256 == account_hash
+                operational is not None
+                and identity.stage is stage
+                and operational.deployment_identity.sha256 == deployment_identity_sha256
+                and operational.deployment_identity.account_authority_epoch == account_authority_epoch
+                and operational.deployment_identity.mode_epoch == mode_epoch
+                and operational.deployment_identity.mode is mode
             ):
                 matched.append(observation)
         return tuple(matched)
@@ -262,13 +366,21 @@ class PromotionStore:
         self,
         *,
         stage: EvidenceStage,
-        firmquant_commit: str,
-        uquant_commit: str,
-        config_sha256: str,
-        account_hash: str,
+        deployment_identity_sha256: str | None = None,
+        account_authority_epoch: int | None = None,
+        mode_epoch: int | None = None,
+        mode: Mode | None = None,
+        firmquant_commit: str | None = None,
+        uquant_commit: str | None = None,
+        config_sha256: str | None = None,
+        account_hash: str | None = None,
     ) -> ExecutionEvidenceAggregate | None:
         observations = self.observations(
             stage=stage,
+            deployment_identity_sha256=deployment_identity_sha256,
+            account_authority_epoch=account_authority_epoch,
+            mode_epoch=mode_epoch,
+            mode=mode,
             firmquant_commit=firmquant_commit,
             uquant_commit=uquant_commit,
             config_sha256=config_sha256,
@@ -280,14 +392,18 @@ class PromotionStore:
         self,
         *,
         stage: EvidenceStage,
-        firmquant_commit: str,
-        uquant_commit: str,
-        config_sha256: str,
-        account_hash: str,
         min_sessions: int,
         min_orders: int,
         max_tracking_error: Decimal,
         min_fills: int = 0,
+        deployment_identity_sha256: str | None = None,
+        account_authority_epoch: int | None = None,
+        mode_epoch: int | None = None,
+        mode: Mode | None = None,
+        firmquant_commit: str | None = None,
+        uquant_commit: str | None = None,
+        config_sha256: str | None = None,
+        account_hash: str | None = None,
     ) -> bool:
         for label, value in (
             ("minimum sessions", min_sessions),
@@ -300,6 +416,10 @@ class PromotionStore:
             raise TypeError("maximum tracking error must be finite Decimal")
         aggregate = self.aggregate(
             stage=stage,
+            deployment_identity_sha256=deployment_identity_sha256,
+            account_authority_epoch=account_authority_epoch,
+            mode_epoch=mode_epoch,
+            mode=mode,
             firmquant_commit=firmquant_commit,
             uquant_commit=uquant_commit,
             config_sha256=config_sha256,

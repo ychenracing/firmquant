@@ -77,3 +77,12 @@ def test_production_policy_accepts_stricter_configuration_and_has_canonical_iden
     assert policy.max_arm_ttl_seconds == 600
     assert policy.payload()["schema"] == "firmquant.production-safety-policy.v1"
     assert len(policy.sha256) == 64
+
+
+def test_canonical_decimal_text_preserves_precision_while_removing_only_scale() -> None:
+    from firmquant.risk.production_policy import canonical_decimal_text
+
+    precise = Decimal("0.0123456789012345678901234567890")
+
+    assert canonical_decimal_text(precise) == "0.012345678901234567890123456789"
+    assert canonical_decimal_text(Decimal("-0.000")) == "0"

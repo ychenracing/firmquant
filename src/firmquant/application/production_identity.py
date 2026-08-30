@@ -11,14 +11,14 @@ import subprocess  # nosec B404
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Never, cast
 
 from firmquant.build_identity import SourceIdentity, load_locked_source_identity
 from firmquant.config import DeploymentCaps, Mode, Settings
 from firmquant.persistence.repositories import canonical_sha256
-from firmquant.risk.production_policy import ProductionSafetyPolicy
+from firmquant.risk.production_policy import ProductionSafetyPolicy, canonical_decimal_text
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -34,7 +34,7 @@ def _canonical_text(value: object, *, label: str) -> str:
         or not value
         or value != value.strip()
         or unicodedata.normalize("NFC", value) != value
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value)
     ):
         raise IdentityError(f"{label} must be non-empty canonical text")
     return value
@@ -53,9 +53,16 @@ def _count(value: object, *, label: str) -> int:
     return value
 
 
-def _require_aware_datetime(value: object, *, label: str) -> None:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise IdentityError(f"{label} must be timezone-aware")
+def _positive_count(value: object, *, label: str) -> int:
+    observed = _count(value, label=label)
+    if observed == 0:
+        raise IdentityError(f"{label} must be a positive integer")
+    return observed
+
+
+def _require_utc_datetime(value: object, *, label: str) -> None:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise IdentityError(f"{label} must be a canonical UTC timestamp")
 
 
 def _canonical_json(payload: object) -> str:
@@ -79,11 +86,11 @@ def _caps_payload(caps: DeploymentCaps | None, *, mode: Mode) -> dict[str, objec
     values: dict[str, object] | None = None
     if caps is not None:
         values = {
-            "max_order_notional": format(caps.max_order_notional, "f"),
-            "max_daily_submitted_notional": format(caps.max_daily_submitted_notional, "f"),
-            "max_daily_filled_notional": format(caps.max_daily_filled_notional, "f"),
-            "max_symbol_notional": format(caps.max_symbol_notional, "f"),
-            "max_total_gross_notional": format(caps.max_total_gross_notional, "f"),
+            "max_order_notional": canonical_decimal_text(caps.max_order_notional),
+            "max_daily_submitted_notional": canonical_decimal_text(caps.max_daily_submitted_notional),
+            "max_daily_filled_notional": canonical_decimal_text(caps.max_daily_filled_notional),
+            "max_symbol_notional": canonical_decimal_text(caps.max_symbol_notional),
+            "max_total_gross_notional": canonical_decimal_text(caps.max_total_gross_notional),
         }
     return {
         "schema": "firmquant.deployment-caps.v1",
@@ -135,20 +142,22 @@ def semantic_config_sha256(settings: Settings) -> str:
             "max_cancel_count_window": execution.max_cancel_count_window,
             "max_quote_age_seconds": execution.max_quote_age_seconds,
             "max_clock_drift_seconds": execution.max_clock_drift_seconds,
-            "max_price_deviation_bps": format(execution.max_price_deviation_bps, "f"),
-            "max_equity_change_fraction": format(execution.max_equity_change_fraction, "f"),
-            "max_intraday_loss_fraction": format(execution.max_intraday_loss_fraction, "f"),
-            "max_capital_drawdown_fraction": format(execution.max_capital_drawdown_fraction, "f"),
+            "max_price_deviation_bps": canonical_decimal_text(execution.max_price_deviation_bps),
+            "max_equity_change_fraction": canonical_decimal_text(execution.max_equity_change_fraction),
+            "max_intraday_loss_fraction": canonical_decimal_text(execution.max_intraday_loss_fraction),
+            "max_capital_drawdown_fraction": canonical_decimal_text(execution.max_capital_drawdown_fraction),
             "max_arm_ttl_seconds": execution.max_arm_ttl_seconds,
         },
         "promotion": {
             "min_shadow_sessions": promotion.min_shadow_sessions,
             "min_shadow_orders": promotion.min_shadow_orders,
-            "max_target_tracking_error": format(promotion.max_target_tracking_error, "f"),
+            "max_target_tracking_error": canonical_decimal_text(promotion.max_target_tracking_error),
             "min_canary_sessions": promotion.min_canary_sessions,
             "min_canary_orders": promotion.min_canary_orders,
             "min_canary_fills": promotion.min_canary_fills,
-            "max_canary_target_tracking_error": format(promotion.max_canary_target_tracking_error, "f"),
+            "max_canary_target_tracking_error": canonical_decimal_text(
+                promotion.max_canary_target_tracking_error
+            ),
         },
         "caps_sha256": deployment_caps_sha256(settings),
         "production_policy_sha256": policy.sha256,
@@ -192,8 +201,8 @@ class DeploymentIdentity:
             ("production policy SHA-256", self.production_policy_sha256),
         ):
             _digest(value, label=label)
-        _count(self.account_authority_epoch, label="account authority epoch")
-        _count(self.mode_epoch, label="mode epoch")
+        _positive_count(self.account_authority_epoch, label="account authority epoch")
+        _positive_count(self.mode_epoch, label="mode epoch")
         if not isinstance(self.mode, Mode):
             raise IdentityError("deployment mode must be typed")
 
@@ -309,13 +318,9 @@ class OperationalEvidenceIdentity:
             ("snapshot started at", self.snapshot_started_at),
             ("snapshot completed at", self.snapshot_completed_at),
         ):
-            _require_aware_datetime(temporal_value, label=temporal_label)
+            _require_utc_datetime(temporal_value, label=temporal_label)
         if self.snapshot_completed_at < self.snapshot_started_at:
             raise IdentityError("snapshot completion precedes start")
-        elapsed = self.snapshot_completed_at - self.snapshot_started_at
-        elapsed_microseconds = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
-        if elapsed_microseconds != self.snapshot_duration_ms * 1000:
-            raise IdentityError("snapshot duration does not match timestamps")
         if type(self.strategy_session) is not date:
             raise IdentityError("strategy session must be a calendar date")
         if self.decision_id is not None:
@@ -426,8 +431,10 @@ def _deployment_from_payload(payload: Mapping[str, object]) -> DeploymentIdentit
         raw_config_sha256=cast(str, payload["raw_config_sha256"]),
         xtquant_safety_manifest_sha256=cast(str, payload["xtquant_safety_manifest_sha256"]),
         account_id_hash=cast(str, payload["account_id_hash"]),
-        account_authority_epoch=_count(payload["account_authority_epoch"], label="account authority epoch"),
-        mode_epoch=_count(payload["mode_epoch"], label="mode epoch"),
+        account_authority_epoch=_positive_count(
+            payload["account_authority_epoch"], label="account authority epoch"
+        ),
+        mode_epoch=_positive_count(payload["mode_epoch"], label="mode epoch"),
         mode=mode,
         caps_sha256=cast(str, payload["caps_sha256"]),
         production_policy_sha256=cast(str, payload["production_policy_sha256"]),
