@@ -21,7 +21,7 @@ from typing import Never, Protocol, runtime_checkable
 
 from firmquant.application.execution_evidence import EvidenceStage
 from firmquant.application.live_readiness_runtime import collect_live_readiness
-from firmquant.application.production_identity import promotion_config_sha256
+from firmquant.application.production_identity import DeploymentIdentity
 from firmquant.application.promotion_store import PromotionStore
 from firmquant.broker.production_smoke import run_readonly_production_smoke
 from firmquant.broker.replay import RecordedReplayBroker
@@ -90,6 +90,7 @@ type AccountBootstrapPort = Callable[[Path | None], Mapping[str, object]]
 type DurableCancellationExecutor = Callable[[BrokerWriteCapability, tuple[str, ...]], tuple[str, ...]]
 type DoctorBrokerProvider = Callable[[], ReadOnlyDoctorBroker | None]
 type FirmquantCommitProvider = Callable[[], str]
+type PromotionIdentityProvider = Callable[[EvidenceStage], DeploymentIdentity | None]
 type Clock = Callable[[], datetime]
 
 
@@ -395,6 +396,7 @@ class LocalOperatorService:
         account_bootstrapper: AccountBootstrapPort | None = None,
         doctor_broker_provider: DoctorBrokerProvider | None = None,
         system_order_canceller: SystemOrderCancellationPort | None = None,
+        promotion_identity_provider: PromotionIdentityProvider | None = None,
     ) -> None:
         if not isinstance(config_path, Path):
             raise TypeError("operator configuration path must be pathlib.Path")
@@ -406,6 +408,7 @@ class LocalOperatorService:
             reporter,
             account_bootstrapper,
             doctor_broker_provider,
+            promotion_identity_provider,
         ):
             if dependency is not None and not callable(dependency):
                 raise TypeError("operator optional ports must be callable")
@@ -423,6 +426,7 @@ class LocalOperatorService:
         self._account_bootstrapper = account_bootstrapper
         self._doctor_broker_provider = doctor_broker_provider
         self._system_order_canceller = system_order_canceller
+        self._promotion_identity_provider = promotion_identity_provider
 
     def execute(
         self,
@@ -1037,16 +1041,29 @@ class LocalOperatorService:
             except Exception as error:
                 raise OperatorCommandDenied("UQUANT_IDENTITY_UNAVAILABLE") from error
             if settings.mode is Mode.CANARY:
-                qualified = PromotionStore(database).qualifies(
-                    stage=EvidenceStage.SHADOW,
-                    firmquant_commit=firmquant_commit,
-                    uquant_commit=identity.uquant_commit,
-                    config_sha256=promotion_config_sha256(settings),
-                    account_hash=account_hash,
-                    min_sessions=settings.promotion.min_shadow_sessions,
-                    min_orders=settings.promotion.min_shadow_orders,
-                    max_tracking_error=settings.promotion.max_target_tracking_error,
+                deployment = (
+                    None
+                    if self._promotion_identity_provider is None
+                    else self._promotion_identity_provider(EvidenceStage.SHADOW)
                 )
+                qualified = False
+                if (
+                    isinstance(deployment, DeploymentIdentity)
+                    and deployment.mode is Mode.SHADOW
+                    and deployment.firmquant_commit == firmquant_commit
+                    and deployment.uquant_commit == identity.uquant_commit
+                    and deployment.account_id_hash == account_hash
+                ):
+                    qualified = PromotionStore(database).qualifies(
+                        stage=EvidenceStage.SHADOW,
+                        deployment_identity_sha256=deployment.sha256,
+                        account_authority_epoch=deployment.account_authority_epoch,
+                        mode_epoch=deployment.mode_epoch,
+                        mode=deployment.mode,
+                        min_sessions=settings.promotion.min_shadow_sessions,
+                        min_orders=settings.promotion.min_shadow_orders,
+                        max_tracking_error=settings.promotion.max_target_tracking_error,
+                    )
                 if not qualified:
                     raise OperatorCommandDenied("SHADOW_VALIDATION_REQUIRED")
             else:

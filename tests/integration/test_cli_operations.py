@@ -32,7 +32,11 @@ from firmquant.application.operations import (
     SystemOrderCancellationPort,
     create_local_operator_service,
 )
-from firmquant.application.production_identity import promotion_config_sha256
+from firmquant.application.production_identity import (
+    DeploymentIdentity,
+    OperationalEvidenceIdentity,
+    promotion_config_sha256,
+)
 from firmquant.application.promotion_store import PromotionStore
 from firmquant.config import Mode, load_settings
 from firmquant.domain.broker_facts import Side
@@ -51,6 +55,26 @@ from tests.fixtures.session_cases import decision_snapshot
 
 NOW = datetime(2026, 8, 26, 1, 0, tzinfo=UTC)
 FIRMQUANT_COMMIT = "f" * 40
+
+
+def _shadow_deployment() -> DeploymentIdentity:
+    return DeploymentIdentity(
+        firmquant_commit=FIRMQUANT_COMMIT,
+        uquant_commit=StrategyIdentity.locked().uquant_commit,
+        uquant_tree="1" * 40,
+        uquant_package_manifest_sha256="2" * 64,
+        uquant_code_fingerprint="3" * 64,
+        uquant_config_fingerprint="4" * 64,
+        semantic_config_sha256="5" * 64,
+        raw_config_sha256="6" * 64,
+        xtquant_safety_manifest_sha256="7" * 64,
+        account_id_hash="a" * 64,
+        account_authority_epoch=1,
+        mode_epoch=1,
+        mode=Mode.SHADOW,
+        caps_sha256="8" * 64,
+        production_policy_sha256="9" * 64,
+    )
 
 
 class StaticSecrets:
@@ -166,6 +190,9 @@ def service(
         reconciler=reconciler,
         reporter=reporter,
         system_order_canceller=system_order_canceller,
+        promotion_identity_provider=(
+            lambda stage: _shadow_deployment() if stage is EvidenceStage.SHADOW else None
+        ),
     )
 
 
@@ -269,7 +296,10 @@ def seed_live_readiness(config: Path) -> None:
             )
             position = PositionObservation(symbol="600000.SH", shares=100)
             promotion_store = PromotionStore(database)
+            deployment = _shadow_deployment()
             for index in range(settings.promotion.min_shadow_sessions):
+                execution_session = date(2026, 7, index + 1)
+                decision_id = f"shadow-decision-{index}"
                 orders = tuple(
                     OrderObservation(
                         execution_id=f"shadow-seed-{index}-{order_index}",
@@ -287,15 +317,32 @@ def seed_live_readiness(config: Path) -> None:
                     ExecutionObservation(
                         identity=EvidenceIdentity(
                             stage=EvidenceStage.SHADOW,
-                            execution_session=date(2026, 7, index + 1),
+                            execution_session=execution_session,
                             firmquant_commit=FIRMQUANT_COMMIT,
                             uquant_commit=uquant_commit,
                             promotion_config_sha256=promotion_sha,
                             account_sha256="a" * 64,
                             data_sha256="d" * 64,
                             calendar_sha256="e" * 64,
+                            operational_identity=OperationalEvidenceIdentity(
+                                deployment_identity=deployment,
+                                account_state_sha256="c" * 64,
+                                broker_snapshot_id=f"shadow-snapshot-{index}",
+                                broker_snapshot_sha256="b" * 64,
+                                broker_event_watermark=index,
+                                snapshot_started_at=NOW,
+                                snapshot_completed_at=NOW,
+                                snapshot_duration_ms=0,
+                                calendar_sha256="e" * 64,
+                                active_data_generation_sha256="d" * 64,
+                                strategy_data_manifest_sha256="d" * 64,
+                                strategy_session=execution_session,
+                                decision_id=decision_id,
+                                phase="EXECUTION",
+                                kind="SHADOW_EXECUTION",
+                            ),
                         ),
-                        decision_id=f"shadow-decision-{index}",
+                        decision_id=decision_id,
                         plan_id=f"shadow-plan-{index}",
                         portfolio_equity=Decimal("10000"),
                         planned_orders=orders,
