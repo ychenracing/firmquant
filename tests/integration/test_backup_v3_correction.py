@@ -1008,20 +1008,25 @@ def test_restore_publication_never_opens_a_substituted_directory(
             substituted = True
             preserved = source_path.with_name(source_path.name + ".preserved")
             real_replace(source_path, preserved)
-            try:
-                source_path.symlink_to(incident, target_is_directory=True)
-            except OSError:
-                pytest.skip("directory symlinks are unavailable on this runner")
-            real_replace(source_path, destination_path)
+            real_replace(incident, destination_path)
             return
         real_replace(source_path, destination_path)
 
-    monkeypatch.setattr(backup_module.os, "replace", substitute_at_publication)
+    if backup_module.os.name == "nt":
+
+        def substitute_move_file_ex(source_path: Path, destination_path: Path, _flags: int) -> bool:
+            substitute_at_publication(source_path, destination_path)
+            return True
+
+        monkeypatch.setattr(backup_module, "_move_file_ex", substitute_move_file_ex)
+    else:
+        monkeypatch.setattr(backup_module.os, "replace", substitute_at_publication)
 
     with pytest.raises(BackupError, match=r"publication|directory|identity"):
         restore_backup(source.bundle_path, destination, restored_at=NOW)
 
     assert substituted is True
-    assert _tree_bytes(incident) == before
-    assert not (incident / "firmquant.sqlite3-wal").exists()
-    assert not (incident / "firmquant.sqlite3-shm").exists()
+    assert not incident.exists()
+    assert _tree_bytes(destination) == before
+    assert not (destination / "firmquant.sqlite3-wal").exists()
+    assert not (destination / "firmquant.sqlite3-shm").exists()

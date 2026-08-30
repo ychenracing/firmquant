@@ -2153,7 +2153,8 @@ def _logical_state_sha256(database: Database) -> str:
         columns = tuple(str(row["name"]) for row in database.query_all(f"PRAGMA table_info({name})"))
         rows = [
             [_logical_value(row[column]) for column in columns]
-            for row in database.query_all(f"SELECT * FROM {name}")
+            # Table names come only from sqlite_master and pass the identifier allowlist above.
+            for row in database.query_all(f"SELECT * FROM {name}")  # nosec B608
         ]
         rows.sort(key=canonical_json)
         tables.append({"name": name, "columns": list(columns), "rows": rows})

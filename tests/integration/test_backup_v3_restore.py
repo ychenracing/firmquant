@@ -568,6 +568,7 @@ def test_v3_backup_recovers_exact_bundle_after_rename_before_sql_progression(
 
     database, account, inputs, root = _v3_case(tmp_path)
     real_fsync_directory = backup_module._fsync_directory
+    real_move_file_ex = backup_module._move_file_ex
     failed = False
 
     def fail_first_parent_fsync(path: Path) -> None:
@@ -577,7 +578,18 @@ def test_v3_backup_recovers_exact_bundle_after_rename_before_sql_progression(
             raise OSError("injected parent fsync failure")
         real_fsync_directory(path)
 
-    monkeypatch.setattr(backup_module, "_fsync_directory", fail_first_parent_fsync)
+    def fail_after_windows_move(source: Path, destination: Path, flags: int) -> bool:
+        nonlocal failed
+        if not failed:
+            failed = True
+            source.rename(destination)
+            raise OSError("injected MoveFileExW post-move failure")
+        return real_move_file_ex(source, destination, flags)
+
+    if backup_module.os.name == "nt":
+        monkeypatch.setattr(backup_module, "_move_file_ex", fail_after_windows_move)
+    else:
+        monkeypatch.setattr(backup_module, "_fsync_directory", fail_first_parent_fsync)
     try:
         with pytest.raises(backup_module.BackupError, match="publish"):
             backup_state(
@@ -590,6 +602,7 @@ def test_v3_backup_recovers_exact_bundle_after_rename_before_sql_progression(
         row = database.query_one("SELECT stage FROM backup_publication_operations")
         assert row is not None and row["stage"] == "PREPARED"
         monkeypatch.setattr(backup_module, "_fsync_directory", real_fsync_directory)
+        monkeypatch.setattr(backup_module, "_move_file_ex", real_move_file_ex)
         receipt = backup_state(
             database,
             root,
