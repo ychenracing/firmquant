@@ -71,7 +71,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           FIRMQUANT_UQUANT_SOURCE_CHECKOUT: ${{ github.workspace }}/.uquant-source
-          PYTHONPATH: ${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/.uquant-source:${{ github.workspace }}/src
         run: uv run pytest --cov=firmquant --cov-branch --cov-fail-under=85
       - name: Windows unit tests
         if: runner.os == 'Windows'
