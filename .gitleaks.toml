@@ -1,9 +1,11 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
 description = "Public uquant API-contract SHA-256 identity, not a credential"
-targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
 paths = [

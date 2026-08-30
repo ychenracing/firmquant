@@ -28,10 +28,13 @@ def test_gitleaks_allowlist_is_rule_path_and_line_scoped() -> None:
     config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
 
     assert config["extend"] == {"useDefault": True}
-    assert set(config) == {"extend", "allowlists"}
-    assert len(config["allowlists"]) == 1
-    allowlist = config["allowlists"][0]
-    assert allowlist["targetRules"] == ["generic-api-key"]
+    assert set(config) == {"extend", "rules"}
+    assert len(config["rules"]) == 1
+    rule = config["rules"][0]
+    assert set(rule) == {"id", "allowlists"}
+    assert rule["id"] == "generic-api-key"
+    assert len(rule["allowlists"]) == 1
+    allowlist = rule["allowlists"][0]
     assert allowlist["condition"] == "AND"
     assert allowlist["regexTarget"] == "line"
     assert allowlist["paths"] == [
