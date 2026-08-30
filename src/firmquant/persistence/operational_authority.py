@@ -40,6 +40,7 @@ def _text(value: str, *, label: str, maximum: int = 256) -> str:
         not isinstance(value, str)
         or not value
         or value != value.strip()
+        or unicodedata.normalize("NFC", value) != value
         or len(value) > maximum
         or any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value)
     ):
@@ -526,6 +527,14 @@ class OperationalAuthorityStore:
             actual = row["actual_account_after_sha256"]
             if actual is not None:
                 actual = _sha256(str(actual), label="actual account after")
+            if updated_at < created_at:
+                raise ValueError("updated_at precedes created_at")
+            if stage is OperationStage.PREPARED and actual is not None:
+                raise ValueError("prepared operation has committed output")
+            if stage in {OperationStage.FILE_COMMITTED, OperationStage.RECEIPT_COMMITTED} and (
+                actual is None
+            ):
+                raise ValueError("committed operation lacks actual output")
         except (KeyError, TypeError, ValueError) as error:
             raise PersistenceConflict("rebaseline operation row is malformed") from error
         if stored.payload_json != str(row["payload_json"]) or stored.payload_sha256 != str(
@@ -553,6 +562,8 @@ class OperationalAuthorityStore:
             )
             stage = OperationStage(str(row["stage"]))
             updated_at = _stored_datetime(row["updated_at"], label="mode transition updated_at")
+            if updated_at < created_at:
+                raise ValueError("updated_at precedes created_at")
         except (KeyError, TypeError, ValueError) as error:
             raise PersistenceConflict("mode transition operation row is malformed") from error
         if stored.payload_json != str(row["payload_json"]) or stored.payload_sha256 != str(

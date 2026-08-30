@@ -214,6 +214,8 @@ def test_operation_constructors_require_real_canonical_identity_and_adjacent_epo
 def test_operation_text_rejects_unsafe_unicode() -> None:
     with pytest.raises(ValueError, match="canonical"):
         _rebaseline(reason="reviewed\u202ereason")
+    with pytest.raises(ValueError, match="canonical"):
+        _rebaseline(reason="reviewe\u0301d")
 
 
 def test_store_rejects_typed_operation_that_bypasses_canonical_constructor(tmp_path: Path) -> None:
@@ -240,3 +242,49 @@ def test_store_rejects_typed_operation_that_bypasses_canonical_constructor(tmp_p
             evidence_sha256="3" * 64,
             created_at=NOW,
         )
+
+
+@pytest.mark.parametrize("malformation", ["incomplete-stage", "backwards-time"])
+def test_rebaseline_reader_rejects_structurally_malformed_rows(tmp_path: Path, malformation: str) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    operation = _rebaseline()
+    store = OperationalAuthorityStore(database)
+    try:
+        assert store.prepare_rebaseline(operation) == operation
+        with database.transaction():
+            database.write("DROP TRIGGER account_rebaseline_operations_forward_only")
+            if malformation == "incomplete-stage":
+                database.write("DROP TRIGGER account_rebaseline_operations_stage_output_guard")
+                database.write(
+                    "UPDATE account_rebaseline_operations SET stage='FILE_COMMITTED' WHERE operation_id=?",
+                    (operation.operation_id,),
+                )
+            else:
+                database.write(
+                    "UPDATE account_rebaseline_operations "
+                    "SET updated_at='2026-08-30T07:59:59+00:00' WHERE operation_id=?",
+                    (operation.operation_id,),
+                )
+        with pytest.raises(PersistenceConflict, match="malformed"):
+            store.prepare_rebaseline(operation)
+    finally:
+        database.close()
+
+
+def test_mode_transition_reader_rejects_updated_at_before_created_at(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    operation = _transition()
+    store = OperationalAuthorityStore(database)
+    try:
+        assert store.prepare_transition(operation) == operation
+        with database.transaction():
+            database.write("DROP TRIGGER mode_transition_operations_forward_only")
+            database.write(
+                "UPDATE mode_transition_operations "
+                "SET updated_at='2026-08-30T07:59:59+00:00' WHERE operation_id=?",
+                (operation.operation_id,),
+            )
+        with pytest.raises(PersistenceConflict, match="malformed"):
+            store.prepare_transition(operation)
+    finally:
+        database.close()

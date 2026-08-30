@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from firmquant.domain.broker_facts import AccountType, BrokerSnapshot
 from firmquant.persistence.audit import AuditLedger
 from firmquant.persistence.database import Database
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,25 +105,55 @@ class BrokerSnapshotStore:
         if not hasattr(row, "__getitem__"):
             raise RuntimeError("stored broker snapshot is invalid")
         try:
-            timing = _timing_values(
-                started_at=(
-                    None if row["started_at"] is None else datetime.fromisoformat(str(row["started_at"]))
-                ),
-                completed_at=(
-                    None if row["completed_at"] is None else datetime.fromisoformat(str(row["completed_at"]))
-                ),
-                duration_ms=None if row["duration_ms"] is None else int(row["duration_ms"]),
-            )
-            captured_at = datetime.fromisoformat(str(row["captured_at"]))
-            if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+            snapshot_id = row["snapshot_id"]
+            account_id_hash = row["account_id_hash"]
+            raw_payload_sha256 = row["raw_payload_sha256"]
+            watermark = row["broker_event_watermark"]
+            complete = row["complete"]
+            if (
+                not isinstance(snapshot_id, str)
+                or not snapshot_id
+                or snapshot_id != snapshot_id.strip()
+                or not isinstance(account_id_hash, str)
+                or _SHA256.fullmatch(account_id_hash) is None
+                or not isinstance(raw_payload_sha256, str)
+                or _SHA256.fullmatch(raw_payload_sha256) is None
+                or type(watermark) is not int
+                or watermark < 0
+                or type(complete) is not int
+                or complete != 1
+                or row["cash_snapshot_id"] != snapshot_id
+            ):
                 raise ValueError
+
+            def timestamp(value: object, *, utc: bool) -> datetime:
+                if not isinstance(value, str):
+                    raise ValueError
+                parsed = datetime.fromisoformat(value)
+                if parsed.isoformat() != value or parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError
+                if utc and parsed.utcoffset() != timedelta(0):
+                    raise ValueError
+                return parsed
+
+            started_raw = row["started_at"]
+            completed_raw = row["completed_at"]
+            duration_raw = row["duration_ms"]
+            if duration_raw is not None and type(duration_raw) is not int:
+                raise ValueError
+            timing = _timing_values(
+                started_at=(None if started_raw is None else timestamp(started_raw, utc=True)),
+                completed_at=(None if completed_raw is None else timestamp(completed_raw, utc=True)),
+                duration_ms=duration_raw,
+            )
+            captured_at = timestamp(row["captured_at"], utc=True)
             stored = StoredBrokerSnapshot(
-                snapshot_id=str(row["snapshot_id"]),
-                account_id_hash=str(row["account_id_hash"]),
+                snapshot_id=snapshot_id,
+                account_id_hash=account_id_hash,
                 account_type=AccountType(str(row["account_type"])),
                 captured_at=captured_at,
-                broker_event_watermark=int(row["broker_event_watermark"]),
-                raw_payload_sha256=str(row["raw_payload_sha256"]),
+                broker_event_watermark=watermark,
+                raw_payload_sha256=raw_payload_sha256,
                 started_at=None if timing[0] is None else datetime.fromisoformat(timing[0]),
                 completed_at=None if timing[1] is None else datetime.fromisoformat(timing[1]),
                 duration_ms=timing[2],
@@ -129,15 +162,38 @@ class BrokerSnapshotStore:
             raise RuntimeError("stored broker snapshot is invalid") from error
         return stored
 
+    def load(self, snapshot_id: str) -> StoredBrokerSnapshot | None:
+        if not isinstance(snapshot_id, str):
+            raise TypeError("snapshot id must be text")
+        if not snapshot_id:
+            raise ValueError("snapshot id must be non-empty")
+        row = self._database.query_one(
+            """
+            SELECT b.snapshot_id,b.account_id_hash,b.account_type,b.captured_at,
+                   b.broker_event_watermark,b.raw_payload_sha256,b.complete,
+                   b.started_at,b.completed_at,b.duration_ms,
+                   c.snapshot_id AS cash_snapshot_id
+            FROM broker_snapshots AS b
+            LEFT JOIN cash_snapshots AS c ON c.snapshot_id=b.snapshot_id
+            WHERE b.snapshot_id=?
+            """,
+            (snapshot_id,),
+        )
+        return None if row is None else self._stored(row)
+
     def latest(self) -> StoredBrokerSnapshot | None:
         row = self._database.query_one(
             """
-            SELECT snapshot_id,account_id_hash,account_type,captured_at,
-                   broker_event_watermark,raw_payload_sha256,started_at,completed_at,duration_ms
+            SELECT snapshot_id
             FROM broker_snapshots ORDER BY captured_at DESC,snapshot_id DESC LIMIT 1
             """
         )
-        return None if row is None else self._stored(row)
+        if row is None:
+            return None
+        stored = self.load(str(row["snapshot_id"]))
+        if stored is None:
+            raise RuntimeError("stored broker snapshot is invalid")
+        return stored
 
     def persist(
         self,

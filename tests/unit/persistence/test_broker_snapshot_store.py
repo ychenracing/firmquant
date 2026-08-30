@@ -31,6 +31,9 @@ def test_snapshot_store_is_idempotent_and_retains_previous_account_identity(tmp_
         assert database.scalar("SELECT count(*) FROM position_snapshots") == len(snapshot.positions)
         stored = store.latest()
         assert stored is not None
+        assert store.load(snapshot.snapshot_id) == stored
+        assert store.load("missing-snapshot") is None
+        assert store.load("' OR 1=1 --") is None
         assert stored.started_at is None
         assert stored.completed_at is None
         assert stored.duration_ms is None
@@ -119,5 +122,65 @@ def test_snapshot_timing_participates_in_idempotency_identity(tmp_path: Path) ->
                 completed_at=completed_at,
                 duration_ms=11,
             )
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("captured_at", "2026-08-25T01:30:00Z"),
+        ("account_id_hash", "g" * 64),
+        ("raw_payload_sha256", "A" * 64),
+        ("broker_event_watermark", -1),
+        ("complete", 0),
+        ("started_at", "2026-08-25T01:30:00Z"),
+        ("duration_ms", -1),
+    ],
+)
+def test_snapshot_reads_reject_malformed_parent_rows(tmp_path: Path, column: str, value: object) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    store = BrokerSnapshotStore(database)
+    snapshot = execution_snapshot().broker_snapshot
+    started_at = datetime(2026, 8, 25, 1, 30, tzinfo=UTC)
+    try:
+        assert store.persist(
+            snapshot,
+            started_at=started_at,
+            completed_at=started_at + timedelta(seconds=1),
+            duration_ms=7,
+        )
+        with database.transaction():
+            database.write("DROP TRIGGER broker_snapshots_reject_update")
+        database.scalar("PRAGMA ignore_check_constraints = ON")
+        with database.transaction():
+            database.write(
+                f"UPDATE broker_snapshots SET {column}=? WHERE snapshot_id=?",
+                (value, snapshot.snapshot_id),
+            )
+        database.scalar("PRAGMA ignore_check_constraints = OFF")
+
+        with pytest.raises(RuntimeError, match="stored broker snapshot is invalid"):
+            store.load(snapshot.snapshot_id)
+        with pytest.raises(RuntimeError, match="stored broker snapshot is invalid"):
+            store.latest()
+    finally:
+        database.close()
+
+
+def test_snapshot_reads_require_cash_child(tmp_path: Path) -> None:
+    database = Database.open(tmp_path / "firmquant.sqlite3")
+    store = BrokerSnapshotStore(database)
+    snapshot = execution_snapshot().broker_snapshot
+    try:
+        assert store.persist(snapshot)
+        with database.transaction():
+            database.write("DROP TRIGGER cash_snapshots_reject_delete")
+            database.write("DELETE FROM cash_snapshots WHERE snapshot_id=?", (snapshot.snapshot_id,))
+
+        with pytest.raises(RuntimeError, match="stored broker snapshot is invalid"):
+            store.load(snapshot.snapshot_id)
+        with pytest.raises(RuntimeError, match="stored broker snapshot is invalid"):
+            store.latest()
     finally:
         database.close()

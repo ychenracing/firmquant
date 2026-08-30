@@ -509,7 +509,10 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
     ALTER TABLE broker_snapshots ADD COLUMN duration_ms INTEGER CHECK (
         (started_at IS NULL AND completed_at IS NULL AND duration_ms IS NULL)
         OR
-        (started_at IS NOT NULL AND completed_at IS NOT NULL AND duration_ms >= 0)
+        (
+            started_at IS NOT NULL AND completed_at IS NOT NULL
+            AND duration_ms IS NOT NULL AND duration_ms >= 0
+        )
     )
     """,
     "ALTER TABLE backup_receipts ADD COLUMN bundle_schema_version INTEGER CHECK (bundle_schema_version > 0)",
@@ -523,13 +526,21 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
     """,
     """
     ALTER TABLE backup_receipts ADD COLUMN deployment_identity_sha256 TEXT
-    CHECK (deployment_identity_sha256 IS NULL OR length(deployment_identity_sha256) = 64)
+    CHECK (
+        deployment_identity_sha256 IS NULL OR (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    )
     """,
     """
     ALTER TABLE backup_receipts ADD COLUMN operational_evidence_identity_sha256 TEXT
     CHECK (
         operational_evidence_identity_sha256 IS NULL
-        OR length(operational_evidence_identity_sha256) = 64
+        OR (
+            length(operational_evidence_identity_sha256) = 64
+            AND operational_evidence_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
     )
     """,
     """
@@ -543,19 +554,34 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
     "ALTER TABLE backup_receipts ADD COLUMN broker_snapshot_id TEXT",
     """
     ALTER TABLE backup_receipts ADD COLUMN broker_snapshot_sha256 TEXT
-    CHECK (broker_snapshot_sha256 IS NULL OR length(broker_snapshot_sha256) = 64)
+    CHECK (
+        broker_snapshot_sha256 IS NULL OR (
+            length(broker_snapshot_sha256) = 64
+            AND broker_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    )
     """,
     """
     CREATE TABLE account_authority_epochs (
         epoch INTEGER PRIMARY KEY CHECK (epoch > 0),
-        account_id_hash TEXT NOT NULL CHECK (length(account_id_hash) = 64),
-        account_state_sha256 TEXT NOT NULL CHECK (length(account_state_sha256) = 64),
+        account_id_hash TEXT NOT NULL CHECK (
+            length(account_id_hash) = 64 AND account_id_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        account_state_sha256 TEXT NOT NULL CHECK (
+            length(account_state_sha256) = 64
+            AND account_state_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         deployment_identity_sha256 TEXT CHECK (
-            deployment_identity_sha256 IS NULL OR length(deployment_identity_sha256) = 64
+            deployment_identity_sha256 IS NULL OR (
+                length(deployment_identity_sha256) = 64
+                AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
         ),
         source_binding_id TEXT REFERENCES account_bindings(binding_id),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL
     ) STRICT
     """,
@@ -570,11 +596,20 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         epoch INTEGER PRIMARY KEY CHECK (epoch > 0),
         mode TEXT NOT NULL CHECK (mode IN ('REPLAY','PAPER','SHADOW','CANARY','LIVE')),
         deployment_identity_sha256 TEXT CHECK (
-            deployment_identity_sha256 IS NULL OR length(deployment_identity_sha256) = 64
+            deployment_identity_sha256 IS NULL OR (
+                length(deployment_identity_sha256) = 64
+                AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
         ),
-        caps_sha256 TEXT CHECK (caps_sha256 IS NULL OR length(caps_sha256) = 64),
+        caps_sha256 TEXT CHECK (
+            caps_sha256 IS NULL OR (
+                length(caps_sha256) = 64 AND caps_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL
     ) STRICT
     """,
@@ -586,13 +621,20 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
     """,
     """
     CREATE TABLE deployment_identities (
-        deployment_identity_sha256 TEXT PRIMARY KEY CHECK (length(deployment_identity_sha256) = 64),
-        account_id_hash TEXT NOT NULL CHECK (length(account_id_hash) = 64),
+        deployment_identity_sha256 TEXT PRIMARY KEY CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        account_id_hash TEXT NOT NULL CHECK (
+            length(account_id_hash) = 64 AND account_id_hash NOT GLOB '*[^0-9a-f]*'
+        ),
         account_authority_epoch INTEGER NOT NULL REFERENCES account_authority_epochs(epoch),
         mode_epoch INTEGER NOT NULL REFERENCES mode_epochs(epoch),
         mode TEXT NOT NULL CHECK (mode IN ('REPLAY','PAPER','SHADOW','CANARY','LIVE')),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL
     ) STRICT
     """,
@@ -601,19 +643,28 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         receipt_id TEXT PRIMARY KEY,
         operational_evidence_identity_sha256 TEXT NOT NULL UNIQUE CHECK (
             length(operational_evidence_identity_sha256) = 64
+            AND operational_evidence_identity_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
         deployment_identity_sha256 TEXT NOT NULL REFERENCES deployment_identities(
             deployment_identity_sha256
+        ) CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
         account_authority_epoch INTEGER NOT NULL REFERENCES account_authority_epochs(epoch),
         mode_epoch INTEGER NOT NULL REFERENCES mode_epochs(epoch),
-        account_state_sha256 TEXT NOT NULL CHECK (length(account_state_sha256) = 64),
+        account_state_sha256 TEXT NOT NULL CHECK (
+            length(account_state_sha256) = 64
+            AND account_state_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         broker_snapshot_id TEXT NOT NULL REFERENCES broker_snapshots(snapshot_id),
         strategy_session TEXT NOT NULL,
         phase TEXT NOT NULL,
         kind TEXT NOT NULL,
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL
     ) STRICT
     """,
@@ -631,23 +682,46 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         )),
         source_epoch INTEGER NOT NULL CHECK (source_epoch > 0),
         target_epoch INTEGER NOT NULL CHECK (target_epoch = source_epoch + 1),
-        account_id_hash TEXT NOT NULL CHECK (length(account_id_hash) = 64),
-        account_before_sha256 TEXT NOT NULL CHECK (length(account_before_sha256) = 64),
+        account_id_hash TEXT NOT NULL CHECK (
+            length(account_id_hash) = 64 AND account_id_hash NOT GLOB '*[^0-9a-f]*'
+        ),
+        account_before_sha256 TEXT NOT NULL CHECK (
+            length(account_before_sha256) = 64
+            AND account_before_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         candidate_account_state_sha256 TEXT NOT NULL CHECK (
             length(candidate_account_state_sha256) = 64
+            AND candidate_account_state_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         broker_snapshot_id TEXT NOT NULL,
-        broker_snapshot_sha256 TEXT NOT NULL CHECK (length(broker_snapshot_sha256) = 64),
+        broker_snapshot_sha256 TEXT NOT NULL CHECK (
+            length(broker_snapshot_sha256) = 64
+            AND broker_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         backup_id TEXT NOT NULL,
-        reviewed_evidence_sha256 TEXT NOT NULL CHECK (length(reviewed_evidence_sha256) = 64),
-        account_path_sha256 TEXT NOT NULL CHECK (length(account_path_sha256) = 64),
+        reviewed_evidence_sha256 TEXT NOT NULL CHECK (
+            length(reviewed_evidence_sha256) = 64
+            AND reviewed_evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        account_path_sha256 TEXT NOT NULL CHECK (
+            length(account_path_sha256) = 64
+            AND account_path_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         actual_account_after_sha256 TEXT CHECK (
-            actual_account_after_sha256 IS NULL OR length(actual_account_after_sha256) = 64
+            actual_account_after_sha256 IS NULL OR (
+                length(actual_account_after_sha256) = 64
+                AND actual_account_after_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
         ),
         reason TEXT NOT NULL,
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     ) STRICT
@@ -657,10 +731,15 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         receipt_id TEXT PRIMARY KEY,
         operation_id TEXT NOT NULL UNIQUE REFERENCES account_rebaseline_operations(operation_id),
         account_authority_epoch INTEGER NOT NULL UNIQUE REFERENCES account_authority_epochs(epoch),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         backup_id TEXT NOT NULL REFERENCES backup_receipts(backup_id),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL
     ) STRICT
     """,
@@ -674,11 +753,18 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         target_epoch INTEGER NOT NULL CHECK (target_epoch = source_epoch + 1),
         source_mode TEXT NOT NULL CHECK (source_mode IN ('PAPER','SHADOW','CANARY','LIVE')),
         target_mode TEXT NOT NULL CHECK (target_mode IN ('PAPER','SHADOW','CANARY','LIVE')),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         backup_id TEXT NOT NULL,
-        evidence_sha256 TEXT NOT NULL CHECK (length(evidence_sha256) = 64),
+        evidence_sha256 TEXT NOT NULL CHECK (
+            length(evidence_sha256) = 64 AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     ) STRICT
@@ -688,10 +774,15 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         receipt_id TEXT PRIMARY KEY,
         operation_id TEXT NOT NULL UNIQUE REFERENCES mode_transition_operations(operation_id),
         mode_epoch INTEGER NOT NULL UNIQUE REFERENCES mode_epochs(epoch),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         backup_id TEXT NOT NULL REFERENCES backup_receipts(backup_id),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL
     ) STRICT
     """,
@@ -705,18 +796,31 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         reason TEXT NOT NULL CHECK (
             reason IN ('SESSION_CLOSE','MODE_TRANSITION','ACCOUNT_REBASELINE')
         ),
-        manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
-        database_sha256 TEXT NOT NULL CHECK (length(database_sha256) = 64),
-        account_state_sha256 TEXT NOT NULL CHECK (length(account_state_sha256) = 64),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        manifest_sha256 TEXT NOT NULL CHECK (
+            length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        database_sha256 TEXT NOT NULL CHECK (
+            length(database_sha256) = 64 AND database_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        account_state_sha256 TEXT NOT NULL CHECK (
+            length(account_state_sha256) = 64
+            AND account_state_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         operational_evidence_identity_sha256 TEXT NOT NULL CHECK (
             length(operational_evidence_identity_sha256) = 64
+            AND operational_evidence_identity_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
         account_authority_epoch INTEGER NOT NULL REFERENCES account_authority_epochs(epoch),
         mode_epoch INTEGER NOT NULL REFERENCES mode_epochs(epoch),
         bundle_name TEXT,
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     ) STRICT
@@ -729,70 +833,134 @@ _OPERATIONAL_AUTHORITY_SCHEMA: Final = (
         stage TEXT NOT NULL CHECK (stage IN (
             'PREPARED','STAGED','PUBLISHED','RECEIPT_COMMITTED','CONTRADICTION'
         )),
-        source_manifest_sha256 TEXT NOT NULL CHECK (length(source_manifest_sha256) = 64),
-        source_database_sha256 TEXT NOT NULL CHECK (length(source_database_sha256) = 64),
-        destination_identity_sha256 TEXT NOT NULL CHECK (length(destination_identity_sha256) = 64),
+        source_reason TEXT NOT NULL CHECK (
+            source_reason IN ('SESSION_CLOSE','MODE_TRANSITION','ACCOUNT_REBASELINE')
+        ),
+        source_manifest_sha256 TEXT NOT NULL CHECK (
+            length(source_manifest_sha256) = 64
+            AND source_manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        source_database_sha256 TEXT NOT NULL CHECK (
+            length(source_database_sha256) = 64
+            AND source_database_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        destination_identity_sha256 TEXT NOT NULL CHECK (
+            length(destination_identity_sha256) = 64
+            AND destination_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         sanitized_state_sha256 TEXT CHECK (
-            sanitized_state_sha256 IS NULL OR length(sanitized_state_sha256) = 64
+            sanitized_state_sha256 IS NULL OR (
+                length(sanitized_state_sha256) = 64
+                AND sanitized_state_sha256 NOT GLOB '*[^0-9a-f]*'
+            )
         ),
         final_directory_name TEXT,
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         operational_evidence_identity_sha256 TEXT NOT NULL CHECK (
             length(operational_evidence_identity_sha256) = 64
+            AND operational_evidence_identity_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
         account_authority_epoch INTEGER NOT NULL CHECK (account_authority_epoch > 0),
         mode_epoch INTEGER NOT NULL CHECK (mode_epoch > 0),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     ) STRICT
     """,
     """
     CREATE TABLE restore_receipts (
-        restore_id TEXT PRIMARY KEY,
+        restore_id TEXT PRIMARY KEY REFERENCES restore_operations(restore_id),
         source_backup_id TEXT NOT NULL,
-        source_manifest_sha256 TEXT NOT NULL CHECK (length(source_manifest_sha256) = 64),
+        source_manifest_sha256 TEXT NOT NULL CHECK (
+            length(source_manifest_sha256) = 64
+            AND source_manifest_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         source_reason TEXT NOT NULL CHECK (
             source_reason IN ('SESSION_CLOSE','MODE_TRANSITION','ACCOUNT_REBASELINE')
         ),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         operational_evidence_identity_sha256 TEXT NOT NULL CHECK (
             length(operational_evidence_identity_sha256) = 64
+            AND operational_evidence_identity_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
         account_authority_epoch INTEGER NOT NULL CHECK (account_authority_epoch > 0),
         mode_epoch INTEGER NOT NULL CHECK (mode_epoch > 0),
-        source_database_sha256 TEXT NOT NULL CHECK (length(source_database_sha256) = 64),
-        sanitized_state_sha256 TEXT NOT NULL CHECK (length(sanitized_state_sha256) = 64),
+        source_database_sha256 TEXT NOT NULL CHECK (
+            length(source_database_sha256) = 64
+            AND source_database_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        sanitized_state_sha256 TEXT NOT NULL CHECK (
+            length(sanitized_state_sha256) = 64
+            AND sanitized_state_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         original_audit_count INTEGER NOT NULL CHECK (original_audit_count >= 0),
-        original_audit_head TEXT NOT NULL CHECK (length(original_audit_head) = 64),
+        original_audit_head TEXT NOT NULL CHECK (
+            length(original_audit_head) = 64
+            AND original_audit_head NOT GLOB '*[^0-9a-f]*'
+        ),
         restored_audit_count INTEGER NOT NULL CHECK (restored_audit_count >= 0),
-        restored_audit_head TEXT NOT NULL CHECK (length(restored_audit_head) = 64),
+        restored_audit_head TEXT NOT NULL CHECK (
+            length(restored_audit_head) = 64
+            AND restored_audit_head NOT GLOB '*[^0-9a-f]*'
+        ),
         restored_at TEXT NOT NULL,
         requires_fresh_snapshot INTEGER NOT NULL CHECK (requires_fresh_snapshot = 1),
         requires_reconciliation INTEGER NOT NULL CHECK (requires_reconciliation = 1),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64)
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
     ) STRICT
     """,
     """
     CREATE TABLE replay_acceptance_receipts (
         acceptance_identity_sha256 TEXT PRIMARY KEY CHECK (
             length(acceptance_identity_sha256) = 64
+            AND acceptance_identity_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
-        deployment_identity_sha256 TEXT NOT NULL CHECK (length(deployment_identity_sha256) = 64),
-        uquant_commit TEXT NOT NULL CHECK (length(uquant_commit) = 40),
-        semantic_config_sha256 TEXT NOT NULL CHECK (length(semantic_config_sha256) = 64),
-        policy_sha256 TEXT NOT NULL CHECK (length(policy_sha256) = 64),
-        universe_sha256 TEXT NOT NULL CHECK (length(universe_sha256) = 64),
+        deployment_identity_sha256 TEXT NOT NULL CHECK (
+            length(deployment_identity_sha256) = 64
+            AND deployment_identity_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        uquant_commit TEXT NOT NULL CHECK (
+            length(uquant_commit) = 40 AND uquant_commit NOT GLOB '*[^0-9a-f]*'
+        ),
+        semantic_config_sha256 TEXT NOT NULL CHECK (
+            length(semantic_config_sha256) = 64
+            AND semantic_config_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        policy_sha256 TEXT NOT NULL CHECK (
+            length(policy_sha256) = 64 AND policy_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        universe_sha256 TEXT NOT NULL CHECK (
+            length(universe_sha256) = 64 AND universe_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         frozen_data_manifest_sha256 TEXT NOT NULL CHECK (
             length(frozen_data_manifest_sha256) = 64
+            AND frozen_data_manifest_sha256 NOT GLOB '*[^0-9a-f]*'
         ),
-        normal_summary_sha256 TEXT NOT NULL CHECK (length(normal_summary_sha256) = 64),
-        restart_summary_sha256 TEXT NOT NULL CHECK (length(restart_summary_sha256) = 64),
+        normal_summary_sha256 TEXT NOT NULL CHECK (
+            length(normal_summary_sha256) = 64
+            AND normal_summary_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
+        restart_summary_sha256 TEXT NOT NULL CHECK (
+            length(restart_summary_sha256) = 64
+            AND restart_summary_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         passed INTEGER NOT NULL CHECK (passed IN (0,1)),
         payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
-        payload_sha256 TEXT NOT NULL UNIQUE CHECK (length(payload_sha256) = 64),
+        payload_sha256 TEXT NOT NULL UNIQUE CHECK (
+            length(payload_sha256) = 64 AND payload_sha256 NOT GLOB '*[^0-9a-f]*'
+        ),
         generated_at TEXT NOT NULL,
         UNIQUE (
             deployment_identity_sha256,uquant_commit,semantic_config_sha256,
@@ -950,6 +1118,349 @@ _V5_POINTER_TRIGGERS: Final = tuple(
     )
 )
 
+_V5_OPERATION_INSERT_TRIGGERS: Final = (
+    *(
+        f"""
+        CREATE TRIGGER {table}_prepared_insert_only
+        BEFORE INSERT ON {table} WHEN NEW.stage != 'PREPARED'
+        BEGIN
+            SELECT RAISE(ABORT, '{table} must start PREPARED');
+        END
+        """
+        for table in (
+            "account_rebaseline_operations",
+            "mode_transition_operations",
+            "backup_publication_operations",
+            "restore_operations",
+        )
+    ),
+    """
+    CREATE TRIGGER account_rebaseline_operations_insert_output_guard
+    BEFORE INSERT ON account_rebaseline_operations
+    WHEN NEW.stage = 'PREPARED' AND NEW.actual_account_after_sha256 IS NOT NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'prepared rebaseline cannot have actual account after');
+    END
+    """,
+    """
+    CREATE TRIGGER backup_publication_operations_insert_output_guard
+    BEFORE INSERT ON backup_publication_operations
+    WHEN NEW.stage = 'PREPARED' AND NEW.bundle_name IS NOT NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'prepared backup cannot have bundle name');
+    END
+    """,
+    """
+    CREATE TRIGGER restore_operations_insert_output_guard
+    BEFORE INSERT ON restore_operations
+    WHEN NEW.stage = 'PREPARED'
+         AND (NEW.sanitized_state_sha256 IS NOT NULL OR NEW.final_directory_name IS NOT NULL)
+    BEGIN
+        SELECT RAISE(ABORT, 'prepared restore cannot have staged outputs');
+    END
+    """,
+)
+
+_V5_STAGE_COMPLETION_TRIGGERS: Final = (
+    """
+    CREATE TRIGGER account_rebaseline_operations_stage_output_guard
+    BEFORE UPDATE ON account_rebaseline_operations
+    WHEN NEW.stage IN ('FILE_COMMITTED','RECEIPT_COMMITTED')
+         AND NEW.actual_account_after_sha256 IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'rebaseline stage requires actual account after');
+    END
+    """,
+    """
+    CREATE TRIGGER backup_publication_operations_stage_output_guard
+    BEFORE UPDATE ON backup_publication_operations
+    WHEN NEW.stage IN ('PUBLISHED','RECEIPT_COMMITTED')
+         AND (NEW.bundle_name IS NULL OR NEW.bundle_name = '')
+    BEGIN
+        SELECT RAISE(ABORT, 'backup stage requires bundle name');
+    END
+    """,
+    """
+    CREATE TRIGGER restore_operations_stage_output_guard
+    BEFORE UPDATE ON restore_operations
+    WHEN NEW.stage IN ('STAGED','PUBLISHED','RECEIPT_COMMITTED')
+         AND NEW.sanitized_state_sha256 IS NULL
+    BEGIN
+        SELECT RAISE(ABORT, 'restore stage requires sanitized state');
+    END
+    """,
+    """
+    CREATE TRIGGER restore_operations_publication_output_guard
+    BEFORE UPDATE ON restore_operations
+    WHEN NEW.stage IN ('PUBLISHED','RECEIPT_COMMITTED')
+         AND (NEW.final_directory_name IS NULL OR NEW.final_directory_name = '')
+    BEGIN
+        SELECT RAISE(ABORT, 'restore publication requires final directory');
+    END
+    """,
+)
+
+_V5_RECEIPT_BINDING_TRIGGERS: Final = (
+    """
+    CREATE TRIGGER account_rebaseline_receipts_operation_guard
+    BEFORE INSERT ON account_rebaseline_receipts
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM account_rebaseline_operations AS operation
+            JOIN account_authority_epochs AS source
+              ON source.epoch = operation.source_epoch
+            JOIN account_authority_epochs AS target
+              ON target.epoch = operation.target_epoch
+            WHERE operation.operation_id = NEW.operation_id
+              AND operation.stage = 'FILE_COMMITTED'
+              AND operation.target_epoch = NEW.account_authority_epoch
+              AND operation.account_id_hash = source.account_id_hash
+              AND operation.account_before_sha256 = source.account_state_sha256
+              AND operation.account_id_hash = target.account_id_hash
+              AND operation.actual_account_after_sha256 = target.account_state_sha256
+              AND operation.candidate_account_state_sha256 = target.account_state_sha256
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND target.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.backup_id = NEW.backup_id
+        ) THEN RAISE(ABORT, 'rebaseline receipt requires matching file-committed rebaseline operation') END;
+    END
+    """,
+    """
+    CREATE TRIGGER account_rebaseline_operations_receipt_guard
+    BEFORE UPDATE ON account_rebaseline_operations
+    WHEN OLD.stage = 'FILE_COMMITTED' AND NEW.stage = 'RECEIPT_COMMITTED'
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM account_rebaseline_receipts AS receipt
+            JOIN account_authority_epochs AS target
+              ON target.epoch = receipt.account_authority_epoch
+            WHERE receipt.operation_id = NEW.operation_id
+              AND receipt.account_authority_epoch = NEW.target_epoch
+              AND receipt.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND receipt.backup_id = NEW.backup_id
+              AND target.account_id_hash = NEW.account_id_hash
+              AND target.account_state_sha256 = NEW.actual_account_after_sha256
+              AND target.account_state_sha256 = NEW.candidate_account_state_sha256
+              AND target.deployment_identity_sha256 = NEW.deployment_identity_sha256
+        ) THEN RAISE(ABORT, 'rebaseline operation requires matching rebaseline receipt') END;
+    END
+    """,
+    """
+    CREATE TRIGGER mode_transition_receipts_operation_guard
+    BEFORE INSERT ON mode_transition_receipts
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM mode_transition_operations AS operation
+            JOIN mode_epochs AS source ON source.epoch = operation.source_epoch
+            JOIN mode_epochs AS target ON target.epoch = operation.target_epoch
+            WHERE operation.operation_id = NEW.operation_id
+              AND operation.stage = 'EPOCH_COMMITTED'
+              AND operation.source_mode = source.mode
+              AND operation.target_mode = target.mode
+              AND operation.target_epoch = NEW.mode_epoch
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND target.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.backup_id = NEW.backup_id
+        ) THEN RAISE(ABORT, 'mode transition receipt requires matching epoch-committed mode transition operation') END;
+    END
+    """,
+    """
+    CREATE TRIGGER mode_transition_operations_receipt_guard
+    BEFORE UPDATE ON mode_transition_operations
+    WHEN OLD.stage = 'EPOCH_COMMITTED' AND NEW.stage = 'RECEIPT_COMMITTED'
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1
+            FROM mode_transition_receipts AS receipt
+            JOIN mode_epochs AS target ON target.epoch = receipt.mode_epoch
+            WHERE receipt.operation_id = NEW.operation_id
+              AND receipt.mode_epoch = NEW.target_epoch
+              AND receipt.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND receipt.backup_id = NEW.backup_id
+              AND target.mode = NEW.target_mode
+              AND target.deployment_identity_sha256 = NEW.deployment_identity_sha256
+        ) THEN RAISE(ABORT, 'mode transition operation requires matching mode transition receipt') END;
+    END
+    """,
+    """
+    CREATE TRIGGER account_rebaseline_operations_receipt_contradiction_guard
+    BEFORE UPDATE ON account_rebaseline_operations
+    WHEN OLD.stage = 'FILE_COMMITTED' AND NEW.stage = 'CONTRADICTION'
+         AND EXISTS(
+            SELECT 1 FROM account_rebaseline_receipts AS receipt
+            WHERE receipt.operation_id = OLD.operation_id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'rebaseline receipt requires committed operation');
+    END
+    """,
+    """
+    CREATE TRIGGER mode_transition_operations_receipt_contradiction_guard
+    BEFORE UPDATE ON mode_transition_operations
+    WHEN OLD.stage = 'EPOCH_COMMITTED' AND NEW.stage = 'CONTRADICTION'
+         AND EXISTS(
+            SELECT 1 FROM mode_transition_receipts AS receipt
+            WHERE receipt.operation_id = OLD.operation_id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'mode transition receipt requires committed operation');
+    END
+    """,
+    """
+    CREATE TRIGGER backup_receipts_v3_tuple_guard
+    BEFORE INSERT ON backup_receipts
+    WHEN NOT (
+        (
+            NEW.bundle_schema_version IS NULL
+            AND NEW.operational_schema_version IS NULL
+            AND NEW.reason IS NULL
+            AND NEW.deployment_identity_sha256 IS NULL
+            AND NEW.operational_evidence_identity_sha256 IS NULL
+            AND NEW.account_authority_epoch IS NULL
+            AND NEW.mode_epoch IS NULL
+            AND NEW.broker_snapshot_id IS NULL
+            AND NEW.broker_snapshot_sha256 IS NULL
+        )
+        OR
+        (
+            NEW.bundle_schema_version = 3
+            AND NEW.operational_schema_version IS NOT NULL
+            AND NEW.reason IS NOT NULL
+            AND NEW.deployment_identity_sha256 IS NOT NULL
+            AND NEW.operational_evidence_identity_sha256 IS NOT NULL
+            AND NEW.account_authority_epoch IS NOT NULL
+            AND NEW.mode_epoch IS NOT NULL
+            AND NEW.broker_snapshot_id IS NOT NULL
+            AND NEW.broker_snapshot_id != ''
+            AND NEW.broker_snapshot_sha256 IS NOT NULL
+        )
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'backup receipt v3 tuple must be absent or complete');
+    END
+    """,
+    """
+    CREATE TRIGGER backup_receipts_v3_operation_guard
+    BEFORE INSERT ON backup_receipts
+    WHEN NEW.bundle_schema_version = 3
+         AND NEW.operational_schema_version IS NOT NULL
+         AND NEW.reason IS NOT NULL
+         AND NEW.deployment_identity_sha256 IS NOT NULL
+         AND NEW.operational_evidence_identity_sha256 IS NOT NULL
+         AND NEW.account_authority_epoch IS NOT NULL
+         AND NEW.mode_epoch IS NOT NULL
+         AND NEW.broker_snapshot_id IS NOT NULL
+         AND NEW.broker_snapshot_sha256 IS NOT NULL
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1 FROM backup_publication_operations AS operation
+            WHERE operation.backup_id = NEW.backup_id
+              AND operation.stage = 'PUBLISHED'
+              AND operation.reason = NEW.reason
+              AND operation.manifest_sha256 = NEW.manifest_sha256
+              AND operation.database_sha256 = NEW.database_sha256
+              AND operation.account_state_sha256 = NEW.account_state_sha256
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.operational_evidence_identity_sha256 =
+                  NEW.operational_evidence_identity_sha256
+              AND operation.account_authority_epoch = NEW.account_authority_epoch
+              AND operation.mode_epoch = NEW.mode_epoch
+        ) THEN RAISE(ABORT, 'v3 backup receipt requires matching published publication operation') END;
+    END
+    """,
+    """
+    CREATE TRIGGER backup_publication_operations_receipt_guard
+    BEFORE UPDATE ON backup_publication_operations
+    WHEN OLD.stage = 'PUBLISHED' AND NEW.stage = 'RECEIPT_COMMITTED'
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1 FROM backup_receipts AS receipt
+            WHERE receipt.backup_id = NEW.backup_id
+              AND receipt.bundle_schema_version = 3
+              AND receipt.reason = NEW.reason
+              AND receipt.manifest_sha256 = NEW.manifest_sha256
+              AND receipt.database_sha256 = NEW.database_sha256
+              AND receipt.account_state_sha256 = NEW.account_state_sha256
+              AND receipt.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND receipt.operational_evidence_identity_sha256 =
+                  NEW.operational_evidence_identity_sha256
+              AND receipt.account_authority_epoch = NEW.account_authority_epoch
+              AND receipt.mode_epoch = NEW.mode_epoch
+        ) THEN RAISE(ABORT, 'backup publication requires matching backup receipt') END;
+    END
+    """,
+    """
+    CREATE TRIGGER restore_receipts_operation_guard
+    BEFORE INSERT ON restore_receipts
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1 FROM restore_operations AS operation
+            WHERE operation.restore_id = NEW.restore_id
+              AND operation.stage = 'PUBLISHED'
+              AND operation.backup_id = NEW.source_backup_id
+              AND operation.source_manifest_sha256 = NEW.source_manifest_sha256
+              AND operation.source_reason = NEW.source_reason
+              AND operation.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND operation.operational_evidence_identity_sha256 =
+                  NEW.operational_evidence_identity_sha256
+              AND operation.account_authority_epoch = NEW.account_authority_epoch
+              AND operation.mode_epoch = NEW.mode_epoch
+              AND operation.source_database_sha256 = NEW.source_database_sha256
+              AND operation.sanitized_state_sha256 = NEW.sanitized_state_sha256
+        ) THEN RAISE(ABORT, 'restore receipt requires matching published restore operation') END;
+    END
+    """,
+    """
+    CREATE TRIGGER restore_operations_receipt_guard
+    BEFORE UPDATE ON restore_operations
+    WHEN OLD.stage = 'PUBLISHED' AND NEW.stage = 'RECEIPT_COMMITTED'
+    BEGIN
+        SELECT CASE WHEN NOT EXISTS(
+            SELECT 1 FROM restore_receipts AS receipt
+            WHERE receipt.restore_id = NEW.restore_id
+              AND receipt.source_backup_id = NEW.backup_id
+              AND receipt.source_manifest_sha256 = NEW.source_manifest_sha256
+              AND receipt.source_reason = NEW.source_reason
+              AND receipt.deployment_identity_sha256 = NEW.deployment_identity_sha256
+              AND receipt.operational_evidence_identity_sha256 =
+                  NEW.operational_evidence_identity_sha256
+              AND receipt.account_authority_epoch = NEW.account_authority_epoch
+              AND receipt.mode_epoch = NEW.mode_epoch
+              AND receipt.source_database_sha256 = NEW.source_database_sha256
+              AND receipt.sanitized_state_sha256 = NEW.sanitized_state_sha256
+        ) THEN RAISE(ABORT, 'restore operation requires matching restore receipt') END;
+    END
+    """,
+    """
+    CREATE TRIGGER backup_publication_operations_receipt_contradiction_guard
+    BEFORE UPDATE ON backup_publication_operations
+    WHEN OLD.stage = 'PUBLISHED' AND NEW.stage = 'CONTRADICTION'
+         AND EXISTS(
+            SELECT 1 FROM backup_receipts AS receipt
+            WHERE receipt.backup_id = OLD.backup_id
+              AND receipt.bundle_schema_version = 3
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'published backup receipt requires committed operation');
+    END
+    """,
+    """
+    CREATE TRIGGER restore_operations_receipt_contradiction_guard
+    BEFORE UPDATE ON restore_operations
+    WHEN OLD.stage = 'PUBLISHED' AND NEW.stage = 'CONTRADICTION'
+         AND EXISTS(
+            SELECT 1 FROM restore_receipts AS receipt
+            WHERE receipt.restore_id = OLD.restore_id
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'restore receipt requires committed operation');
+    END
+    """,
+)
+
 _V5_STAGED_OPERATION_TRIGGERS: Final = (
     """
     CREATE TRIGGER account_rebaseline_operations_forward_only
@@ -1045,6 +1556,7 @@ _V5_STAGED_OPERATION_TRIGGERS: Final = (
             NEW.operation_id IS NOT OLD.operation_id
             OR NEW.restore_id IS NOT OLD.restore_id
             OR NEW.backup_id IS NOT OLD.backup_id
+            OR NEW.source_reason IS NOT OLD.source_reason
             OR NEW.source_manifest_sha256 IS NOT OLD.source_manifest_sha256
             OR NEW.source_database_sha256 IS NOT OLD.source_database_sha256
             OR NEW.destination_identity_sha256 IS NOT OLD.destination_identity_sha256
@@ -1155,6 +1667,9 @@ MIGRATIONS: Final = (
             *_OPERATIONAL_AUTHORITY_SCHEMA,
             *_V5_IMMUTABLE_TRIGGERS,
             *_V5_POINTER_TRIGGERS,
+            *_V5_OPERATION_INSERT_TRIGGERS,
+            *_V5_STAGE_COMPLETION_TRIGGERS,
+            *_V5_RECEIPT_BINDING_TRIGGERS,
             *_V5_STAGED_OPERATION_TRIGGERS,
             *_V5_STAGED_DELETE_TRIGGERS,
         ),

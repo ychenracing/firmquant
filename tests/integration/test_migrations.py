@@ -218,6 +218,7 @@ def test_v5_reserves_complete_backup_restore_and_replay_fields(db: Database) -> 
         "restore_id",
         "backup_id",
         "stage",
+        "source_reason",
         "source_manifest_sha256",
         "source_database_sha256",
         "destination_identity_sha256",
