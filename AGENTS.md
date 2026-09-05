@@ -1,118 +1,56 @@
-# Agent Working Agreement
+# firmquant 工作约定
 
-本文件适用于在 firmquant 仓库工作的 Codex、ChatGPT Work 和其他编码代理。用户当次任务的明确要求与验收
-标准优先；设计记录和历史计划不能覆盖当前合同。
+## 任务、上下文与方法
+
+在平台权限内执行当前任务的明确范围和验收标准，保留项目业务、安全、数据、经济、CI 和发布合同。编辑目录前读取适用的嵌套 `AGENTS.md`。历史计划只提供上下文；只读分析、先审批后修改的要求，在获授权前保持只读。
+
+以 GitHub 当前分支、SHA、PR、review、checks 为状态依据；有本地工作树时检查未知改动。已有匹配任务原地恢复，不创建替代 PR、不重做已验证工作。先读存在时的 `.github/CHATGPT_PROJECT_BRIEF.md`、相关 README/主题文档、PR/diff 和直接相关代码、测试、配置、workflow，按影响扩读，不默认加载全部技能、日志或历史。准确保留约束和证据身份。
+
+技能是按需方法，不是额外授权来源。对于已明确授权、范围清晰的任务，不重复索要设计批准、执行方式选择，不强制 full 模式或仪式性技能播报；平台强制技能规则和真实审批门仍有效。可用工具足够时，缺少可选技能不构成阻塞。优先最小充分实现和已有依赖；计划只记录重要决策、依赖和验收，不再写一遍实现。批量处理相关修改；只并行独立工作，共享文件、runtime 和证据身份保持单 writer。
 
 ## 系统边界
 
-- firmquant 是单账户、A 股 AI 产业链、现金多头、日频实盘执行系统，不是策略研究项目、高频系统或第二策略。
-- 锁定的 uquant 是唯一策略决策内核。只通过 `ProductionEngine.decide()` 决策；PortfolioAllocator、Base Risk、
-  FREEZE_ONLY Risk Sentinel 及策略 AccountState 的经济职责仍由 uquant 独占。
-- firmquant 的执行与安全层只能阻止、缩小、延迟或取消订单以及进入 HALT，绝不能扩大 uquant 的目标、总仓、
-  单票权重或买入数量。
-- 不修改 uquant，不复制其策略实现，不从未提交工作树、临时分支、浮动 main 或浮动 tag 构建生产依赖。
-- 当前范围不扩展到多账户、多策略、Web 管理后台、云端多租户、融资融券、做空、期货、期权或其他衍生品。
+- firmquant 是单账户、A 股 AI 产业链、现金多头、日频实盘执行系统，不是策略研究、高频系统或第二策略。
+- 锁定的 uquant 是唯一策略决策内核，只通过 `ProductionEngine.decide()` 决策；PortfolioAllocator、Base Risk、FREEZE_ONLY Risk Sentinel 和策略 AccountState 的经济职责由 uquant 独占。
+- 执行与安全层只能阻止、缩小、延迟、取消订单或进入 HALT，不能扩大 uquant 的目标、总仓、单票权重或买入数量。
+- 不修改或复制 uquant 策略，不从未提交工作树、临时分支、浮动 main/tag 构建生产依赖。
+- 不扩展到多账户、多策略、Web 管理后台、云端多租户、融资融券、做空、期货、期权或其他衍生品。
 
-## 最高优先级安全规则
+## 实盘与数据安全
 
-- 默认模式始终为 PAPER，`live_trading_enabled` 默认且示例中始终为 `false`。
-- REPLAY、PAPER、SHADOW 和 CI 在结构上不得触达真实 `submit_order` 或 `cancel_order`。
-- CANARY/LIVE 的任何券商写操作必须经过短时效 arm lease、合规确认、身份绑定、启动对账、数据与 quote freshness、
-  session、kill switch、UNKNOWN order 和逐单 ExecutionRiskGate 的全部门禁；缺一即拒绝。
-- 券商返回未知、提交超时、断线、重复/乱序事件、数据库异常或账户差异时失败关闭。不得把调用异常解释为未接单，
-  不得盲目重发，不得在状态不确定时自动市价清仓。
-- 金额、价格、数量和费用边界使用 Decimal 或整数最小单位；外部 payload 一律视为不可信输入。
-- 测试、CI、smoke 和实现过程禁止提交真实订单。XtQuant SDK 不进入通用 CI，缺少合法本机环境时只陈述未验证事实。
+- 默认模式为 PAPER；`live_trading_enabled` 默认及示例始终为 `false`。REPLAY、PAPER、SHADOW 和 CI 在结构上不得触达真实 `submit_order` 或 `cancel_order`。
+- CANARY/LIVE 券商写操作必须通过短时效 arm lease、合规确认、身份绑定、启动对账、数据与 quote freshness、session、kill switch、UNKNOWN order 和逐单 ExecutionRiskGate 的全部门禁；缺一即拒绝。
+- 券商返回未知、提交超时、断线、重复/乱序事件、数据库异常或账户差异时失败关闭。调用异常不代表未接单；不得盲目重发，不得在状态不确定时自动市价清仓。
+- 金额、价格、数量和费用边界使用 Decimal 或整数最小单位；外部 payload 是不可信输入。
+- 测试、CI、smoke 和实现过程禁止真实订单。XtQuant SDK 不进入通用 CI；缺少合法本机环境必须标记未验证。
 - 不提交或记录账户号、密码、token、webhook secret、MiniQMT 敏感 userdata、真实账户快照或未脱敏成交。
 
-## 工程方法
+## 工程与证据
 
-- 功能和缺陷修复采用测试驱动：先写能证明所需行为的失败测试，确认失败原因正确，再写最小实现并保持测试绿色。
-- 外部事实、状态推进、幂等键、订单事件、对账和审计写入必须有严格类型和事务边界；callback 只验证入队，单 writer
-  串行改变状态。
-- 优先模块化单体与端口适配器。只有实际确认 Python 3.12 与官方券商 SDK 不兼容时，才引入认证的 localhost bridge。
-- 修改前阅读附近代码、测试和当前文档；维护用户未提交的无关改动。文件编辑使用可审查补丁，不做破坏性 Git 操作，
-  不 force push。
-- 失败时先定位根因并复现最小失败项；不要通过删除场景、放宽门禁、近似经济断言或绕过状态机使测试变绿。
+- 功能和缺陷修复先用失败测试证明所需行为并确认失败原因，再写最小实现。外部事实、状态推进、幂等键、订单事件、对账和审计写入使用严格类型与事务边界；callback 只验证入队，由单 writer 串行改变状态。
+- 优先模块化单体与端口适配器；只有确实确认 Python 3.12 与官方券商 SDK 不兼容时才引入认证的 localhost bridge。
+- 不通过删除场景、放宽门禁、近似经济断言或绕过状态机修绿。保留真实 broker/domain event、DecisionSnapshot、reconciliation、风险事件、backup verification 和 hash-chain audit evidence；不删除事故现场、不伪造结果。
 
-## 渐进式验证阶梯
+## 渐进式验证
 
-验证以影响范围和新增证据为驱动。成功的更宽验证在其覆盖的行为、配置、数据和运行输入未变化时仍然有效，不重复运行。
+L1：直接相关单元/性质测试、最小复现、Ruff、strict mypy、schema 或 compile。L2：受影响模块、Broker contract、SQLite migration/transaction、小型 E2E 和恢复点。L3：完整非实盘 PAPER/REPLAY/SHADOW session、崩溃恢复、故障注入、Windows smoke 和对应 parity 数据集。L4：稳定候选完整工程、安全、经济等价、故障注入、构建、Linux/Windows 和文档验收。
 
-### L1 — 直接影响验证
+从能证明变化的最低层开始，跨策略、风险、订单、数据库、安全或构建边界时扩大。失败先定位根因，运行失败项及直接受影响检查；相关修复批量完成后再扩验，不逐补丁重跑全矩阵。稳定候选完整验收一次；后续行为、依赖、schema、配置、数据、runner、构建实质变化或发现原证据不足，先局部复验，再对新稳定候选完成适用验收。换消息、代理或交接本身不使证据失效。
 
-日常小改动使用：直接相关单元/性质测试、最小复现、Ruff、strict mypy、schema 或 compile 检查。
+经济结果只有在 uquant commit、配置、数据 manifest、universe、账户、broker snapshot、as-of、runtime lock 完全一致时可复用；parity 禁止近似断言掩盖差异。新 HEAD 仍须通过适用精确 SHA 检查，不能沿用旧 CI 状态冒充新 HEAD 通过。
 
-### L2 — 模块与小型集成
+工程最终候选至少满足 Python 3.12、`uv sync --frozen`、Ruff、strict mypy、pytest、分支覆盖率 85%、compileall、Bandit、pip-audit、确定性 wheel、secret scan、Broker contract、parity、PAPER/REPLAY E2E 和 restart recovery。纯文档变更检查相关链接、命令与文档合同；指令变更另检查触发、授权和完成边界，不因改指令重算未变的经济结果，但不豁免明确要求的检查。
 
-有意义模块 milestone 使用：受影响模块、Broker contract、SQLite migration/transaction、相关小型 E2E 和恢复点。
+## 授权、Git 与恢复
 
-### L3 — 完整非实盘 session
+安全、明确、已授权的下一步直接继续；可读取解决的事实不重复询问。涉及花钱、实盘、凭据/权限、不可逆操作或无关外部写入，不从沉默推断授权。一个目标阻塞时继续其他独立已授权项。
 
-跨模块行为使用：完整 PAPER/REPLAY/SHADOW session、崩溃恢复、故障注入、Windows smoke 与相应 parity 数据集。
+已有分支原地继续；新任务使用功能分支。首个完整成果和重要里程碑检查 diff、秘密和必要验证后提交、推送、核验远端 SHA；不要求空 bootstrap commit、临时 bootstrap 文件或普通任务另建 Issue。动态状态放当前 PR，不堆进永久指令。仅在适用最终验收、完整 diff 审查、required checks 和工作树要求满足后通过 PR 合入 main；原工程 L4 合同保持有效，不 force push、不创建无关 tag/release。
 
-### L4 — 最终候选验收
+未经明确授权，不执行 `reset`、`clean`、`rebase`，不改写历史、删除分支/worktree、丢弃 tracked/staged/unstaged/untracked 工作或覆盖无关改动。远端保存失败如实报告，不冒充 checkpoint 完成。
 
-只在拟交付的稳定候选上运行一次完整工程、安全、经济等价、故障注入、构建、Linux/Windows 和文档验收。L4 后只有
-行为、依赖、schema、配置、数据、runner 或共享构建基础发生实质变化才先局部复验，并在新候选稳定后重跑 L4。
+## 文档与完成
 
-## 验证与失败处理
+README、`docs/` 和 ADR 描述当前系统；历史由 Git 保存，不积累流水账、临时审查报告、无效 TODO 或重复参数表。默认审查完整任务 diff 一次，重大修复或风险变化后做针对性复审。
 
-1. 从能证明当前变化的最低层开始；跨共享策略、风险、订单、数据库、安全和构建边界时再升级。
-2. 测试失败先确认预期与实际、调用路径、状态和输入来源，运行失败项及直接相邻检查。
-3. milestone 后运行对应 L2/L3；不要每个小补丁都启动全量矩阵。
-4. 经济结果只有在 uquant commit、配置、数据 manifest、universe、账户、broker snapshot、as-of、runtime lock 完全
-   一致时才能复用；parity 禁止近似断言掩盖差异。
-5. 最终候选至少通过 Python 3.12、`uv sync --frozen`、Ruff、strict mypy、pytest、分支覆盖率 85%、compileall、
-   Bandit、pip-audit、确定性 wheel、secret scan、Broker contract、parity、PAPER/REPLAY E2E 和 restart recovery。
-
-## Git、证据与文档
-
-- 每个 checkpoint 应是可理解、可继续且验证范围明确的 commit；检查 diff 和 secret 后推送工作分支。
-- 只在最终 L4 通过、完整 diff 审查和工作树干净后通过 PR 合入 main；禁止 force push 和无关 tag/release。
-- README、`docs/` 当前主题文档和 ADR 只描述当前系统。不要堆积版本号叙事、阶段流水账、临时审查报告、无效 TODO
-  或重复参数表。Git 历史承担变更历史职责。
-- 原始 broker event、domain event、DecisionSnapshot、reconciliation、风险事件、backup verification 和 hash-chain audit
-  evidence 必须保留真实失败与差异；不得自动删除事故现场或伪造 SDK、账户、成交、CI 或测试结果。
-
-## 停止条件
-
-显式验收标准通过且不存在已知正确性、安全、数据损失或重大经济等价问题后停止。不要为了代码行数、抽象数量或所谓
-工业级继续低收益拆分和扩展。
-
-## 权威来源与上下文
-
-- 用户当前任务、明确验收标准、本文件及更具体目录中的 `AGENTS.md` 构成执行合同；仓库专属规则优先于通用指导。
-- 接受自然语言 GitHub 任务。能够安全核验的事实不要求固定 Prompt、手工模板、分支名、PR 编号或预建 Issue。
-- GitHub 现场是分支、SHA、commit、PR、review、checks 和合并状态的权威来源；历史聊天、记忆、计划、摘要和交接包只作线索。
-- 新建工作前搜索匹配的开放 PR、分支或 Issue，并原地继续唯一匹配项。普通单 PR 任务用 PR 正文维护动态状态；只有确实跨多个 PR、长期分阶段、需要独立积压或用户要求时才自动创建并填写 Issue。
-- 先加载最小权威上下文：适用的 `AGENTS.md`、存在时的 `.github/CHATGPT_PROJECT_BRIEF.md`、匹配 PR 及 diff，再读取直接相关代码、测试、配置和 workflow；仅在证据不足、矛盾或影响扩大时扩读。
-- 不默认加载完整仓库、完整聊天、全部 PR/Issue/Actions 或大段日志。禁止有损压缩禁止项、例外、AND/OR 逻辑、阈值、日期、版本、路径、分支、SHA、准确结果、风险和 UNKNOWN。
-- 无本地 worktree 时将本地字段标记为“不适用”，不得虚构。可用时使用 `context-budget-router` 和 `conversation-continuity-guard`。
-
-## Remote Task Bootstrap
-
-以下规则建立可恢复的远端状态，且不替代或削弱上述业务、安全、量化、测试、CI、发布、证据和 Git 安全规则。
-
-- 完成最小只读核验后、实质修改前建立远端任务启动 checkpoint。新任务从已核验的远端默认分支 SHA 创建功能分支；已有匹配 PR/分支时原地继续，先刷新 PR、push 可恢复状态并核验远端 head。
-- 优先创建结构化空 bootstrap commit，记录：Objective、Acceptance criteria、Included and excluded scope、Non-negotiable constraints、Default branch and baseline SHA、Feature branch、Related PR/branch/Issue、Current verified state、Risks and unknowns、Next action。
-- 编辑前 push bootstrap commit 并核验远端功能分支 head SHA。环境不支持空 commit 时使用临时 branch-only `.github/task-bootstrap/<task-slug>.md`，最终合并前删除。
-- 每个正式 checkpoint 和重要里程碑必须完成最小必要验证、提交一个完整原子状态、push、核验远端 SHA、更新 PR，然后继续。聊天、本地工作区、本地 commit 或临时容器本身都不是完整 checkpoint；不得为微小编辑单独制造提交。
-- 禁止推送秘密、无关改动或未完成的原子修改。未经明确授权不得 push 默认分支或 force push。push 或核验失败时准确报告阻塞，不得声称 checkpoint 完成。
-
-## 连续执行与恢复
-
-- 复杂、多步骤、长时间、GitHub、批量、研究、调试和多工具任务在仍有安全、明确、已授权的下一步时持续执行；里程碑、checkpoint、commit、push、PR、部分验证、进度更新和已准备交接都不是完成。
-- 进度更新非阻断。有意义的里程碑按上述正式 checkpoint 流程执行，刷新 PR 中的当前目标、已完成并验证事项、剩余事项、准确验证结果、风险、UNKNOWN 和下一步后继续，不要求用户回复“继续”。
-- 批量任务独立保存各对象并越过单个阻塞项。required checks 等待期间先做其他工作；长时间 non-required checks 不构成阻塞。
-- 状态可能过期时，重读权威仓库与 PR、head/base/default SHA、commits、diff、reviews、checks 和剩余事项；只读消除差异并原地恢复，不重新开始。
-- 不因对话长、文件或工具多、阶段大或可准备交接而停止；无准确平台遥测时不得声称剩余上下文容量。
-
-## 完成、交接与 Git 安全
-
-- 仅在明确验收通过且完成必要最终验证、用户停止、安全策略要求终止、必要工具不可用，或已核验阻塞阻止全部剩余安全工作时结束。仍有安全可执行项就继续；不得承诺后台完成。
-- 交接阻塞仅限：工具硬限制；权限、分支保护、required approval 或外部授权阻塞全部剩余工作；无法安全推断的重大决策；无法只读解决的现场冲突；无法从权威来源恢复的关键上下文；重大正确性、安全、隐私、数据完整性、经济或不可逆风险；或用户明确要求。
-- 任务时长、里程碑/文件/日志/工具数量、较大下一阶段、已有交接包、non-required CI 等待或批次中单个仓库阻塞都不是交接条件。
-- 必须交接前完成最小安全原子操作，尽可能保存并核验可恢复 checkpoint，刷新权威状态，准确说明阻塞，并仅报告已核验的仓库、分支、SHA、worktree、测试、CI、commit、push、风险和下一步。
-- 未经明确授权，禁止 `reset`、`clean`、`rebase`、force push、改写历史、删除分支/worktree、丢弃 tracked/staged/unstaged/untracked 工作、覆盖无关改动或重做已完成并验证的工作。
-- 合并、交接或完成前，核验当前分支、HEAD、远端功能分支 SHA、默认分支 SHA、merge base、工作区、commits、push、changed files、reviews、required checks 和准确测试结果；不可用字段标记为“待核验”或“不适用”。
+明确验收通过且无已知重大正确性、安全、数据损失或经济等价问题后停止，不继续低收益拆分扩展。checkpoint、PR、部分测试通过或交接包不是完成。无安全已授权操作可执行时，保存可恢复状态并分别报告已完成、阻塞和未验证事项；不承诺后台完成。交付/合并前核验适用远端 SHA、完整 diff、reviews、required checks 和证据；不存在的本地字段标记不适用。
