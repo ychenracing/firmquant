@@ -37,6 +37,8 @@ L1：直接相关单元/性质测试、最小复现、Ruff、strict mypy、schem
 
 从能证明变化的最低层开始，跨策略、风险、订单、数据库、安全或构建边界时扩大。失败先定位根因，运行失败项及直接受影响检查；相关修复批量完成后再扩验，不逐补丁重跑全矩阵。稳定候选完整验收一次；后续行为、依赖、schema、配置、数据、runner、构建实质变化或发现原证据不足，先局部复验，再对新稳定候选完成适用验收。换消息、代理或交接本身不使证据失效。
 
+中间失败、验收不通过、候选方案被否或假设失效，不等于任务结束。先定位根因并判断原目标在现有约束下是否仍可达；可达则保留有效成果、选择最短合法替代路径继续推进。不得降低验收标准、隐藏失败证据或绕过安全、授权、冻结合同；只有目标已证明不可达或无安全且已授权的动作可继续时才停止。
+
 经济结果只有在 uquant commit、配置、数据 manifest、universe、账户、broker snapshot、as-of、runtime lock 完全一致时可复用；parity 禁止近似断言掩盖差异。新 HEAD 仍须通过适用精确 SHA 检查，不能沿用旧 CI 状态冒充新 HEAD 通过。
 
 工程最终候选至少满足 Python 3.12、`uv sync --frozen`、Ruff、strict mypy、pytest、分支覆盖率 85%、compileall、Bandit、pip-audit、确定性 wheel、secret scan、Broker contract、parity、PAPER/REPLAY E2E 和 restart recovery。纯文档变更检查相关链接、命令与文档合同；指令变更另检查触发、授权和完成边界，不因改指令重算未变的经济结果，但不豁免明确要求的检查。
